@@ -12,6 +12,6 @@ The butterfly diagram is this original algorithm:
 
 Most of the work was figuring out how to setup the compile time constant arrays and how to index into them in parallel.
 
-The implementation itself is the simplest form by constraining to 1D signals and having the imput be forced to be made up of a power of two length. A higher level function could then add padding etc. as a future improvement.
+The implementation itself is the simplest form by constraining to 1D signals and having the input be forced to be made up of a power of two length. A higher level function could then add padding etc. as a future improvement.
 
 Computation-speed-wise I don't think this algorithm will fare badly, I just didn't have time to setup proper benchmarking. I haven't looked at what SOTA algorithms do, this is what came to me over the course of today (yesterday was all puzzle solving to get up to speed).
