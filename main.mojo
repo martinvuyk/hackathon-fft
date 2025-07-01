@@ -7,18 +7,65 @@ from layout.tensor_builder import LayoutTensorBuild as tb
 from math import log2, exp, pi, cos, sin, iota
 from sys import sizeof, argv
 
-from testing import assert_almost_equal
-from _test_values import _get_test_values_8
+
+def fft[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+](
+    output: LayoutTensor[mut=True, out_dtype, out_layout],
+    x: LayoutTensor[mut=False, in_dtype, in_layout],
+    ctx: DeviceContext,
+):
+    constrained[len(in_layout) == 1, "in_layout must have only 1 axis"]()
+    alias length = in_layout.shape[0].value()
+    constrained[
+        out_layout.shape == IntTuple(length, 2),
+        "out_layout shape must be (in_layout.shape[0], 2)",
+    ]()
+    constrained[
+        out_dtype.is_floating_point(), "out_dtype must be floating point"
+    ]()
+    alias stages = UInt(log2(Float64(length)).cast[DType.index]())
+    alias max_threads_per_block = 64
+    alias max_threads_available = 128
+
+    @parameter
+    if length.is_power_of_two():
+
+        @parameter
+        if length <= max_threads_per_block:
+            _intra_block_fft_launch[
+                threads_per_block=length, blocks_per_grid=1
+            ](output, x, ctx)
+        elif length <= max_threads_available:
+            _inter_block_fft[
+                threads_per_block=max_threads_per_block,
+                blocks_per_grid = max_threads_available
+                // max_threads_per_block,
+            ](output, x, ctx)
+        else:
+            constrained[
+                False,
+                "fft for sequences longer than max_threads_available",
+                "is not implemented yet",
+            ]()
+    else:
+        constrained[
+            False,
+            "FFT for non-power-of-two sequence lengths is not implemented yet",
+        ]()
 
 
-fn _get_ordered_items[stages: UInt](out res: InlineArray[UInt, 2**stages]):
+fn _get_ordered_items[length: UInt](out res: InlineArray[UInt, length]):
     """The Butterfly diagram orders indexes by bit-reversed size."""
-    res = InlineArray[UInt, 2**stages](uninitialized=True)
-    values = List[UInt](capacity=2**stages)
-    for i in range(2**stages):
+    res = InlineArray[UInt, length](uninitialized=True)
+    values = List[UInt](capacity=length)
+    for i in range(length):
         values.append(bit_reverse(i))
     sort(values)
-    for i in range(2**stages):
+    for i in range(length):
         res[i] = bit_reverse(values[i])
 
 
@@ -57,193 +104,333 @@ fn _get_twiddle_factors[
             i += 1
 
 
-fn fast_fourier_transform[
+def _intra_block_fft_launch[
     in_dtype: DType,
     out_dtype: DType,
     in_layout: Layout,
     out_layout: Layout,
     *,
     threads_per_block: Int,
-    calc_dtype: DType = DType.float64,
+    blocks_per_grid: Int,
+](
+    output: LayoutTensor[mut=True, out_dtype, out_layout],
+    x: LayoutTensor[mut=False, in_dtype, in_layout],
+    ctx: DeviceContext,
+):
+    # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
+    # so we just calculate the twiddle factors on the cpu at runtime
+    alias length = in_layout.shape[0].value()
+    alias stages = UInt(log2(Float64(length)).cast[DType.index]())
+    var twiddle_factors = _get_twiddle_factors[stages, length, out_dtype]()
+    ctx.enqueue_function[
+        _intra_block_fft_kernel[
+            in_dtype,
+            out_dtype,
+            in_layout,
+            out_layout,
+            threads_per_block=threads_per_block,
+        ]
+    ](
+        output,
+        x,
+        twiddle_factors,
+        grid_dim=blocks_per_grid,
+        block_dim=threads_per_block,
+    )
+
+
+fn _intra_block_fft_kernel[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+    *,
+    threads_per_block: Int,
 ](
     output: LayoutTensor[mut=True, out_dtype, out_layout],
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
     twiddle_factors: InlineArray[
-        ComplexSIMD[calc_dtype, 1], in_layout.shape[0].value() - 1
+        ComplexSIMD[out_dtype, 1], in_layout.shape[0].value() - 1
     ],
 ):
+    """An FFT that assumes `num_threads_per_block == sequence_length` and that
+    there is only one block."""
     constrained[len(in_layout) == 1, "in_layout must have only 1 axis"]()
     alias length = in_layout.shape[0].value()
     constrained[
         length.is_power_of_two(), "input sequence length must be a power of two"
     ]()
     constrained[
-        out_layout.shape == IntTuple(2, length),
-        "out_layout shape must be (2, in_layout.shape[0])",
+        out_layout.shape == IntTuple(length, 2),
+        "out_layout shape must be (in_layout.shape[0], 2)",
     ]()
     constrained[
         out_dtype.is_floating_point(), "out_dtype must be floating point"
     ]()
     constrained[
-        calc_dtype.is_floating_point(), "calc_dtype must be floating point"
+        threads_per_block == length,
+        "threads_per_block must be equal to sequence length",
     ]()
-    # TODO: maybe constraint layout on column major for output write perf.
-    # but it might also be faster the other way around. so find out which
+    # TODO: maybe constraint layout on row major for read write perf.
 
     alias stages = UInt(log2(Float64(length)).cast[DType.index]())
     alias offsets: InlineArray[UInt, stages] = _get_offsets[stages]()
-    alias ordered_items = _get_ordered_items[stages]()
-    alias Complex = ComplexSIMD[calc_dtype, _]
+    alias ordered_items = _get_ordered_items[length]()
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
     # alias twiddle_factors: InlineArray[
-    #     Complex[1], length - 1
-    # ] = _get_twiddle_factors[stages, length, calc_dtype]()
+    #     ComplexSIMD[out_dtype, 1], length - 1
+    # ] = _get_twiddle_factors[stages, length, out_dtype]()
+    _intra_block_fft_kernel_core[
+        stages=stages,
+        length=length,
+        ordered_items_length=length,
+        ordered_items=ordered_items,
+        offsets=offsets,
+        threads_per_block=threads_per_block,
+    ](output, x, twiddle_factors)
 
+
+fn _intra_block_fft_kernel_core[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+    stages: UInt,
+    length: UInt,
+    ordered_items_length: UInt,
+    ordered_items: InlineArray[UInt, ordered_items_length],
+    offsets: InlineArray[UInt, stages],
+    threads_per_block: UInt,
+](
+    output: LayoutTensor[mut=True, out_dtype, out_layout],
+    x: LayoutTensor[mut=False, in_dtype, in_layout],
+    # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
+    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], length - 1],
+):
     global_i = block_dim.x * block_idx.x + thread_idx.x
     local_i = thread_idx.x
     # complex vectors for the frequencies
     shared_f = (
-        tb[calc_dtype]().row_major[2, threads_per_block]().shared().alloc()
+        tb[out_dtype]().row_major[threads_per_block, 2]().shared().alloc()
     )
 
-    # reorder input x(local_i) items to match F(current_item) layout
-    current_item = ordered_items[local_i]
-    shared_f[0, current_item] = x[global_i].cast[calc_dtype]()
-    shared_f[1, current_item] = 0  # imaginary part
-
-    barrier()
+    # reorder input x(global_i) items to match F(current_item) layout
+    current_item = ordered_items[global_i]
+    shared_f[current_item, 0] = x[global_i].cast[out_dtype]()
+    shared_f[current_item, 1] = 0  # imaginary part
 
     @parameter
     for stage in range(stages):
-        next_idx = local_i + offsets[stage]
-        # Run the Danielson-Lanczos Lemma if the current local_i is an "x_0"
-        # line in the butterfly diagram. "x_0" would mean that the given
-        # item is the lhs term that always gets added without any multiplication
-        is_execution_thread = False
-        if next_idx < length:
-            alias value = 2**stage
-            delta = ordered_items[local_i] + value - ordered_items[next_idx]
-            delta_0_reference = (
-                ordered_items[0] + value - ordered_items[offsets[stage]]
-            )
-            # only "x_0" paths get the same delta as the 0th line
-            is_execution_thread = delta == delta_0_reference
-
-        if is_execution_thread:
-            # get the twiddle factor W
-            twiddle_idx = UInt(local_i % 2**stage)
-            # base_idx is the offset to the end of the previous stage
-            alias base_idx: UInt = (2 ** (stage + 1)) // 2 - 1
-            twiddle_factor = twiddle_factors[base_idx + twiddle_idx]
-            twiddle_factor_vec = Complex[shared_f.element_size](
-                twiddle_factor.re, twiddle_factor.im
-            )
-
-            # get the upper and lower paths in the butterfly diagram
-            x_0 = Complex(shared_f[0, local_i], shared_f[1, local_i])
-            x_1 = Complex(shared_f[0, next_idx], shared_f[1, next_idx])
-
-            # f_0 = x_0 + W * x_1
-            res_0 = twiddle_factor_vec.fma(x_1, x_0)
-            shared_f[0, local_i] = res_0.re
-            shared_f[1, local_i] = res_0.im
-            # f_1 = x_0 - W * x_1
-            res_1 = (-twiddle_factor_vec).fma(x_1, x_0)
-            shared_f[0, next_idx] = res_1.re
-            shared_f[1, next_idx] = res_1.im
+        _fft_kernel[
+            out_dtype=out_dtype,
+            out_layout = shared_f.layout,
+            address_space = shared_f.address_space,
+            stages=stages,
+            length=length,
+            ordered_items_length=ordered_items_length,
+            ordered_items=ordered_items,
+            offsets=offsets,
+            stage=stage,
+        ](shared_f, twiddle_factors, local_i)
         barrier()
 
-    output[0, global_i] = shared_f[0, local_i].cast[out_dtype]()
-    output[1, global_i] = shared_f[1, local_i].cast[out_dtype]()
+    output[global_i, 0] = shared_f[local_i, 0]
+    output[global_i, 1] = shared_f[local_i, 1]
 
 
-def main():
-    alias TPB = 8
-    alias SIZE = 8
-    alias BLOCKS_PER_GRID = (1, 1)
-    alias THREADS_PER_BLOCK = (TPB, 1)
-    alias in_dtype = DType.float64
-    alias out_dtype = DType.float64
-    alias in_layout = Layout.row_major(SIZE)
-    alias out_layout = Layout.row_major(2, SIZE)
-    alias calc_dtype = DType.float64
-    alias Complex = ComplexSIMD[calc_dtype, 1]
+fn _fft_kernel[
+    out_dtype: DType,
+    out_layout: Layout,
+    out_origin: MutableOrigin,
+    address_space: AddressSpace,
+    *,
+    stages: UInt,
+    length: UInt,
+    ordered_items_length: UInt,
+    ordered_items: InlineArray[UInt, ordered_items_length],
+    offsets: InlineArray[UInt, stages],
+    stage: UInt,
+](
+    output: LayoutTensor[
+        out_dtype, out_layout, out_origin, address_space=address_space
+    ],
+    # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
+    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], length - 1],
+    local_i: UInt,
+):
+    alias Complex = ComplexSIMD[out_dtype, _]
+    alias pow2 = 2**stage
+    next_idx = local_i + offsets[stage]
+    # Run the Danielson-Lanczos Lemma if the current local_i is an "x_0"
+    # line in the butterfly diagram. "x_0" would mean that the given
+    # item is the lhs term that always gets added without any multiplication
+    is_execution_thread = False
+    if next_idx < length:
+        delta = ordered_items[local_i] + pow2 - ordered_items[next_idx]
+        delta_0_reference = (
+            ordered_items[0] + pow2 - ordered_items[offsets[stage]]
+        )
+        # only "x_0" paths get the same delta as the 0th line
+        is_execution_thread = delta == delta_0_reference
 
-    with DeviceContext() as ctx:
-        out = ctx.enqueue_create_buffer[out_dtype](SIZE * 2).enqueue_fill(0)
-        x = ctx.enqueue_create_buffer[in_dtype](SIZE).enqueue_fill(0)
-        print("----------------------------")
-        print("Buffers")
-        print("----------------------------")
-        for test in _get_test_values_8[calc_dtype]():
-            ref series = test[0]
-            ref expected = test[1]
-            with x.map_to_host() as x_host:
-                for i in range(SIZE):
-                    x_host[i] = series[i]
+    if is_execution_thread:
+        # get the twiddle factor W
+        twiddle_idx = UInt(local_i % pow2)
+        # base_idx is the offset to the end of the previous stage
+        alias base_idx: UInt = (2 ** (stage + 1)) // 2 - 1
+        twiddle_factor = twiddle_factors[base_idx + twiddle_idx]
+        twiddle_factor_vec = Complex[output.element_size](
+            twiddle_factor.re, twiddle_factor.im
+        )
 
-            var out_tensor = LayoutTensor[mut=False, out_dtype, out_layout](
-                out.unsafe_ptr()
-            )
-            var x_tensor = LayoutTensor[mut=False, in_dtype, in_layout](
-                x.unsafe_ptr()
-            )
-            # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
-            # so we just calculate the twiddle factors on the cpu at runtime
-            alias length = in_layout.shape[0].value()
-            alias stages = UInt(log2(Float64(length)).cast[DType.index]())
-            var twiddle_factors = _get_twiddle_factors[
-                stages, length, calc_dtype
-            ]()
-            ctx.enqueue_function[
-                fast_fourier_transform[
-                    in_dtype,
-                    out_dtype,
-                    in_layout,
-                    out_layout,
-                    threads_per_block=TPB,
-                    calc_dtype=calc_dtype,
-                ]
-            ](
-                out_tensor,
-                x_tensor,
-                twiddle_factors,
-                grid_dim=BLOCKS_PER_GRID,
-                block_dim=THREADS_PER_BLOCK,
-            )
+        # get the upper and lower paths in the butterfly diagram
+        x_0 = Complex(output[local_i, 0], output[local_i, 1])
+        x_1 = Complex(output[next_idx, 0], output[next_idx, 1])
 
-            ctx.synchronize()
+        # f_0 = x_0 + W * x_1
+        res_0 = twiddle_factor_vec.fma(x_1, x_0)
+        output[local_i, 0] = res_0.re
+        output[local_i, 1] = res_0.im
+        # f_1 = x_0 - W * x_1
+        res_1 = (-twiddle_factor_vec).fma(x_1, x_0)
+        output[next_idx, 0] = res_1.re
+        output[next_idx, 1] = res_1.im
 
-            with out.map_to_host() as out_host:
-                print("out:", out_host)
-                print("expected:", end=" ")
-                first = True
-                # gather all real parts and then the imaginary parts
-                for item in expected:
-                    if not first:
-                        print(",", item.re, end="")
-                    else:
-                        first = False
-                        print("[", end="")
-                        print(item.re, end="")
-                for item in expected:
-                    if not first:
-                        print(",", item.im, end="")
-                print("]")
-                for i in range(SIZE):
-                    assert_almost_equal(
-                        out_host[i],
-                        expected[i].re.cast[out_dtype](),
-                        atol=1e-3,
-                        rtol=1e-5,
-                    )
-                    assert_almost_equal(
-                        out_host[SIZE + i],
-                        expected[i].im.cast[out_dtype](),
-                        atol=1e-3,
-                        rtol=1e-5,
-                    )
-        print("----------------------------")
-        print("Tests passed")
-        print("----------------------------")
+
+fn _inter_block_fft_kernel[
+    out_dtype: DType,
+    out_layout: Layout,
+    *,
+    threads_per_block: Int,
+    stages: UInt,
+    length: UInt,
+    ordered_items: InlineArray[UInt, length],
+    offsets: InlineArray[UInt, stages],
+    skipped_stages: UInt = 0,
+](
+    output: LayoutTensor[mut=True, out_dtype, out_layout],
+    # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
+    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], length - 1],
+):
+    """An FFT that assumes `num_threads_per_block * amount_blocks ==
+    sequence_length`.
+    """
+    alias Complex = ComplexSIMD[out_dtype, _]
+
+    global_i = block_dim.x * block_idx.x + thread_idx.x
+
+    @parameter
+    for stage in range(skipped_stages, stages):
+        _fft_kernel[
+            out_dtype=out_dtype,
+            out_layout = output.layout,
+            address_space = output.address_space,
+            stages=stages,
+            length=length,
+            ordered_items_length=length,
+            ordered_items=ordered_items,
+            offsets=offsets,
+            stage=stage,
+        ](output, twiddle_factors, global_i)
+        barrier()
+
+
+def _inter_block_fft[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout, //,
+    *,
+    threads_per_block: Int,
+    blocks_per_grid: Int,
+](
+    output: LayoutTensor[mut=True, out_dtype, out_layout],
+    x: LayoutTensor[mut=False, in_dtype, in_layout],
+    ctx: DeviceContext,
+):
+    """An FFT that assumes `num_threads_per_block * amount_blocks ==
+    sequence_length`.
+    """
+    constrained[len(in_layout) == 1, "in_layout must have only 1 axis"]()
+    alias length = in_layout.shape[0].value()
+    constrained[
+        length.is_power_of_two(), "input sequence length must be a power of two"
+    ]()
+    constrained[
+        out_layout.shape == IntTuple(length, 2),
+        "out_layout shape must be (in_layout.shape[0], 2)",
+    ]()
+    constrained[
+        out_dtype.is_floating_point(), "out_dtype must be floating point"
+    ]()
+    # TODO: maybe constraint layout on row major for read write perf.
+    alias stages = UInt(log2(Float64(length)).cast[DType.index]())
+    alias ordered_items = _get_ordered_items[length]()
+    alias offsets: InlineArray[UInt, stages] = _get_offsets[stages]()
+    # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
+    # so we just calculate the twiddle factors on the cpu at runtime
+    var twiddle_factors = _get_twiddle_factors[stages, length, out_dtype]()
+    alias stages_limit = UInt(
+        log2(Float64(threads_per_block)).cast[DType.index]()
+    )
+
+    # run the _intra_block_fft_kernel over the first stages
+    # handles initial reordering as well
+
+    @parameter
+    fn _intra_block_fft_kernel_wrapper[
+        in_dtype: DType,
+        out_dtype: DType,
+        in_layout: Layout,
+        out_layout: Layout,
+    ](
+        output: LayoutTensor[mut=True, out_dtype, out_layout],
+        x: LayoutTensor[mut=False, in_dtype, in_layout],
+        # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
+        _twiddle_factors: InlineArray[
+            ComplexSIMD[out_dtype, 1], threads_per_block - 1
+        ],
+    ):
+        alias offsets = _get_offsets[stages_limit]()
+
+        _intra_block_fft_kernel_core[
+            threads_per_block=threads_per_block,
+            stages=stages_limit,
+            length=threads_per_block,
+            ordered_items_length=length,
+            ordered_items=ordered_items,
+            offsets=offsets,
+        ](output, x, _twiddle_factors)
+
+    var limited_twiddle_factors = _get_twiddle_factors[
+        stages_limit, threads_per_block, out_dtype
+    ]()
+    ctx.enqueue_function[
+        _intra_block_fft_kernel_wrapper[
+            in_dtype, out_dtype, in_layout, out_layout
+        ]
+    ](
+        output,
+        limited_twiddle_factors,
+        grid_dim=blocks_per_grid,
+        block_dim=threads_per_block,
+    )
+    # run the _inter_block_fft_kernel
+    ctx.enqueue_function[
+        _inter_block_fft_kernel[
+            out_dtype,
+            out_layout,
+            threads_per_block=threads_per_block,
+            skipped_stages=stages_limit,
+            stages=stages,
+            length=length,
+            ordered_items=ordered_items,
+            offsets=offsets,
+        ]
+    ](
+        output,
+        twiddle_factors,
+        grid_dim=blocks_per_grid,
+        block_dim=threads_per_block,
+    )
