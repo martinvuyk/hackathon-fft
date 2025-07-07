@@ -84,7 +84,3 @@ def test_intra_block_fft():
         print("----------------------------")
         print("Tests passed")
         print("----------------------------")
-
-
-def main():
-    test_intra_block_fft()
