@@ -4,7 +4,7 @@ from gpu import thread_idx, block_idx, block_dim, barrier
 from gpu.host import DeviceContext
 from layout import Layout, LayoutTensor, IntTuple
 from layout.tensor_builder import LayoutTensorBuild as tb
-from math import log2, exp, pi, cos, sin, iota
+from math import log2, exp, pi, cos, sin, iota, sqrt
 from sys import sizeof, argv
 from sys.info import is_gpu
 
@@ -118,7 +118,7 @@ def _intra_block_fft_launch[
     # so we just calculate the twiddle factors on the cpu at runtime
     alias length = in_layout.shape[0].value()
     alias stages = UInt(log2(Float64(length)).cast[DType.index]())
-    var twiddle_factors = _get_twiddle_factors[stages, length, out_dtype]()
+    var twiddle_factors = _get_pow2_twiddle_factors[stages, length, out_dtype]()
     ctx.enqueue_function[
         _intra_block_fft_kernel[
             in_dtype,
@@ -194,7 +194,7 @@ fn _intra_block_fft_kernel_core[
     if do_rfft:
         shared_f[current_item, 0] = x[global_i].cast[out_dtype]()
         # NOTE: filling the imaginary part with 0 is not necessary
-        # because the _radix_2n_fft_kernel already sets it to 0
+        # because the _radix_2_fft_kernel already sets it to 0
         # when the stage == 0
     else:
         alias msg = "in_layout must be complex valued"
@@ -207,7 +207,7 @@ fn _intra_block_fft_kernel_core[
 
     @parameter
     for stage in range(stage_start, stage_end):
-        _radix_2n_fft_kernel[
+        _radix_2_fft_kernel[
             out_dtype=out_dtype,
             out_layout = shared_f.layout,
             address_space = shared_f.address_space,
@@ -247,7 +247,7 @@ def _inter_block_fft_launch[
     alias stages = UInt(log2(Float64(length)).cast[DType.index]())
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
     # so we just calculate the twiddle factors on the cpu at runtime
-    var twiddle_factors = _get_twiddle_factors[stages, length, out_dtype]()
+    var twiddle_factors = _get_pow2_twiddle_factors[stages, length, out_dtype]()
 
     ctx.enqueue_function[
         _inter_block_fft[
@@ -329,7 +329,7 @@ fn _inter_block_fft_kernel[
 
     @parameter
     for stage in range(stage_start, stage_end):
-        _radix_2n_fft_kernel[
+        _radix_2_fft_kernel[
             out_dtype=out_dtype,
             out_layout = output.layout,
             address_space = output.address_space,
@@ -346,7 +346,7 @@ fn _inter_block_fft_kernel[
 # ===-----------------------------------------------------------------------===#
 
 
-fn _radix_2n_fft_kernel[
+fn _radix_2_fft_kernel[
     out_dtype: DType,
     out_layout: Layout,
     out_origin: MutableOrigin,
@@ -481,27 +481,26 @@ fn _radix_3_fft_kernel[
     # alias idx_scalar = Scalar[_get_dtype[length * 3]()]
     # alias offset = idx_scalar(3**stage)
     # var curr_idx = idx_scalar(local_i)
-    # if (curr_idx // offset) % 3 != 0:  # execution thread
+    # if (curr_idx // offset) % idx_scalar(3) != 0:  # execution thread
     #     return
 
     # alias Co = ComplexSIMD[out_dtype, output.element_size]
     # alias `√3` = sqrt(Scalar[out_dtype](3))
-    # alias Ni = highest power of 3 that can divide the total length
-    # alias Nx = length % Ni
+    # alias Nx = offset
+    # var n = curr_idx
 
-    # var n = (curr_idx % Nx) + (local_i // Nx) * Ni
-    # var x_0 = Co(output[n, 0], output[n, 1])
-    # var x_1 = Co(output[n + Nx, 0], output[n + Nx, 1])
-    # var x_2 = Co(output[n + 2 * Nx, 0], output[n + 2 * Nx, 1])
+    # var x_0 = Co(output[UInt(n), 0], output[UInt(n), 1])
+    # var x_1 = Co(output[UInt(n + Nx), 0], output[UInt(n + Nx), 1])
+    # var x_2 = Co(output[UInt(n + 2 * Nx), 0], output[UInt(n + 2 * Nx), 1])
 
-    # var a_0 = -(x_1 + x_2)
-    # var a_1 = x_1 - x_2
-    # output[n, 0] = x_0.re + x_1.re + x_2.re
-    # output[n, 1] = x_0.im + x_1.im + x_2.im
-    # output[n + Nx, 0] = (a_1.im.fma(`√3`, a_0.re)).fma(0.5, x_0.re)
-    # output[n + Nx, 1] = (a_1.re.fma(-`√3`, a_0.im)).fma(0.5, x_0.im)
-    # output[n + 2 * Nx, 0] = (a_1.im.fma(-`√3`, a_0.re)).fma(0.5, x_0.re)
-    # output[n + 2 * Nx, 1] = (a_1.re.fma(`√3`, a_0.im)).fma(0.5, x_0.im)
+    # var v_0 = -(x_1 + x_2)
+    # var v_1 = x_1 - x_2
+    # output[UInt(n), 0] = x_0.re + x_1.re + x_2.re
+    # output[UInt(n), 1] = x_0.im + x_1.im + x_2.im
+    # output[UInt(n + Nx), 0] = (v_1.im.fma(`√3`, v_0.re)).fma(0.5, x_0.re)
+    # output[UInt(n + Nx), 1] = (v_1.re.fma(-`√3`, v_0.im)).fma(0.5, x_0.im)
+    # output[UInt(n + 2 * Nx), 0] = (v_1.im.fma(-`√3`, v_0.re)).fma(0.5, x_0.re)
+    # output[UInt(n + 2 * Nx), 1] = (v_1.re.fma(`√3`, v_0.im)).fma(0.5, x_0.im)
     ...
 
 
@@ -525,24 +524,23 @@ fn _radix_5_fft_kernel[
     # alias idx_scalar = Scalar[_get_dtype[length * 5]()]
     # alias offset = idx_scalar(5**stage)
     # var curr_idx = idx_scalar(local_i)
-    # if (curr_idx // offset) % 5 != 0:  # execution thread
+    # if (curr_idx // offset) % idx_scalar(5) != 0:  # execution thread
     #     return
 
     # alias Co = ComplexSIMD[out_dtype, output.element_size]
-    # alias Ni = highest power of 5 that can divide the total length
-    # alias Nx = length % Ni
-    # var n = (curr_idx % Nx) + (local_i // Nx) * Ni
+    # alias Nx = offset
+    # var n = curr_idx
 
     # TODO: make these numbers more exact
-    # alias W1_5 = 0.30901699437494
-    # alias W2_5 = 0.95105651629515
-    # alias W3_5 = 0.80901699437494
-    # alias W4_5 = 0.58778525229247
-    # var x_0 = Co(output[n, 0], output[n, 1])
-    # var x_1 = Co(output[n + Nx, 0], output[n + Nx, 1])
-    # var x_2 = Co(output[n + 2 * Nx, 0], output[n + 2 * Nx, 1])
-    # var x_3 = Co(output[n + 3 * Nx, 0], output[n + 3 * Nx, 1])
-    # var x_4 = Co(output[n + 4 * Nx, 0], output[n + 4 * Nx, 1])
+    # alias W1_5 = Scalar[out_dtype](0.30901699437494)
+    # alias W2_5 = Scalar[out_dtype](0.95105651629515)
+    # alias W3_5 = Scalar[out_dtype](0.80901699437494)
+    # alias W4_5 = Scalar[out_dtype](0.58778525229247)
+    # var x_0 = Co(output[UInt(n), 0], output[UInt(n), 1])
+    # var x_1 = Co(output[UInt(n + Nx), 0], output[UInt(n + Nx), 1])
+    # var x_2 = Co(output[UInt(n + 2 * Nx), 0], output[UInt(n + 2 * Nx), 1])
+    # var x_3 = Co(output[UInt(n + 3 * Nx), 0], output[UInt(n + 3 * Nx), 1])
+    # var x_4 = Co(output[UInt(n + 4 * Nx), 0], output[UInt(n + 4 * Nx), 1])
 
     # var v_1 = W1_5 * (x_1 + x_4) - W3_5 * (x_2 + x_3)
     # var v_2 = W3_5 * (x_1 + x_4) - W1_5 * (x_2 + x_3)
@@ -551,19 +549,19 @@ fn _radix_5_fft_kernel[
     # x_0 = x_0 + x_1 + x_2 + x_3 + x_4
     # x_1 = x_0 + v_1 + Co(v_4.im, -v_4.re)
     # x_2 = x_0 - v_2 + Co(v_3.im, -v_3.re)
-    # x_3 = x_0 - v_2 + Co(-v_3.im, +v_3.re)
-    # x_4 = x_0 + v_1 + Co(-v_4.im, +v_4.re)
+    # x_3 = x_0 - v_2 + Co(-v_3.im, v_3.re)
+    # x_4 = x_0 + v_1 + Co(-v_4.im, v_4.re)
 
-    # output[n, 0] = x_0.re
-    # output[n, 1] = x_0.im
-    # output[n + Nx, 0] = x_1.re
-    # output[n + Nx, 1] = x_1.im
-    # output[n + 2 * Nx, 0] = x_2.re
-    # output[n + 2 * Nx, 1] = x_2.im
-    # output[n + 3 * Nx, 0] = x_3.re
-    # output[n + 3 * Nx, 1] = x_3.im
-    # output[n + 4 * Nx, 0] = x_4.re
-    # output[n + 4 * Nx, 1] = x_4.im
+    # output[UInt(n), 0] = x_0.re
+    # output[UInt(n), 1] = x_0.im
+    # output[UInt(n + Nx), 0] = x_1.re
+    # output[UInt(n + Nx), 1] = x_1.im
+    # output[UInt(n + 2 * Nx), 0] = x_2.re
+    # output[UInt(n + 2 * Nx), 1] = x_2.im
+    # output[UInt(n + 3 * Nx), 0] = x_3.re
+    # output[UInt(n + 3 * Nx), 1] = x_3.im
+    # output[UInt(n + 4 * Nx), 0] = x_4.re
+    # output[UInt(n + 4 * Nx), 1] = x_4.im
     ...
 
 
@@ -587,35 +585,34 @@ fn _radix_7_fft_kernel[
     # alias idx_scalar = Scalar[_get_dtype[length * 7]()]
     # alias offset = idx_scalar(7**stage)
     # var curr_idx = idx_scalar(local_i)
-    # if (curr_idx // offset) % 7 != 0:  # execution thread
+    # if (curr_idx // offset) % idx_scalar(7) != 0:  # execution thread
     #     return
 
     # alias Co = ComplexSIMD[out_dtype, output.element_size]
-    # alias Ni = highest power of 7 that can divide the total length
-    # alias Nx = length % Ni
-    # var n = (curr_idx % Nx) + (curr_idx // Nx) * Ni
+    # alias Nx = offset
+    # var n = curr_idx
 
-    # TODO: make these numbers more exact
-    # alias W1_7 = 0.62348980185873
-    # alias W2_7 = 0.78183148246802
-    # alias W3_7 = 0.22252093395631
-    # alias W4_7 = 0.97492791218182
-    # alias W5_7 = 0.90096886790241
-    # alias W6_7 = 0.43388373911755
-    # var x_0 = Co(output[n, 0], output[n, 1])
-    # var x_1 = Co(output[n + Nx, 0], output[n + Nx, 1])
-    # var x_2 = Co(output[n + 2 * Nx, 0], output[n + 2 * Nx, 1])
-    # var x_3 = Co(output[n + 3 * Nx, 0], output[n + 3 * Nx, 1])
-    # var x_4 = Co(output[n + 4 * Nx, 0], output[n + 4 * Nx, 1])
-    # var x_5 = Co(output[n + 5 * Nx, 0], output[n + 5 * Nx, 1])
-    # var x_6 = Co(output[n + 6 * Nx, 0], output[n + 6 * Nx, 1])
+    # # TODO: make these numbers more exact
+    # alias W1_7 = Scalar[out_dtype](0.62348980185873)
+    # alias W2_7 = Scalar[out_dtype](0.78183148246802)
+    # alias W3_7 = Scalar[out_dtype](0.22252093395631)
+    # alias W4_7 = Scalar[out_dtype](0.97492791218182)
+    # alias W5_7 = Scalar[out_dtype](0.90096886790241)
+    # alias W6_7 = Scalar[out_dtype](0.43388373911755)
+    # var x_0 = Co(output[UInt(n), 0], output[UInt(n), 1])
+    # var x_1 = Co(output[UInt(n + Nx), 0], output[UInt(n + Nx), 1])
+    # var x_2 = Co(output[UInt(n + 2 * Nx), 0], output[UInt(n + 2 * Nx), 1])
+    # var x_3 = Co(output[UInt(n + 3 * Nx), 0], output[UInt(n + 3 * Nx), 1])
+    # var x_4 = Co(output[UInt(n + 4 * Nx), 0], output[UInt(n + 4 * Nx), 1])
+    # var x_5 = Co(output[UInt(n + 5 * Nx), 0], output[UInt(n + 5 * Nx), 1])
+    # var x_6 = Co(output[UInt(n + 6 * Nx), 0], output[UInt(n + 6 * Nx), 1])
 
-    # v_1 = W7_A * (x_1 + x_6) - W7_C * (x_2 + x_5) - W7_E * (x_3 + x_4)
-    # v_2 = W7_C * (x_1 + x_6) + W7_E * (x_2 + x_5) - W7_A * (x_3 + x_4)
-    # v_3 = W7_E * (x_1 + x_6) - W7_A * (x_2 + x_5) + W7_C * (x_3 + x_4)
-    # v_4 = W7_B * (x_1 - x_6) + W7_D * (x_2 - x_5) + W7_F * (x_3 - x_4)
-    # v_5 = W7_D * (x_1 - x_6) - W7_F * (x_2 - x_5) - W7_B * (x_3 - x_4)
-    # v_6 = W7_F * (x_1 - x_6) - W7_B * (x_2 - x_5) + W7_D * (x_3 - x_4)
+    # var v_1 = W1_7 * (x_1 + x_6) - W3_7 * (x_2 + x_5) - W5_7 * (x_3 + x_4)
+    # var v_2 = W3_7 * (x_1 + x_6) + W5_7 * (x_2 + x_5) - W1_7 * (x_3 + x_4)
+    # var v_3 = W5_7 * (x_1 + x_6) - W1_7 * (x_2 + x_5) + W3_7 * (x_3 + x_4)
+    # var v_4 = W2_7 * (x_1 - x_6) + W4_7 * (x_2 - x_5) + W5_7 * (x_3 - x_4)
+    # var v_5 = W4_7 * (x_1 - x_6) - W5_7 * (x_2 - x_5) - W2_7 * (x_3 - x_4)
+    # var v_6 = W5_7 * (x_1 - x_6) - W2_7 * (x_2 - x_5) + W4_7 * (x_3 - x_4)
     # x_0 = x_0 + x_1 + x_2 + x_3 + x_4 + x_5 + x_6
     # x_1 = x_0 + v_1 + Co(v_4.im, -v_4.re)
     # x_2 = x_0 - v_2 + Co(v_5.im, -v_5.re)
@@ -624,21 +621,82 @@ fn _radix_7_fft_kernel[
     # x_5 = x_0 - v_2 + Co(-v_5.im, v_5.re)
     # x_6 = x_0 + v_1 + Co(-v_4.im, v_4.re)
 
-    # output[n, 0] = x_0.re
-    # output[n, 1] = x_0.im
-    # output[n + Nx, 0] = x_1.re
-    # output[n + Nx, 1] = x_1.im
-    # output[n + 2 * Nx, 0] = x_2.re
-    # output[n + 2 * Nx, 1] = x_2.im
-    # output[n + 3 * Nx, 0] = x_3.re
-    # output[n + 3 * Nx, 1] = x_3.im
-    # output[n + 4 * Nx, 0] = x_4.re
-    # output[n + 4 * Nx, 1] = x_4.im
-    # output[n + 5 * Nx, 0] = x_5.re
-    # output[n + 5 * Nx, 1] = x_5.im
-    # output[n + 6 * Nx, 0] = x_6.re
-    # output[n + 6 * Nx, 1] = x_6.im
+    # output[UInt(n), 0] = x_0.re
+    # output[UInt(n), 1] = x_0.im
+    # output[UInt(n + Nx), 0] = x_1.re
+    # output[UInt(n + Nx), 1] = x_1.im
+    # output[UInt(n + 2 * Nx), 0] = x_2.re
+    # output[UInt(n + 2 * Nx), 1] = x_2.im
+    # output[UInt(n + 3 * Nx), 0] = x_3.re
+    # output[UInt(n + 3 * Nx), 1] = x_3.im
+    # output[UInt(n + 4 * Nx), 0] = x_4.re
+    # output[UInt(n + 4 * Nx), 1] = x_4.im
+    # output[UInt(n + 5 * Nx), 0] = x_5.re
+    # output[UInt(n + 5 * Nx), 1] = x_5.im
+    # output[UInt(n + 6 * Nx), 0] = x_6.re
+    # output[UInt(n + 6 * Nx), 1] = x_6.im
     ...
+
+
+fn _radix_n_fft_kernel[
+    out_dtype: DType,
+    out_layout: Layout,
+    out_origin: MutableOrigin,
+    address_space: AddressSpace,
+    *,
+    stages: UInt,
+    length: UInt,
+    stage: UInt,
+    do_rfft: Bool,
+    base: UInt,
+](
+    output: LayoutTensor[
+        out_dtype, out_layout, out_origin, address_space=address_space
+    ],
+    local_i: UInt,
+    # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
+    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], length - 1],
+):
+    """Basically a generic Cooley-Tukey algorithm."""
+    constrained[length >= base, "length must be >= base"]()
+    alias idx_scalar = Scalar[_get_dtype[length * base]()]
+    alias offset = idx_scalar(base**stage)
+    var curr_idx = idx_scalar(local_i)
+    if (curr_idx // offset) % idx_scalar(base) != 0:  # execution thread
+        return
+
+    alias Co = ComplexSIMD[out_dtype, output.element_size]
+    var x = InlineArray[Co, base](uninitialized=True)
+
+    @parameter
+    for i in range(base):
+        var idx = UInt(curr_idx + i * offset)
+        x[i] = Co(output[idx, 0], output[idx, 1])
+
+    @parameter
+    for i in range(base):
+        # W0_N is always Co(1, 0)
+        var x_i = Co(x[0].re + x[1].re, x[0].im)
+
+        @parameter
+        for j in range(2, base):
+            alias twiddle_idx = (j - 2) % (length - 2)
+            alias pi_multiple = 2 * (twiddle_idx + 1) / length
+
+            @parameter
+            if pi_multiple == 0.5:  # Co(0, -1)
+                x_i = Co(x_i.im, -x_i.re)
+            elif pi_multiple == 1:  # Co(-1, 0)
+                x_i = Co(x_i.re - x[j].re, x_i.im)
+            elif pi_multiple == 1.5:  # Co(0, 1)
+                x_i = Co(-x_i.im, x_i.re)
+            else:
+                var twf = twiddle_factors[twiddle_idx + (j - 1) * offset]
+                x_i = Co(twf.re, twf.im).fma(x[j], x_i)
+
+        var idx = UInt(curr_idx + i * offset)
+        output[idx, 0] = x_i.re
+        output[idx, 1] = x_i.im
 
 
 # ===-----------------------------------------------------------------------===#
@@ -681,7 +739,7 @@ fn _get_ordered_items[
         res[i] = bit_reverse(values[i])
 
 
-fn _get_twiddle_factors[
+fn _get_pow2_twiddle_factors[
     stages: UInt, length: UInt, dtype: DType
 ](out res: InlineArray[ComplexSIMD[dtype, 1], length - 1]):
     """Twiddle factors are stored contiguously in memory but the
@@ -700,18 +758,13 @@ fn _get_twiddle_factors[
     for N in [2**i for i in range(1, stages + 1)]:
         for n in range(N // 2):
             # exp((-j * 2 * pi * n) / N)
-            if n == 0:
-                # TODO: this can be redesigned to skip over C(1, 0) and
-                # calculate twiddle factors only for the last stage and
-                # indexing into them thus using length // 2 -1 size
-                # instead of length -1
-                res[i] = C(1, 0)
-            if (2 * n) / N == 0.5:
-                res[i] = C(0, -1)
-            else:
-                theta = Scalar[dtype]((-2 * pi * n) / N)
-                # TODO: this could be more generic using fputils
-                res[i] = C(cos(theta).__round__(15), sin(theta).__round__(15))
+            # TODO: this can be redesigned to skip over C(1, 0) and
+            # calculate twiddle factors only for the last stage and
+            # indexing into them thus using length // 2 -1 size
+            # instead of length -1
+            theta = Scalar[dtype]((-2 * pi * n) / N)
+            # TODO: this could be more generic using fputils
+            res[i] = C(cos(theta).__round__(15), sin(theta).__round__(15))
             i += 1
 
 
