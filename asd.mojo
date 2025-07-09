@@ -9,15 +9,14 @@ from sys import sizeof, argv
 from sys.info import is_gpu
 
 
-fn _get_twiddle_factors[
-    stages: UInt, length: UInt, dtype: DType, base: UInt
-](out res: InlineArray[ComplexSIMD[dtype, 1], length - 2]):
+fn _get_last_twiddle_factors[
+    length: UInt, dtype: DType, base: UInt
+](out res: InlineArray[ComplexSIMD[dtype, 1], length - 1]):
+    """Get the twiddle factors for the last stage."""
     alias C = ComplexSIMD[dtype, 1]
     res = __type_of(res)(uninitialized=True)
     alias N = length
-    # for N in [base**i for i in range(1, stages + 1)]:
-    #     for n in range(N // base):
-    for n in range(1, N - 1):
+    for n in range(1, N):
         # exp((-j * 2 * pi * n) / N)
         theta = Scalar[dtype]((-2 * pi * n) / N)
         # TODO: this could be more generic using fputils
@@ -26,7 +25,7 @@ fn _get_twiddle_factors[
 
 
 fn main():
-    alias stages = 4
-    alias length = 16
+    alias stages = 3
+    alias length = 8
     alias out_dtype = DType.float64
-    _ = _get_twiddle_factors[stages, length, out_dtype, 2]()
+    _ = _get_last_twiddle_factors[length, out_dtype, 2]()
