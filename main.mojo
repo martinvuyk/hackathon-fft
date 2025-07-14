@@ -5,7 +5,6 @@ from gpu.host import DeviceContext
 from layout import Layout, LayoutTensor, IntTuple
 from layout.tensor_builder import LayoutTensorBuild as tb
 from math import log2, exp, pi, cos, sin, iota, sqrt
-from math.math import _log_base
 from sys import sizeof, argv
 from sys.info import is_gpu
 
@@ -245,7 +244,7 @@ def _intra_block_fft_launch_radix_n[
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
     # so we just calculate the twiddle factors on the cpu at runtime
     alias length = in_layout.shape[0].value()
-    alias stages = UInt(_log_base[base](Float64(length)).cast[DType.index]())
+    alias stages = _log_mod[base](length)[0]
     var twiddle_factors = _get_last_twiddle_factors[length, out_dtype, base]()
     ctx.enqueue_function[
         _intra_block_fft_kernel_radix_n[
@@ -284,7 +283,8 @@ fn _intra_block_fft_kernel_radix_n[
     """An FFT that assumes `num_threads_per_block == sequence_length` and that
     there is only one block."""
     alias length = in_layout.shape[0].value()
-    alias stages = UInt(_log_base[base](Float64(length)).cast[DType.index]())
+    alias stages = _log_mod[base](length)[0]
+    print("TOTAL STAGES:", stages)
     _intra_block_fft_kernel_core_radix_n[
         stages=stages,
         length=length,
@@ -837,22 +837,111 @@ fn _radix_n_fft_kernel[
             else:
                 alias stage_length = base ** (stage + 1)
                 alias ratio = length // stage_length
-                var twiddle_idx = (idx % stage_length) * ratio
+                alias is_even = length % 2 == 0  # avoid evaluating for uneven
+                var twiddle_idx = (
+                    (idx + (j - 1) * offset) % stage_length
+                ) * ratio
 
                 if twiddle_idx == 0:  # Co(1, 0)
+                    print(
+                        "stage:",
+                        stage,
+                        "local_i:",
+                        local_i,
+                        "idx:",
+                        idx,
+                        "i:",
+                        i,
+                        "j:",
+                        j,
+                        "twiddle_idx:",
+                        -1,
+                        "twf:",
+                        1.0,
+                        0.0,
+                    )
                     x_i.re += x[j].re
                     x_i.re += x[j].im
-                elif 4 * twiddle_idx == length:  # Co(0, -1)
-                    x_i.re += x[j].im
-                    x_i.im += -x[j].re
-                elif 2 * twiddle_idx == length:  # Co(-1, 0)
-                    x_i.re += -x[j].re
-                    x_i.im += -x[j].im
-                elif 4 * twiddle_idx == 3 * length:  # Co(0, 1)
-                    x_i.re += -x[j].im
-                    x_i.im += x[j].re
+                    # elif is_even and 4 * twiddle_idx == length:  # Co(0, -1)
+                    #     print(
+                    #         "stage:",
+                    #         stage,
+                    #         "local_i:",
+                    #         local_i,
+                    #         "idx:",
+                    #         idx,
+                    #         "i:",
+                    #         i,
+                    #         "j:",
+                    #         j,
+                    #         "twiddle_idx:",
+                    #         twiddle_idx - 1,
+                    #         "twf:",
+                    #         0.0,
+                    #         -1.0,
+                    #     )
+                    #     x_i.re += x[j].im
+                    #     x_i.im += -x[j].re
+                    # elif is_even and 2 * twiddle_idx == length:  # Co(-1, 0)
+                    #     print(
+                    #         "stage:",
+                    #         stage,
+                    #         "local_i:",
+                    #         local_i,
+                    #         "idx:",
+                    #         idx,
+                    #         "i:",
+                    #         i,
+                    #         "j:",
+                    #         j,
+                    #         "twiddle_idx:",
+                    #         twiddle_idx - 1,
+                    #         "twf:",
+                    #         -1.0,
+                    #         0.0,
+                    #     )
+                    #     x_i.re += -x[j].re
+                    #     x_i.im += -x[j].im
+                    # elif is_even and 4 * twiddle_idx == 3 * length:  # Co(0, 1)
+                    #     print(
+                    #         "stage:",
+                    #         stage,
+                    #         "local_i:",
+                    #         local_i,
+                    #         "idx:",
+                    #         idx,
+                    #         "i:",
+                    #         i,
+                    #         "j:",
+                    #         j,
+                    #         "twiddle_idx:",
+                    #         twiddle_idx - 1,
+                    #         "twf:",
+                    #         0.0,
+                    #         1.0,
+                    #     )
+
+                    #     x_i.re += -x[j].im
+                    #     x_i.im += x[j].re
                 else:
                     var twf = twiddle_factors[twiddle_idx - 1]
+                    print(
+                        "stage:",
+                        stage,
+                        "local_i:",
+                        local_i,
+                        "idx:",
+                        idx,
+                        "i:",
+                        i,
+                        "j:",
+                        j,
+                        "twiddle_idx:",
+                        twiddle_idx - 1,
+                        "twf:",
+                        twf.re,
+                        twf.im,
+                    )
                     x_i = Co(twf.re, twf.im).fma(x[j], x_i)
 
         output[UInt(idx), 0] = x_i.re
@@ -951,8 +1040,31 @@ fn _get_last_twiddle_factors[
         res[n - 1] = C(cos(theta).__round__(15), sin(theta).__round__(15))
 
 
-def main():
-    from tests import test_intra_block_radix_2, test_intra_block_radix_n
+fn _log_mod[base: UInt](x: UInt) -> (UInt, UInt):
+    """Get the maximum exponent of base that fully divides x and the
+    remainder.
+    """
+    if x % base != 0:
+        return 0, x
+    ref log_res = _log_mod[base](x // base)
+    return log_res[0] + 1, log_res[1]
 
-    test_intra_block_radix_2()
-    test_intra_block_radix_n()
+
+def main():
+    from tests import (
+        # test_intra_block_radix_2_with_8_samples,
+        # test_intra_block_radix_n_with_8_samples,
+        test_intra_block_radix_2_with_4_samples,
+        test_intra_block_radix_n_with_4_samples,
+    )
+
+    # test_intra_block_radix_2_with_8_samples()
+    # @parameter
+    # for base in [2, 8]:
+    #     test_intra_block_radix_n_with_8_samples[base]()
+    # @parameter
+    # for base in [2, 4]:
+    #     test_intra_block_radix_n_with_4_samples[base]()
+    # test_intra_block_radix_n_with_4_samples[2]()
+    test_intra_block_radix_2_with_4_samples()
+    # test_intra_block_radix_n_with_4_samples[2]()

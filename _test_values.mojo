@@ -77,3 +77,70 @@ fn _get_test_values_8[
             ),
         ),
     ]
+
+
+fn _get_test_values_4[
+    complex_dtype: DType
+](out res: List[Tuple[List[Int], List[ComplexSIMD[complex_dtype, 1]]]]):
+    """Get the series on the lhs, and the expected complex values on rhs.
+
+    Notes:
+        These values are only for testing against series with length 4.
+    """
+    alias Complex = ComplexSIMD[complex_dtype, 1]
+    res = [
+        (
+            List(0, 0, 0, 0),
+            List(
+                Complex(0),
+                Complex(0),
+                Complex(0),
+                Complex(0),
+            ),
+        ),
+        (
+            List(1, 0, 1, 0),
+            List(
+                Complex(2),
+                Complex(0),
+                Complex(2),
+                Complex(0),
+            ),
+        ),
+        (
+            List(1, -1, 1, -1),
+            List(
+                Complex(0),
+                Complex(0),
+                Complex(4),
+                Complex(0),
+            ),
+        ),
+        (
+            List(18, 7, 29, 27),
+            List(
+                Complex(81, 0),
+                Complex(-11, 20),
+                Complex(13, 0),
+                Complex(-11, -20),
+            ),
+        ),
+        (
+            List(4, 8, 15, 16),
+            List(
+                Complex(43, 0),
+                Complex(-11, 8),
+                Complex(5, 0),
+                Complex(-11, -8),
+            ),
+        ),
+        (
+            List(5, 4, 3, 2),
+            List(
+                Complex(14, 0),
+                Complex(2, -2),
+                Complex(2, 0),
+                Complex(2, 2),
+            ),
+        ),
+    ]
