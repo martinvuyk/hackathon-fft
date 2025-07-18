@@ -235,33 +235,42 @@ def _intra_block_fft_launch_radix_n[
     *,
     threads_per_block: Int,
     blocks_per_grid: Int,
-    base: UInt,
 ](
     output: LayoutTensor[mut=True, out_dtype, out_layout],
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     ctx: DeviceContext,
 ):
-    # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
-    # so we just calculate the twiddle factors on the cpu at runtime
     alias length = in_layout.shape[0].value()
-    alias stages = _log_mod[base](length)[0]
-    var twiddle_factors = _get_last_twiddle_factors[length, out_dtype, base]()
-    ctx.enqueue_function[
-        _intra_block_fft_kernel_radix_n[
-            in_dtype,
-            out_dtype,
-            in_layout,
-            out_layout,
-            threads_per_block=threads_per_block,
-            base=base,
-        ]
-    ](
-        output,
-        x,
-        twiddle_factors,
-        grid_dim=blocks_per_grid,
-        block_dim=threads_per_block,
-    )
+    alias processed = UInt(1)
+    alias processed_ptr = UnsafePointer(to=processed).origin_cast[mut=True]()
+
+    @parameter
+    for base in [2]:
+        alias amnt_divisible = _log_mod[base](length)[0]
+        # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
+        # so we just calculate the twiddle factors on the cpu at runtime
+        var twiddle_factors = _get_twiddle_factors[base, out_dtype]()
+
+        @parameter
+        for _ in range(amnt_divisible):
+            ctx.enqueue_function[
+                _intra_block_fft_kernel_radix_n[
+                    in_dtype,
+                    out_dtype,
+                    in_layout,
+                    out_layout,
+                    threads_per_block=threads_per_block,
+                    base=base,
+                    processed=processed,
+                ]
+            ](
+                output,
+                x,
+                twiddle_factors,
+                grid_dim=blocks_per_grid,
+                block_dim=threads_per_block,
+            )
+            processed_ptr[] += base
 
 
 fn _intra_block_fft_kernel_radix_n[
@@ -269,48 +278,20 @@ fn _intra_block_fft_kernel_radix_n[
     out_dtype: DType,
     in_layout: Layout,
     out_layout: Layout,
+    threads_per_block: UInt,
     *,
-    threads_per_block: Int,
     base: UInt,
+    processed: UInt,
 ](
     output: LayoutTensor[mut=True, out_dtype, out_layout],
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
-    twiddle_factors: InlineArray[
-        ComplexSIMD[out_dtype, 1], in_layout.shape[0].value() - 1
-    ],
+    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], base - 1],
 ):
     """An FFT that assumes `num_threads_per_block == sequence_length` and that
     there is only one block."""
     alias length = in_layout.shape[0].value()
-    alias stages = _log_mod[base](length)[0]
-    print("TOTAL STAGES:", stages)
-    _intra_block_fft_kernel_core_radix_n[
-        stages=stages,
-        length=length,
-        threads_per_block=threads_per_block,
-        base=base,
-    ](output, x, twiddle_factors)
-
-
-fn _intra_block_fft_kernel_core_radix_n[
-    in_dtype: DType,
-    out_dtype: DType,
-    in_layout: Layout,
-    out_layout: Layout,
-    stages: UInt,
-    length: UInt,
-    threads_per_block: UInt,
-    *,
-    base: UInt,
-    stage_start: UInt = 0,
-    stage_end: UInt = stages,
-](
-    output: LayoutTensor[mut=True, out_dtype, out_layout],
-    x: LayoutTensor[mut=False, in_dtype, in_layout],
-    # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
-    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], length - 1],
-):
+    alias stages = UInt(log2(Float64(length)).cast[DType.index]())
     alias ordered_items = _get_ordered_items[length, stages, base]()
     var global_i = block_dim.x * block_idx.x + thread_idx.x
     var local_i = thread_idx.x
@@ -339,19 +320,15 @@ fn _intra_block_fft_kernel_core_radix_n[
 
     barrier()
 
-    @parameter
-    for stage in range(stage_start, stage_end):
-        _radix_n_fft_kernel[
-            out_dtype=out_dtype,
-            out_layout = shared_f.layout,
-            address_space = shared_f.address_space,
-            stages=stages,
-            length=length,
-            stage=stage,
-            do_rfft=do_rfft,
-            base=base,
-        ](shared_f, twiddle_factors, local_i)
-        barrier()
+    _radix_n_fft_kernel[
+        out_dtype=out_dtype,
+        out_layout = shared_f.layout,
+        address_space = shared_f.address_space,
+        do_rfft=do_rfft,
+        base=base,
+        processed=processed,
+    ](shared_f, twiddle_factors, local_i)
+    barrier()
 
     output[global_i, 0] = shared_f[local_i, 0]
     output[global_i, 1] = shared_f[local_i, 1]
@@ -782,26 +759,27 @@ fn _radix_n_fft_kernel[
     out_origin: MutableOrigin,
     address_space: AddressSpace,
     *,
-    stages: UInt,
-    length: UInt,
-    stage: UInt,
     do_rfft: Bool,
     base: UInt,
+    processed: UInt,
 ](
     output: LayoutTensor[
         out_dtype, out_layout, out_origin, address_space=address_space
     ],
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
-    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], length - 1],
+    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], base - 1],
     local_i: UInt,
 ):
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
     optimizations, at the cost of a bit of branching."""
+    alias length = out_layout.shape[0].value()
     constrained[length >= base, "length must be >= base"]()
-    alias idx_scalar = Scalar[_get_dtype[length * base]()]
-    alias offset = idx_scalar(base**stage)
-    var curr_idx = idx_scalar(local_i)
-    if (curr_idx // offset) % idx_scalar(base) != 0:  # execution thread
+    alias Sc = Scalar[_get_dtype[length * base]()]
+    alias offset = Sc(base)
+    var n = (Sc(local_i) % Sc(processed)) + (Sc(local_i) / Sc(processed)) * Sc(
+        processed * base
+    )
+    if n % Sc(base) != 0:  # execution thread
         return
 
     alias Co = ComplexSIMD[out_dtype, output.element_size]
@@ -809,10 +787,10 @@ fn _radix_n_fft_kernel[
 
     @parameter
     for i in range(base):
-        var idx = UInt(curr_idx + i * offset)
+        var idx = UInt(n + i * offset)
 
         @parameter
-        if stage == 0 and do_rfft:
+        if do_rfft:
             x[i] = Co(output[idx, 0], 0)
         else:
             x[i] = Co(output[idx, 0], output[idx, 1])
@@ -820,32 +798,27 @@ fn _radix_n_fft_kernel[
     @parameter
     for i in range(base):
         var x_i = x[0]
-        var idx = curr_idx + i * offset
+        var idx = n + i * offset
 
         @parameter
         for j in range(1, base):
 
             @parameter
-            if stage == 0 and i == 0 and do_rfft:  # Co(1, 0)
+            if i == 0 and do_rfft:  # Co(1, 0)
                 x_i.re += x[j].re
-            elif stage == 0 and i == 0:  # Co(1, 0)
+            elif i == 0:  # Co(1, 0)
                 x_i.re += x[j].re
                 x_i.re += x[j].im
-            elif stage == 0 and base == 2:  # Co(-1, 0)
+            elif base == 2:  # Co(-1, 0)
                 x_i.re += -x[j].re
                 x_i.im += -x[j].im
             else:
-                alias stage_length = base ** (stage + 1)
-                alias ratio = length // stage_length
                 alias is_even = length % 2 == 0  # avoid evaluating for uneven
-                var twiddle_idx = (
-                    (idx + (j - 1) * offset) % stage_length
-                ) * ratio
+                alias twiddle_idx = (i + (j - 1)) % base
 
+                @parameter
                 if twiddle_idx == 0:  # Co(1, 0)
                     print(
-                        "stage:",
-                        stage,
                         "local_i:",
                         local_i,
                         "idx:",
@@ -926,8 +899,6 @@ fn _radix_n_fft_kernel[
                 else:
                     var twf = twiddle_factors[twiddle_idx - 1]
                     print(
-                        "stage:",
-                        stage,
                         "local_i:",
                         local_i,
                         "idx:",
@@ -1017,18 +988,14 @@ fn _get_pow2_twiddle_factors[
             i += 1
 
 
-fn _get_last_twiddle_factors[
-    length: UInt, dtype: DType, base: UInt
+fn _get_twiddle_factors[
+    length: UInt, dtype: DType
 ](out res: InlineArray[ComplexSIMD[dtype, 1], length - 1]):
-    """Get the twiddle factors for the last stage.
+    """Get the twiddle factors for the length.
 
     Examples:
-        for a signal with 8 datapoints using base 2:
-        stage 1: W_0_2
-        stage 2: W_0_4, W_1_4
-        stage 3: W_0_8, W_1_8, W_2_8, W_3_8
+        for a signal with 8 datapoints:
         the result is: [W_1_8, W_2_8, W_3_8, W_4_8, W_5_8, W_6_8, W_7_8]
-        and the twiddle factors for stage 1 and 2 are inside those for stage 3.
     """
     alias C = ComplexSIMD[dtype, 1]
     res = __type_of(res)(uninitialized=True)
@@ -1052,19 +1019,21 @@ fn _log_mod[base: UInt](x: UInt) -> (UInt, UInt):
 
 def main():
     from tests import (
-        # test_intra_block_radix_2_with_8_samples,
-        # test_intra_block_radix_n_with_8_samples,
+        test_intra_block_radix_2_with_8_samples,
+        test_intra_block_radix_n_with_8_samples,
         test_intra_block_radix_2_with_4_samples,
         test_intra_block_radix_n_with_4_samples,
     )
 
     # test_intra_block_radix_2_with_8_samples()
+    test_intra_block_radix_n_with_8_samples[2]()
+    # test_intra_block_radix_n_with_8_samples[8]()
     # @parameter
     # for base in [2, 8]:
-    #     test_intra_block_radix_n_with_8_samples[base]()
+    # test_intra_block_radix_n_with_8_samples[base]()
     # @parameter
     # for base in [2, 4]:
     #     test_intra_block_radix_n_with_4_samples[base]()
     # test_intra_block_radix_n_with_4_samples[2]()
-    test_intra_block_radix_2_with_4_samples()
+    # test_intra_block_radix_2_with_4_samples()
     # test_intra_block_radix_n_with_4_samples[2]()

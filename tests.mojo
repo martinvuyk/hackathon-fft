@@ -127,7 +127,6 @@ def test_intra_block_radix_n_with_8_samples[base: UInt]():
                 out_layout,
                 threads_per_block=SIZE,
                 blocks_per_grid=1,
-                base=base,
             ](out_tensor, x_tensor, ctx)
 
             ctx.synchronize()
@@ -280,7 +279,6 @@ def test_intra_block_radix_n_with_4_samples[base: UInt]():
                 out_layout,
                 threads_per_block=SIZE,
                 blocks_per_grid=1,
-                base=base,
             ](out_tensor, x_tensor, ctx)
 
             ctx.synchronize()
