@@ -121,12 +121,7 @@ def test_intra_block_radix_n_with_8_samples[base: UInt]():
                 x.unsafe_ptr()
             )
             _intra_block_fft_launch_radix_n[
-                in_dtype,
-                out_dtype,
-                in_layout,
-                out_layout,
-                threads_per_block=SIZE,
-                blocks_per_grid=1,
+                in_dtype, out_dtype, in_layout, out_layout
             ](out_tensor, x_tensor, ctx)
 
             ctx.synchronize()
@@ -273,12 +268,7 @@ def test_intra_block_radix_n_with_4_samples[base: UInt]():
                 x.unsafe_ptr()
             )
             _intra_block_fft_launch_radix_n[
-                in_dtype,
-                out_dtype,
-                in_layout,
-                out_layout,
-                threads_per_block=SIZE,
-                blocks_per_grid=1,
+                in_dtype, out_dtype, in_layout, out_layout
             ](out_tensor, x_tensor, ctx)
 
             ctx.synchronize()

@@ -1,18 +1,16 @@
-from bit import bit_reverse
+from math import pi, cos, sin
 from complex import ComplexSIMD
-from gpu import thread_idx, block_idx, block_dim, barrier
-from gpu.host import DeviceContext
-from layout import Layout, LayoutTensor, IntTuple
-from layout.tensor_builder import LayoutTensorBuild as tb
-from math import log2, exp, pi, cos, sin, iota, sqrt
-from sys import sizeof, argv
-from sys.info import is_gpu
 
 
-fn _get_last_twiddle_factors[
-    length: UInt, dtype: DType, base: UInt
+fn _get_twiddle_factors[
+    length: UInt, dtype: DType
 ](out res: InlineArray[ComplexSIMD[dtype, 1], length - 1]):
-    """Get the twiddle factors for the last stage."""
+    """Get the twiddle factors for the length.
+
+    Examples:
+        for a signal with 8 datapoints:
+        the result is: [W_1_8, W_2_8, W_3_8, W_4_8, W_5_8, W_6_8, W_7_8]
+    """
     alias C = ComplexSIMD[dtype, 1]
     res = __type_of(res)(uninitialized=True)
     alias N = length
@@ -21,11 +19,9 @@ fn _get_last_twiddle_factors[
         theta = Scalar[dtype]((-2 * pi * n) / N)
         # TODO: this could be more generic using fputils
         res[n - 1] = C(cos(theta).__round__(15), sin(theta).__round__(15))
-        print(res[n - 1].re, res[n - 1].im)
 
 
 fn main():
-    alias stages = 3
-    alias length = 8
-    alias out_dtype = DType.float64
-    _ = _get_last_twiddle_factors[length, out_dtype, 2]()
+    var twfs = _get_twiddle_factors[8, DType.float64]()
+    for i in range(len(twfs)):
+        print(i, ":", twfs[i].re, twfs[i].im)

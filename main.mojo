@@ -232,45 +232,41 @@ def _intra_block_fft_launch_radix_n[
     out_dtype: DType,
     in_layout: Layout,
     out_layout: Layout,
-    *,
-    threads_per_block: Int,
-    blocks_per_grid: Int,
 ](
     output: LayoutTensor[mut=True, out_dtype, out_layout],
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     ctx: DeviceContext,
 ):
     alias length = in_layout.shape[0].value()
-    alias processed = UInt(1)
-    alias processed_ptr = UnsafePointer(to=processed).origin_cast[mut=True]()
+    var processed = UInt(1)
 
     @parameter
     for base in [2]:
         alias amnt_divisible = _log_mod[base](length)[0]
         # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
         # so we just calculate the twiddle factors on the cpu at runtime
-        var twiddle_factors = _get_twiddle_factors[base, out_dtype]()
+        var twiddle_factors = _get_twiddle_factors[length, out_dtype]()
 
-        @parameter
         for _ in range(amnt_divisible):
+            alias block_dim = length // base
             ctx.enqueue_function[
                 _intra_block_fft_kernel_radix_n[
                     in_dtype,
                     out_dtype,
                     in_layout,
                     out_layout,
-                    threads_per_block=threads_per_block,
+                    threads_per_block=block_dim,
                     base=base,
-                    processed=processed,
                 ]
             ](
                 output,
                 x,
                 twiddle_factors,
-                grid_dim=blocks_per_grid,
-                block_dim=threads_per_block,
+                processed,
+                grid_dim=1,
+                block_dim=block_dim,
             )
-            processed_ptr[] += base
+            processed *= base
 
 
 fn _intra_block_fft_kernel_radix_n[
@@ -281,27 +277,40 @@ fn _intra_block_fft_kernel_radix_n[
     threads_per_block: UInt,
     *,
     base: UInt,
-    processed: UInt,
 ](
     output: LayoutTensor[mut=True, out_dtype, out_layout],
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
     twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], base - 1],
+    processed: UInt,
 ):
-    """An FFT that assumes `num_threads_per_block == sequence_length` and that
+    """An FFT that assumes `sequence_length <= max_threads_per_block` and that
     there is only one block."""
     alias length = in_layout.shape[0].value()
-    alias stages = UInt(log2(Float64(length)).cast[DType.index]())
-    alias ordered_items = _get_ordered_items[length, stages, base]()
     var global_i = block_dim.x * block_idx.x + thread_idx.x
     var local_i = thread_idx.x
-    # complex vectors for the frequencies
-    var shared_f = (
-        tb[out_dtype]().row_major[threads_per_block, 2]().shared().alloc()
+    print(
+        "global_i:",
+        global_i,
+        "local_i:",
+        local_i,
+        "y:",
+        thread_idx.y,
+        "processed:",
+        processed,
     )
+    # complex vectors for the frequencies
+    var shared_f = tb[out_dtype]().row_major[length, 2]().shared().alloc()
 
-    # reorder input x(global_i) items to match F(current_item) layout
-    var current_item = UInt(ordered_items[global_i])
+    var current_item: UInt
+
+    if processed == 1:  # first stage of the whole pipeline
+        alias stages = UInt(log2(Float64(length)).cast[DType.index]())
+        alias ordered_items = _get_ordered_items[length, stages, base]()
+        # reorder input x(global_i) items to match F(current_item) layout
+        current_item = UInt(ordered_items[global_i])
+    else:
+        current_item = UInt(global_i)
 
     alias do_rfft = len(in_layout) == 1
 
@@ -326,8 +335,8 @@ fn _intra_block_fft_kernel_radix_n[
         address_space = shared_f.address_space,
         do_rfft=do_rfft,
         base=base,
-        processed=processed,
-    ](shared_f, twiddle_factors, local_i)
+        length=length,
+    ](shared_f, twiddle_factors, local_i, processed)
     barrier()
 
     output[global_i, 0] = shared_f[local_i, 0]
@@ -759,9 +768,9 @@ fn _radix_n_fft_kernel[
     out_origin: MutableOrigin,
     address_space: AddressSpace,
     *,
+    length: UInt,
     do_rfft: Bool,
     base: UInt,
-    processed: UInt,
 ](
     output: LayoutTensor[
         out_dtype, out_layout, out_origin, address_space=address_space
@@ -769,18 +778,18 @@ fn _radix_n_fft_kernel[
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
     twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], base - 1],
     local_i: UInt,
+    processed: UInt,
 ):
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
     optimizations, at the cost of a bit of branching."""
-    alias length = out_layout.shape[0].value()
     constrained[length >= base, "length must be >= base"]()
     alias Sc = Scalar[_get_dtype[length * base]()]
-    alias offset = Sc(base)
-    var n = (Sc(local_i) % Sc(processed)) + (Sc(local_i) / Sc(processed)) * Sc(
-        processed * base
-    )
-    if n % Sc(base) != 0:  # execution thread
-        return
+    var offset = Sc(processed)
+    # var n = Sc(local_i)
+    var nx = Sc(local_i) % offset
+    var n = nx + (Sc(local_i) // offset) * Sc(processed * base)
+    # if n % Sc(base) != 0:  # execution thread
+    #     return
 
     alias Co = ComplexSIMD[out_dtype, output.element_size]
     var x = InlineArray[Co, base](uninitialized=True)
@@ -799,24 +808,27 @@ fn _radix_n_fft_kernel[
     for i in range(base):
         var x_i = x[0]
         var idx = n + i * offset
+        print("n:", n, "nx:", nx, "idx:", idx)
 
         @parameter
         for j in range(1, base):
 
             @parameter
-            if i == 0 and do_rfft:  # Co(1, 0)
-                x_i.re += x[j].re
-            elif i == 0:  # Co(1, 0)
-                x_i.re += x[j].re
-                x_i.re += x[j].im
-            elif base == 2:  # Co(-1, 0)
-                x_i.re += -x[j].re
-                x_i.im += -x[j].im
+            if False:
+                ...
+            # if i == 0 and do_rfft:  # Co(1, 0)
+            #     x_i.re += x[j].re
+            # elif i == 0:  # Co(1, 0)
+            #     x_i.re += x[j].re
+            #     x_i.re += x[j].im
+            # elif base == 2:  # Co(-1, 0)
+            #     x_i.re += -x[j].re
+            #     x_i.im += -x[j].im
             else:
+                print("length:", length)
                 alias is_even = length % 2 == 0  # avoid evaluating for uneven
-                alias twiddle_idx = (i + (j - 1)) % base
+                var twiddle_idx = (nx * j) % length
 
-                @parameter
                 if twiddle_idx == 0:  # Co(1, 0)
                     print(
                         "local_i:",
