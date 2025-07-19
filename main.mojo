@@ -239,15 +239,16 @@ def _intra_block_fft_launch_radix_n[
 ):
     alias length = in_layout.shape[0].value()
     var processed = UInt(1)
+    # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
+    # so we just calculate the twiddle factors on the cpu at runtime
+    var twiddle_factors = _get_twiddle_factors[length, out_dtype]()
 
     @parameter
-    for base in [2]:
+    for base in [4]:
         alias amnt_divisible = _log_mod[base](length)[0]
-        # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
-        # so we just calculate the twiddle factors on the cpu at runtime
-        var twiddle_factors = _get_twiddle_factors[length, out_dtype]()
 
-        for _ in range(amnt_divisible):
+        @parameter
+        for i in range(amnt_divisible):
             alias block_dim = length // base
             ctx.enqueue_function[
                 _intra_block_fft_kernel_radix_n[
@@ -257,6 +258,7 @@ def _intra_block_fft_launch_radix_n[
                     out_layout,
                     threads_per_block=block_dim,
                     base=base,
+                    is_first_stage = base == 2 and i == 0,
                 ]
             ](
                 output,
@@ -269,6 +271,31 @@ def _intra_block_fft_launch_radix_n[
             processed *= base
 
 
+fn _reorder_kernel[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+    *,
+    base: UInt,
+](
+    output: LayoutTensor[mut=True, out_dtype, out_layout],
+    x: LayoutTensor[mut=False, in_dtype, in_layout],
+):
+    var global_i = block_dim.x * block_idx.x + thread_idx.x
+    var local_i = thread_idx.x
+    alias length = in_layout.shape[0].value()
+    alias stages = UInt(log2(Float64(length)).cast[DType.index]())
+    alias ordered_items = _get_ordered_items[length, stages, base]()
+
+    @parameter
+    for i in range(base):
+        alias offset = i * (length // base)
+        var idx = UInt(ordered_items[local_i + offset])
+        output[global_i + offset, 0] = output[idx, 0]
+        output[global_i + offset, 1] = output[idx, 1]
+
+
 fn _intra_block_fft_kernel_radix_n[
     in_dtype: DType,
     out_dtype: DType,
@@ -277,11 +304,14 @@ fn _intra_block_fft_kernel_radix_n[
     threads_per_block: UInt,
     *,
     base: UInt,
+    is_first_stage: Bool,
 ](
     output: LayoutTensor[mut=True, out_dtype, out_layout],
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
-    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], base - 1],
+    twiddle_factors: InlineArray[
+        ComplexSIMD[out_dtype, 1], in_layout.shape[0].value() - 1
+    ],
     processed: UInt,
 ):
     """An FFT that assumes `sequence_length <= max_threads_per_block` and that
@@ -289,43 +319,44 @@ fn _intra_block_fft_kernel_radix_n[
     alias length = in_layout.shape[0].value()
     var global_i = block_dim.x * block_idx.x + thread_idx.x
     var local_i = thread_idx.x
-    print(
-        "global_i:",
-        global_i,
-        "local_i:",
-        local_i,
-        "y:",
-        thread_idx.y,
-        "processed:",
-        processed,
-    )
+    print("global_i:", global_i, "local_i:", local_i, "processed:", processed)
     # complex vectors for the frequencies
     var shared_f = tb[out_dtype]().row_major[length, 2]().shared().alloc()
-
-    var current_item: UInt
-
-    if processed == 1:  # first stage of the whole pipeline
-        alias stages = UInt(log2(Float64(length)).cast[DType.index]())
-        alias ordered_items = _get_ordered_items[length, stages, base]()
-        # reorder input x(global_i) items to match F(current_item) layout
-        current_item = UInt(ordered_items[global_i])
-    else:
-        current_item = UInt(global_i)
 
     alias do_rfft = len(in_layout) == 1
 
     @parameter
-    if do_rfft:
-        shared_f[current_item, 0] = x[global_i].cast[out_dtype]()
-        # NOTE: filling the imaginary part with 0 is not necessary
-        # because the _radix_n_fft_kernel already sets it to 0
-        # when the stage == 0
+    if not is_first_stage:
+
+        @parameter
+        for i in range(base):
+            alias offset = i * (length // base)
+            var idx = global_i + offset
+            shared_f[idx, 0] = output[idx, 0]
+            shared_f[idx, 1] = output[idx, 1]
     else:
-        alias msg = "in_layout must be complex valued"
-        constrained[len(in_layout) == 2, msg]()
-        constrained[in_layout.shape[1].value() == 2, msg]()
-        shared_f[current_item, 0] = x[global_i, 0].cast[out_dtype]()
-        shared_f[current_item, 1] = x[global_i, 1].cast[out_dtype]()
+        alias stages = UInt(log2(Float64(length)).cast[DType.index]())
+        alias ordered_items = _get_ordered_items[length, stages, base]()
+
+        # reorder input x(global_i) items to match F(current_item) layout
+        @parameter
+        for i in range(base):
+            alias offset = i * (length // base)
+            var current_item = UInt(ordered_items[global_i + offset])
+            var g_idx = global_i + offset
+
+            @parameter
+            if do_rfft:
+                shared_f[current_item, 0] = x[g_idx].cast[out_dtype]()
+                # NOTE: filling the imaginary part with 0 is not necessary
+                # because the _radix_n_fft_kernel already sets it to 0
+                # when the stage == 0
+            else:
+                alias msg = "in_layout must be complex valued"
+                constrained[len(in_layout) == 2, msg]()
+                constrained[in_layout.shape[1].value() == 2, msg]()
+                shared_f[current_item, 0] = x[g_idx, 0].cast[out_dtype]()
+                shared_f[current_item, 1] = x[g_idx, 1].cast[out_dtype]()
 
     barrier()
 
@@ -339,8 +370,12 @@ fn _intra_block_fft_kernel_radix_n[
     ](shared_f, twiddle_factors, local_i, processed)
     barrier()
 
-    output[global_i, 0] = shared_f[local_i, 0]
-    output[global_i, 1] = shared_f[local_i, 1]
+    @parameter
+    for i in range(base):
+        alias offset = i * (length // base)
+        output[global_i + offset, 0] = shared_f[local_i + offset, 0]
+        output[global_i + offset, 1] = shared_f[local_i + offset, 1]
+    barrier()
 
 
 # ===-----------------------------------------------------------------------===#
@@ -776,7 +811,7 @@ fn _radix_n_fft_kernel[
         out_dtype, out_layout, out_origin, address_space=address_space
     ],
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
-    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], base - 1],
+    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], length - 1],
     local_i: UInt,
     processed: UInt,
 ):
@@ -787,9 +822,7 @@ fn _radix_n_fft_kernel[
     var offset = Sc(processed)
     # var n = Sc(local_i)
     var nx = Sc(local_i) % offset
-    var n = nx + (Sc(local_i) // offset) * Sc(processed * base)
-    # if n % Sc(base) != 0:  # execution thread
-    #     return
+    var n = nx + (Sc(local_i) // offset) * (offset * Sc(base))
 
     alias Co = ComplexSIMD[out_dtype, output.element_size]
     var x = InlineArray[Co, base](uninitialized=True)
@@ -798,134 +831,130 @@ fn _radix_n_fft_kernel[
     for i in range(base):
         var idx = UInt(n + i * offset)
 
-        @parameter
-        if do_rfft:
+        if do_rfft and processed == 1:
             x[i] = Co(output[idx, 0], 0)
         else:
             x[i] = Co(output[idx, 0], output[idx, 1])
+
+    if local_i == 0:
+        print("TWIDDLE FACTORS:")
+        for k in range(length - 1):
+            print(k, ":", twiddle_factors[k])
+        print("")
 
     @parameter
     for i in range(base):
         var x_i = x[0]
         var idx = n + i * offset
-        print("n:", n, "nx:", nx, "idx:", idx)
+        print("n:", n, "idx:", idx, "nx:", nx, "offset:", offset)
 
         @parameter
         for j in range(1, base):
+            alias is_even = length % 2 == 0  # avoid evaluating for uneven
+            var ratio = length // (offset * Sc(base))
+            var ratio2 = length // ratio
+            # var twiddle_idx = (i * (idx + (j - 1) * offset) % ratio2) * ratio
+            var twiddle_idx = (
+                (((idx + (j - 1) * offset) * i + (i // ratio) * ratio) % ratio2)
+            ) * ratio
 
-            @parameter
-            if False:
-                ...
-            # if i == 0 and do_rfft:  # Co(1, 0)
-            #     x_i.re += x[j].re
-            # elif i == 0:  # Co(1, 0)
-            #     x_i.re += x[j].re
-            #     x_i.re += x[j].im
-            # elif base == 2:  # Co(-1, 0)
-            #     x_i.re += -x[j].re
-            #     x_i.im += -x[j].im
+            if twiddle_idx == 0:  # Co(1, 0)
+                print(
+                    "local_i:",
+                    local_i,
+                    "idx:",
+                    idx,
+                    "i:",
+                    i,
+                    "j:",
+                    j,
+                    "twiddle_idx:",
+                    -1,
+                    "twf:",
+                    1.0,
+                    0.0,
+                )
+                x_i.re += x[j].re
+                x_i.re += x[j].im
+                # elif is_even and 4 * twiddle_idx == length:  # Co(0, -1)
+                #     print(
+                #         "stage:",
+                #         stage,
+                #         "local_i:",
+                #         local_i,
+                #         "idx:",
+                #         idx,
+                #         "i:",
+                #         i,
+                #         "j:",
+                #         j,
+                #         "twiddle_idx:",
+                #         twiddle_idx - 1,
+                #         "twf:",
+                #         0.0,
+                #         -1.0,
+                #     )
+                #     x_i.re += x[j].im
+                #     x_i.im += -x[j].re
+                # elif is_even and 2 * twiddle_idx == length:  # Co(-1, 0)
+                #     print(
+                #         "stage:",
+                #         stage,
+                #         "local_i:",
+                #         local_i,
+                #         "idx:",
+                #         idx,
+                #         "i:",
+                #         i,
+                #         "j:",
+                #         j,
+                #         "twiddle_idx:",
+                #         twiddle_idx - 1,
+                #         "twf:",
+                #         -1.0,
+                #         0.0,
+                #     )
+                #     x_i.re += -x[j].re
+                #     x_i.im += -x[j].im
+                # elif is_even and 4 * twiddle_idx == 3 * length:  # Co(0, 1)
+                #     print(
+                #         "stage:",
+                #         stage,
+                #         "local_i:",
+                #         local_i,
+                #         "idx:",
+                #         idx,
+                #         "i:",
+                #         i,
+                #         "j:",
+                #         j,
+                #         "twiddle_idx:",
+                #         twiddle_idx - 1,
+                #         "twf:",
+                #         0.0,
+                #         1.0,
+                #     )
+
+                #     x_i.re += -x[j].im
+                #     x_i.im += x[j].re
             else:
-                print("length:", length)
-                alias is_even = length % 2 == 0  # avoid evaluating for uneven
-                var twiddle_idx = (nx * j) % length
-
-                if twiddle_idx == 0:  # Co(1, 0)
-                    print(
-                        "local_i:",
-                        local_i,
-                        "idx:",
-                        idx,
-                        "i:",
-                        i,
-                        "j:",
-                        j,
-                        "twiddle_idx:",
-                        -1,
-                        "twf:",
-                        1.0,
-                        0.0,
-                    )
-                    x_i.re += x[j].re
-                    x_i.re += x[j].im
-                    # elif is_even and 4 * twiddle_idx == length:  # Co(0, -1)
-                    #     print(
-                    #         "stage:",
-                    #         stage,
-                    #         "local_i:",
-                    #         local_i,
-                    #         "idx:",
-                    #         idx,
-                    #         "i:",
-                    #         i,
-                    #         "j:",
-                    #         j,
-                    #         "twiddle_idx:",
-                    #         twiddle_idx - 1,
-                    #         "twf:",
-                    #         0.0,
-                    #         -1.0,
-                    #     )
-                    #     x_i.re += x[j].im
-                    #     x_i.im += -x[j].re
-                    # elif is_even and 2 * twiddle_idx == length:  # Co(-1, 0)
-                    #     print(
-                    #         "stage:",
-                    #         stage,
-                    #         "local_i:",
-                    #         local_i,
-                    #         "idx:",
-                    #         idx,
-                    #         "i:",
-                    #         i,
-                    #         "j:",
-                    #         j,
-                    #         "twiddle_idx:",
-                    #         twiddle_idx - 1,
-                    #         "twf:",
-                    #         -1.0,
-                    #         0.0,
-                    #     )
-                    #     x_i.re += -x[j].re
-                    #     x_i.im += -x[j].im
-                    # elif is_even and 4 * twiddle_idx == 3 * length:  # Co(0, 1)
-                    #     print(
-                    #         "stage:",
-                    #         stage,
-                    #         "local_i:",
-                    #         local_i,
-                    #         "idx:",
-                    #         idx,
-                    #         "i:",
-                    #         i,
-                    #         "j:",
-                    #         j,
-                    #         "twiddle_idx:",
-                    #         twiddle_idx - 1,
-                    #         "twf:",
-                    #         0.0,
-                    #         1.0,
-                    #     )
-
-                    #     x_i.re += -x[j].im
-                    #     x_i.im += x[j].re
-                else:
-                    var twf = twiddle_factors[twiddle_idx - 1]
-                    print(
-                        "local_i:",
-                        local_i,
-                        "idx:",
-                        idx,
-                        "i:",
-                        i,
-                        "j:",
-                        j,
-                        "twiddle_idx:",
-                        twiddle_idx - 1,
-                        "twf:",
-                        twf.re,
-                        twf.im,
-                    )
-                    x_i = Co(twf.re, twf.im).fma(x[j], x_i)
+                var twf = twiddle_factors[twiddle_idx - 1]
+                print(
+                    "local_i:",
+                    local_i,
+                    "idx:",
+                    idx,
+                    "i:",
+                    i,
+                    "j:",
+                    j,
+                    "twiddle_idx:",
+                    twiddle_idx - 1,
+                    "twf:",
+                    twf.re,
+                    twf.im,
+                )
+                x_i = Co(twf.re, twf.im).fma(x[j], x_i)
 
         output[UInt(idx), 0] = x_i.re
         output[UInt(idx), 1] = x_i.im
