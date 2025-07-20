@@ -242,9 +242,10 @@ def _intra_block_fft_launch_radix_n[
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
     # so we just calculate the twiddle factors on the cpu at runtime
     var twiddle_factors = _get_twiddle_factors[length, out_dtype]()
+    alias bases = [8]
 
     @parameter
-    for base in [4]:
+    for base in bases:
         alias amnt_divisible = _log_mod[base](length)[0]
 
         @parameter
@@ -258,7 +259,7 @@ def _intra_block_fft_launch_radix_n[
                     out_layout,
                     threads_per_block=block_dim,
                     base=base,
-                    is_first_stage = base == 2 and i == 0,
+                    is_first_stage = base == bases[0] and i == 0,
                 ]
             ](
                 output,
@@ -367,6 +368,7 @@ fn _intra_block_fft_kernel_radix_n[
         do_rfft=do_rfft,
         base=base,
         length=length,
+        is_first_stage=is_first_stage,
     ](shared_f, twiddle_factors, local_i, processed)
     barrier()
 
@@ -806,6 +808,7 @@ fn _radix_n_fft_kernel[
     length: UInt,
     do_rfft: Bool,
     base: UInt,
+    is_first_stage: Bool,
 ](
     output: LayoutTensor[
         out_dtype, out_layout, out_origin, address_space=address_space
@@ -831,7 +834,8 @@ fn _radix_n_fft_kernel[
     for i in range(base):
         var idx = UInt(n + i * offset)
 
-        if do_rfft and processed == 1:
+        @parameter
+        if do_rfft and is_first_stage:
             x[i] = Co(output[idx, 0], 0)
         else:
             x[i] = Co(output[idx, 0], output[idx, 1])
@@ -851,12 +855,15 @@ fn _radix_n_fft_kernel[
         @parameter
         for j in range(1, base):
             alias is_even = length % 2 == 0  # avoid evaluating for uneven
-            var ratio = length // (offset * Sc(base))
-            var ratio2 = length // ratio
-            # var twiddle_idx = (i * (idx + (j - 1) * offset) % ratio2) * ratio
-            var twiddle_idx = (
-                (((idx + (j - 1) * offset) * i + (i // ratio) * ratio) % ratio2)
-            ) * ratio
+            var Nx = offset
+            var Ny = Sc(base)
+            var Ni = Nx * Ny
+            var ratio = length // Ni
+            # var twiddle_idx = (i * (idx + (j - 1) * offset) % Ni) * ratio
+
+            # var k = (n * Ny) % Ni + (n // Nx) % Ny + Ni * (n // Ni)
+            var twiddle_idx = (((idx + (j - 1) * offset) % Ni)) * ratio
+            # print("i:", i, "j:", j, "twiddle_idx:", twiddle_idx - 1, "k:", k)
 
             if twiddle_idx == 0:  # Co(1, 0)
                 print(
