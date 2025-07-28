@@ -177,7 +177,7 @@ fn _intra_block_fft_kernel_core[
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
     twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], length - 1],
 ):
-    alias ordered_items = _get_ordered_items[length, stages, 2]()
+    alias ordered_items = _get_ordered_items[length, List(UInt(2))]()
     var global_i = block_dim.x * block_idx.x + thread_idx.x
     var local_i = thread_idx.x
     # complex vectors for the frequencies
@@ -232,6 +232,8 @@ def _intra_block_fft_launch_radix_n[
     out_dtype: DType,
     in_layout: Layout,
     out_layout: Layout,
+    *,
+    bases: List[UInt],
 ](
     output: LayoutTensor[mut=True, out_dtype, out_layout],
     x: LayoutTensor[mut=False, in_dtype, in_layout],
@@ -242,14 +244,14 @@ def _intra_block_fft_launch_radix_n[
     # FIXME: mojo limitation. cos and sin don't seem to behave at comptime
     # so we just calculate the twiddle factors on the cpu at runtime
     var twiddle_factors = _get_twiddle_factors[length, out_dtype]()
-    alias bases = [8]
 
     @parameter
     for base in bases:
-        alias amnt_divisible = _log_mod[base](length)[0]
+        if processed == length:
+            break
+        var amnt_divisible = _log_mod[base](length // processed)[0]
 
-        @parameter
-        for i in range(amnt_divisible):
+        for base_stage in range(amnt_divisible):
             alias block_dim = length // base
             ctx.enqueue_function[
                 _intra_block_fft_kernel_radix_n[
@@ -259,17 +261,24 @@ def _intra_block_fft_launch_radix_n[
                     out_layout,
                     threads_per_block=block_dim,
                     base=base,
-                    is_first_stage = base == bases[0] and i == 0,
+                    bases=bases,
+                    is_first_radix_and_stage=False,  # base=bases[0] and i == 0
                 ]
             ](
                 output,
                 x,
                 twiddle_factors,
                 processed,
+                base_stage,
                 grid_dim=1,
                 block_dim=block_dim,
             )
             processed *= base
+    debug_assert(
+        processed == length,
+        "The sequence was not processed completely.",
+        " Wrong bases were used",
+    )
 
 
 fn _reorder_kernel[
@@ -286,8 +295,7 @@ fn _reorder_kernel[
     var global_i = block_dim.x * block_idx.x + thread_idx.x
     var local_i = thread_idx.x
     alias length = in_layout.shape[0].value()
-    alias stages = UInt(log2(Float64(length)).cast[DType.index]())
-    alias ordered_items = _get_ordered_items[length, stages, base]()
+    alias ordered_items = _get_ordered_items[length, List(base)]()
 
     @parameter
     for i in range(base):
@@ -305,7 +313,8 @@ fn _intra_block_fft_kernel_radix_n[
     threads_per_block: UInt,
     *,
     base: UInt,
-    is_first_stage: Bool,
+    bases: List[UInt],
+    is_first_radix_and_stage: Bool,
 ](
     output: LayoutTensor[mut=True, out_dtype, out_layout],
     x: LayoutTensor[mut=False, in_dtype, in_layout],
@@ -314,6 +323,7 @@ fn _intra_block_fft_kernel_radix_n[
         ComplexSIMD[out_dtype, 1], in_layout.shape[0].value() - 1
     ],
     processed: UInt,
+    base_stage: UInt,
 ):
     """An FFT that assumes `sequence_length <= max_threads_per_block` and that
     there is only one block."""
@@ -325,33 +335,38 @@ fn _intra_block_fft_kernel_radix_n[
     var shared_f = tb[out_dtype]().row_major[length, 2]().shared().alloc()
 
     alias do_rfft = len(in_layout) == 1
-
-    @parameter
-    if not is_first_stage:
+    # @parameter
+    if processed != 1:  # not is_first_radix_and_stage:
 
         @parameter
         for i in range(base):
-            alias offset = i * (length // base)
+            var offset = i * (length // base)
             var idx = global_i + offset
             shared_f[idx, 0] = output[idx, 0]
             shared_f[idx, 1] = output[idx, 1]
     else:
-        alias stages = UInt(log2(Float64(length)).cast[DType.index]())
-        alias ordered_items = _get_ordered_items[length, stages, base]()
+        alias ordered_items = _get_ordered_items[length, bases]()
 
         # reorder input x(global_i) items to match F(current_item) layout
         @parameter
         for i in range(base):
             alias offset = i * (length // base)
-            var current_item = UInt(ordered_items[global_i + offset])
             var g_idx = global_i + offset
+
+            var current_item: UInt
+
+            @parameter
+            if base == length:  # do a DFT on the inputs
+                current_item = g_idx
+            else:
+                current_item = UInt(ordered_items[g_idx])
 
             @parameter
             if do_rfft:
                 shared_f[current_item, 0] = x[g_idx].cast[out_dtype]()
                 # NOTE: filling the imaginary part with 0 is not necessary
                 # because the _radix_n_fft_kernel already sets it to 0
-                # when the stage == 0
+                # when do_rfft and is_first_radix_and_stage
             else:
                 alias msg = "in_layout must be complex valued"
                 constrained[len(in_layout) == 2, msg]()
@@ -360,7 +375,6 @@ fn _intra_block_fft_kernel_radix_n[
                 shared_f[current_item, 1] = x[g_idx, 1].cast[out_dtype]()
 
     barrier()
-
     _radix_n_fft_kernel[
         out_dtype=out_dtype,
         out_layout = shared_f.layout,
@@ -368,8 +382,8 @@ fn _intra_block_fft_kernel_radix_n[
         do_rfft=do_rfft,
         base=base,
         length=length,
-        is_first_stage=is_first_stage,
-    ](shared_f, twiddle_factors, local_i, processed)
+        is_first_radix_and_stage=is_first_radix_and_stage,
+    ](shared_f, twiddle_factors, local_i, processed, base_stage)
     barrier()
 
     @parameter
@@ -808,7 +822,7 @@ fn _radix_n_fft_kernel[
     length: UInt,
     do_rfft: Bool,
     base: UInt,
-    is_first_stage: Bool,
+    is_first_radix_and_stage: Bool,
 ](
     output: LayoutTensor[
         out_dtype, out_layout, out_origin, address_space=address_space
@@ -817,6 +831,7 @@ fn _radix_n_fft_kernel[
     twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], length - 1],
     local_i: UInt,
     processed: UInt,
+    base_stage: UInt,
 ):
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
     optimizations, at the cost of a bit of branching."""
@@ -830,12 +845,18 @@ fn _radix_n_fft_kernel[
     alias Co = ComplexSIMD[out_dtype, output.element_size]
     var x = InlineArray[Co, base](uninitialized=True)
 
+    if processed == 1 and local_i == 0:
+        print("Initial input to kernel (first stage):")
+        for k in range(length):
+            print(k, ":", output[k, 0], "+", output[k, 1], "i")
+        print("")
+
     @parameter
     for i in range(base):
         var idx = UInt(n + i * offset)
 
-        @parameter
-        if do_rfft and is_first_stage:
+        # @parameter
+        if do_rfft and processed == 1:  # is_first_radix_and_stage:
             x[i] = Co(output[idx, 0], 0)
         else:
             x[i] = Co(output[idx, 0], output[idx, 1])
@@ -859,12 +880,7 @@ fn _radix_n_fft_kernel[
             var Ny = Sc(base)
             var Ni = Nx * Ny
             var ratio = length // Ni
-            # var twiddle_idx = (i * (idx + (j - 1) * offset) % Ni) * ratio
-
-            # var k = (n * Ny) % Ni + (n // Nx) % Ny + Ni * (n // Ni)
-            var twiddle_idx = (((idx + (j - 1) * offset) % Ni)) * ratio
-            # print("i:", i, "j:", j, "twiddle_idx:", twiddle_idx - 1, "k:", k)
-
+            var twiddle_idx = ((j * idx) % Ni) * ratio
             if twiddle_idx == 0:  # Co(1, 0)
                 print(
                     "local_i:",
@@ -876,72 +892,20 @@ fn _radix_n_fft_kernel[
                     "j:",
                     j,
                     "twiddle_idx:",
-                    -1,
+                    twiddle_idx,
                     "twf:",
                     1.0,
                     0.0,
                 )
                 x_i.re += x[j].re
-                x_i.re += x[j].im
+                x_i.im += x[j].im
                 # elif is_even and 4 * twiddle_idx == length:  # Co(0, -1)
-                #     print(
-                #         "stage:",
-                #         stage,
-                #         "local_i:",
-                #         local_i,
-                #         "idx:",
-                #         idx,
-                #         "i:",
-                #         i,
-                #         "j:",
-                #         j,
-                #         "twiddle_idx:",
-                #         twiddle_idx - 1,
-                #         "twf:",
-                #         0.0,
-                #         -1.0,
-                #     )
                 #     x_i.re += x[j].im
                 #     x_i.im += -x[j].re
                 # elif is_even and 2 * twiddle_idx == length:  # Co(-1, 0)
-                #     print(
-                #         "stage:",
-                #         stage,
-                #         "local_i:",
-                #         local_i,
-                #         "idx:",
-                #         idx,
-                #         "i:",
-                #         i,
-                #         "j:",
-                #         j,
-                #         "twiddle_idx:",
-                #         twiddle_idx - 1,
-                #         "twf:",
-                #         -1.0,
-                #         0.0,
-                #     )
                 #     x_i.re += -x[j].re
                 #     x_i.im += -x[j].im
                 # elif is_even and 4 * twiddle_idx == 3 * length:  # Co(0, 1)
-                #     print(
-                #         "stage:",
-                #         stage,
-                #         "local_i:",
-                #         local_i,
-                #         "idx:",
-                #         idx,
-                #         "i:",
-                #         i,
-                #         "j:",
-                #         j,
-                #         "twiddle_idx:",
-                #         twiddle_idx - 1,
-                #         "twf:",
-                #         0.0,
-                #         1.0,
-                #     )
-
                 #     x_i.re += -x[j].im
                 #     x_i.im += x[j].re
             else:
@@ -956,7 +920,7 @@ fn _radix_n_fft_kernel[
                     "j:",
                     j,
                     "twiddle_idx:",
-                    twiddle_idx - 1,
+                    twiddle_idx,
                     "twf:",
                     twf.re,
                     twf.im,
@@ -990,21 +954,76 @@ fn _get_dtype[length: UInt]() -> DType:
         return DType.uint256
 
 
+fn _mixed_radix_digit_reverse[bases: List[UInt]](idx: UInt) -> UInt:
+    """Performs mixed-radix digit reversal for an index `idx` based on a
+    sequence of `bases`.
+
+    Given N = R_0 * R_1 * ... * R_{M-1}, an input index `k` is represented as:
+    k = d_0 + d_1*R_0 + d_2*R_0*R_1 + ... + d_{M-1}*R_0*...*R_{M-2}
+    where d_i is the digit for radix R_i.
+
+    The reversed index k' is:
+    k' = d_{M-1} + d_{M-2}*R_{M-1} + ... + d_1*R_{M-1}*...*R_2 + d_0*R_{M-1}*...*R_1
+
+    Parameters:
+        bases: A List of UInt representing the radices in the order
+            R_0, R_1, ..., R_{M-1}.
+
+    Args:
+        idx: The input index to be reversed.
+
+    Returns:
+        The digit-reversed index.
+    """
+    var reversed_idx = UInt(0)
+    var current_val = idx
+    var digits = InlineArray[UInt, len(bases)](uninitialized=True)
+
+    for i in range(len(bases)):
+        var current_base = bases[i]
+        digits[i] = current_val % current_base
+        current_val //= current_base
+
+    var current_product_term_base = UInt(1)
+    for i in reversed(range(len(bases))):
+        var digit_to_add = digits[i]
+        reversed_idx += digit_to_add * current_product_term_base
+        current_product_term_base *= bases[i]
+    return reversed_idx
+
+
 fn _get_ordered_items[
-    length: UInt, stages: UInt, base: UInt
-](
-    out res: InlineArray[
-        Scalar[_get_dtype[length + base ** (stages - 1)]()], length
-    ]
-):
+    length: UInt, bases: List[UInt]
+](out res: InlineArray[Scalar[_get_dtype[length]()], length]):
     """The Butterfly diagram orders indexes by bit-reversed size."""
     res = __type_of(res)(uninitialized=True)
-    values = List[__type_of(res).ElementType](capacity=length)
-    for i in range(__type_of(res).ElementType(length)):
-        values.append(bit_reverse(i))
-    sort(values)
-    for i in range(length):
-        res[i] = bit_reverse(values[i])
+
+    @parameter
+    fn _is_all_two() -> Bool:
+        for base in bases:
+            if base != 2:
+                return False
+        return True
+
+    @parameter
+    if _is_all_two():
+        values = List[__type_of(res).ElementType](capacity=length)
+        for i in range(__type_of(res).ElementType(length)):
+            values.append(bit_reverse(i))
+        sort(values)
+        for i in range(length):
+            res[i] = bit_reverse(values[i])
+    else:
+
+        @parameter
+        fn _reversed() -> List[UInt]:
+            var rev = List[UInt](capacity=len(bases))
+            for item in reversed(bases):
+                rev.append(item)
+            return rev
+
+        for i in range(length):
+            res[i] = _mixed_radix_digit_reverse[_reversed()](i)
 
 
 # TODO: this can be redesigned to skip over C(1, 0) and
@@ -1059,29 +1078,124 @@ fn _log_mod[base: UInt](x: UInt) -> (UInt, UInt):
     """Get the maximum exponent of base that fully divides x and the
     remainder.
     """
-    if x % base != 0:
-        return 0, x
-    ref log_res = _log_mod[base](x // base)
-    return log_res[0] + 1, log_res[1]
+    var div = x // base
+
+    @parameter
+    fn _run() -> (UInt, UInt):
+        ref res = _log_mod[base](div)
+        res[0] += 1
+        return res
+
+    # TODO: benchmark whether this performs better than doing branches
+    return (UInt(0), x) if x % base != 0 else (
+        (UInt(1), UInt(0)) if div == 1 else _run()
+    )
 
 
 def main():
-    from tests import (
-        test_intra_block_radix_2_with_8_samples,
-        test_intra_block_radix_n_with_8_samples,
-        test_intra_block_radix_2_with_4_samples,
-        test_intra_block_radix_n_with_4_samples,
+    from tests import test_intra_block_radix_n
+    from _test_values import (
+        _get_test_values_2,
+        _get_test_values_3,
+        _get_test_values_4,
+        _get_test_values_5,
+        _get_test_values_6,
+        _get_test_values_7,
+        _get_test_values_8,
+        _get_test_values_10,
+        _get_test_values_16,
+        _get_test_values_20,
+        _get_test_values_21,
+        _get_test_values_32,
+        _get_test_values_35,
+        _get_test_values_48,
+        _get_test_values_60,
+        _get_test_values_64,
+        _get_test_values_100,
+        _get_test_values_128,
     )
 
-    # test_intra_block_radix_2_with_8_samples()
-    test_intra_block_radix_n_with_8_samples[2]()
-    # test_intra_block_radix_n_with_8_samples[8]()
-    # @parameter
-    # for base in [2, 8]:
-    # test_intra_block_radix_n_with_8_samples[base]()
-    # @parameter
-    # for base in [2, 4]:
-    #     test_intra_block_radix_n_with_4_samples[base]()
-    # test_intra_block_radix_n_with_4_samples[2]()
-    # test_intra_block_radix_2_with_4_samples()
-    # test_intra_block_radix_n_with_4_samples[2]()
+    alias L = List[UInt]
+
+    alias values_2 = _get_test_values_2[DType.float64]()
+    test_intra_block_radix_n[L(2), values_2]()
+
+    alias values_3 = _get_test_values_3[DType.float64]()
+    test_intra_block_radix_n[L(3), values_3]()
+
+    alias values_4 = _get_test_values_4[DType.float64]()
+    test_intra_block_radix_n[L(4), values_4]()
+    test_intra_block_radix_n[L(2), values_4]()
+
+    alias values_5 = _get_test_values_5[DType.float64]()
+    test_intra_block_radix_n[L(5), values_5]()
+
+    alias values_6 = _get_test_values_6[DType.float64]()
+    test_intra_block_radix_n[L(6), values_6]()
+    test_intra_block_radix_n[L(3, 2), values_6]()
+    test_intra_block_radix_n[L(2, 3), values_6]()
+
+    alias values_7 = _get_test_values_7[DType.float64]()
+    test_intra_block_radix_n[L(7), values_7]()
+
+    alias values_8 = _get_test_values_8[DType.float64]()
+    test_intra_block_radix_n[L(8), values_8]()
+    test_intra_block_radix_n[L(2), values_8]()
+    test_intra_block_radix_n[L(4, 2), values_8]()
+    # test_intra_block_radix_n[L(2, 4), values_8]()
+
+    alias values_10 = _get_test_values_10[DType.float64]()
+    test_intra_block_radix_n[L(10), values_10]()
+    test_intra_block_radix_n[L(5, 2), values_10]()
+
+    alias values_16 = _get_test_values_16[DType.float64]()
+    test_intra_block_radix_n[L(16), values_16]()
+    test_intra_block_radix_n[L(2), values_16]()
+    # test_intra_block_radix_n[L(4), values_16]()
+    # test_intra_block_radix_n[L(2, 4), values_16]()
+    test_intra_block_radix_n[L(8, 2), values_16]()
+    # test_intra_block_radix_n[L(2, 8), values_16]()
+
+    alias values_20 = _get_test_values_20[DType.float64]()
+    test_intra_block_radix_n[L(10, 2), values_20]()
+    test_intra_block_radix_n[L(5, 4), values_20]()
+    # test_intra_block_radix_n[L(5, 2), values_20]()
+
+    alias values_21 = _get_test_values_21[DType.float64]()
+    test_intra_block_radix_n[L(7, 3), values_21]()
+
+    alias values_32 = _get_test_values_32[DType.float64]()
+    test_intra_block_radix_n[L(2), values_32]()
+    test_intra_block_radix_n[L(16, 2), values_32]()
+    test_intra_block_radix_n[L(8, 4), values_32]()
+    # test_intra_block_radix_n[L(4, 2), values_32]()
+    # test_intra_block_radix_n[L(8, 2), values_32]()
+
+    alias values_35 = _get_test_values_35[DType.float64]()
+    test_intra_block_radix_n[L(7, 5), values_35]()
+
+    alias values_48 = _get_test_values_48[DType.float64]()
+    test_intra_block_radix_n[L(8, 6), values_48]()
+    # test_intra_block_radix_n[L(3, 2), values_48]()
+
+    alias values_60 = _get_test_values_60[DType.float64]()
+    test_intra_block_radix_n[L(10, 6), values_60]()
+    test_intra_block_radix_n[L(6, 5, 2), values_60]()
+    test_intra_block_radix_n[L(5, 4, 3), values_60]()
+    # test_intra_block_radix_n[L(3, 4, 5), values_60]()
+    # test_intra_block_radix_n[L(5, 3, 2), values_60]()
+
+    alias values_64 = _get_test_values_64[DType.float64]()
+    test_intra_block_radix_n[L(2), values_64]()
+    # test_intra_block_radix_n[L(8), values_64]()
+    # test_intra_block_radix_n[L(4), values_64]()
+    test_intra_block_radix_n[L(16, 4), values_64]()
+
+    alias values_100 = _get_test_values_100[DType.float64]()
+    test_intra_block_radix_n[L(20, 5), values_100]()
+    # test_intra_block_radix_n[L(10), values_100]()
+    # test_intra_block_radix_n[L(5, 4), values_100]()
+
+    alias values_128 = _get_test_values_128[DType.float64]()
+    test_intra_block_radix_n[L(2), values_128]()
+    test_intra_block_radix_n[L(16, 8), values_128]()
