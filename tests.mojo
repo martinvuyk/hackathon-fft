@@ -5,7 +5,7 @@ from gpu.host import DeviceContext
 from testing import assert_almost_equal
 
 from _test_values import _get_test_values_8, _TestValues
-from main import _intra_block_fft_launch, _intra_block_fft_launch_radix_n
+from fft import _intra_block_fft_launch, _intra_block_fft_launch_radix_n
 
 
 def test_intra_block_radix_2_with_8_samples():
@@ -149,3 +149,111 @@ def test_intra_block_radix_n[bases: List[UInt], test_values: _TestValues]():
         print("----------------------------")
         print("Tests passed")
         print("----------------------------")
+
+
+def main():
+    from _test_values import (
+        _get_test_values_2,
+        _get_test_values_3,
+        _get_test_values_4,
+        _get_test_values_5,
+        _get_test_values_6,
+        _get_test_values_7,
+        _get_test_values_8,
+        _get_test_values_10,
+        _get_test_values_16,
+        _get_test_values_20,
+        _get_test_values_21,
+        _get_test_values_32,
+        _get_test_values_35,
+        _get_test_values_48,
+        _get_test_values_60,
+        _get_test_values_64,
+        _get_test_values_100,
+        _get_test_values_128,
+    )
+
+    alias L = List[UInt]
+
+    alias values_2 = _get_test_values_2[DType.float64]()
+    test_intra_block_radix_n[L(2), values_2]()
+
+    alias values_3 = _get_test_values_3[DType.float64]()
+    test_intra_block_radix_n[L(3), values_3]()
+
+    alias values_4 = _get_test_values_4[DType.float64]()
+    test_intra_block_radix_n[L(4), values_4]()
+    test_intra_block_radix_n[L(2), values_4]()
+
+    alias values_5 = _get_test_values_5[DType.float64]()
+    test_intra_block_radix_n[L(5), values_5]()
+
+    alias values_6 = _get_test_values_6[DType.float64]()
+    test_intra_block_radix_n[L(6), values_6]()
+    test_intra_block_radix_n[L(3, 2), values_6]()
+    test_intra_block_radix_n[L(2, 3), values_6]()
+
+    alias values_7 = _get_test_values_7[DType.float64]()
+    test_intra_block_radix_n[L(7), values_7]()
+
+    alias values_8 = _get_test_values_8[DType.float64]()
+    test_intra_block_radix_n[L(8), values_8]()
+    test_intra_block_radix_n[L(2), values_8]()
+    test_intra_block_radix_n[L(4, 2), values_8]()
+    test_intra_block_radix_n[L(2, 4), values_8]()
+
+    alias values_10 = _get_test_values_10[DType.float64]()
+    test_intra_block_radix_n[L(10), values_10]()
+    test_intra_block_radix_n[L(5, 2), values_10]()
+
+    alias values_16 = _get_test_values_16[DType.float64]()
+    test_intra_block_radix_n[L(16), values_16]()
+    test_intra_block_radix_n[L(2), values_16]()
+    test_intra_block_radix_n[L(4), values_16]()
+    test_intra_block_radix_n[L(2, 4), values_16]()
+    test_intra_block_radix_n[L(8, 2), values_16]()
+    test_intra_block_radix_n[L(2, 8), values_16]()
+
+    alias values_20 = _get_test_values_20[DType.float64]()
+    test_intra_block_radix_n[L(10, 2), values_20]()
+    test_intra_block_radix_n[L(5, 4), values_20]()
+    test_intra_block_radix_n[L(5, 2), values_20]()
+
+    alias values_21 = _get_test_values_21[DType.float64]()
+    test_intra_block_radix_n[L(7, 3), values_21]()
+
+    alias values_32 = _get_test_values_32[DType.float64]()
+    test_intra_block_radix_n[L(2), values_32]()
+    test_intra_block_radix_n[L(16, 2), values_32]()
+    test_intra_block_radix_n[L(8, 4), values_32]()
+    test_intra_block_radix_n[L(4, 2), values_32]()
+    test_intra_block_radix_n[L(8, 2), values_32]()
+
+    alias values_35 = _get_test_values_35[DType.float64]()
+    test_intra_block_radix_n[L(7, 5), values_35]()
+
+    alias values_48 = _get_test_values_48[DType.float64]()
+    test_intra_block_radix_n[L(8, 6), values_48]()
+    test_intra_block_radix_n[L(3, 2), values_48]()
+
+    alias values_60 = _get_test_values_60[DType.float64]()
+    test_intra_block_radix_n[L(10, 6), values_60]()
+    test_intra_block_radix_n[L(6, 5, 2), values_60]()
+    test_intra_block_radix_n[L(5, 4, 3), values_60]()
+    test_intra_block_radix_n[L(3, 4, 5), values_60]()
+    test_intra_block_radix_n[L(5, 3, 2), values_60]()
+
+    alias values_64 = _get_test_values_64[DType.float64]()
+    test_intra_block_radix_n[L(2), values_64]()
+    test_intra_block_radix_n[L(8), values_64]()
+    test_intra_block_radix_n[L(4), values_64]()
+    test_intra_block_radix_n[L(16, 4), values_64]()
+
+    alias values_100 = _get_test_values_100[DType.float64]()
+    test_intra_block_radix_n[L(20, 5), values_100]()
+    test_intra_block_radix_n[L(10), values_100]()
+    test_intra_block_radix_n[L(5, 4), values_100]()
+
+    alias values_128 = _get_test_values_128[DType.float64]()
+    test_intra_block_radix_n[L(2), values_128]()
+    test_intra_block_radix_n[L(16, 8), values_128]()
