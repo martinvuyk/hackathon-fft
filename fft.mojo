@@ -375,22 +375,27 @@ fn _intra_block_fft_kernel_radix_n[
                 base=base,
                 length=length,
                 processed=processed,
+            ](
+                shared_f,
+                local_i,
                 twiddle_factors=twiddle_factors,
-            ](shared_f, local_i)
+            )
         barrier()
 
-        # when in the last stage, copy back to global memory
-        @parameter
-        if processed * base == length:  # all threads should execute
-            # FIXME: each thread should copy a contiguous block of memory
-            # or only e.g. thread 0 should copy the whole thing
+    # when in the last stage, copy back to global memory
+    # all threads should execute
+    # FIXME: each thread should copy a contiguous block of memory
+    # or only e.g. thread 0 should copy the whole thing
 
-            @parameter
-            for i in range(base):
-                alias offset = i * ratio
-                output[global_i + offset, 0] = shared_f[local_i + offset, 0]
-                output[global_i + offset, 1] = shared_f[local_i + offset, 1]
-        barrier()
+    @parameter
+    for i in range(ordered_bases[len(ordered_bases) - 1]):
+        alias offset = i * length // ordered_bases[len(ordered_bases) - 1]
+        output.store(
+            global_i + offset, 0, shared_f.load[width=2](local_i + offset, 0)
+        )
+        # output[global_i + offset, 0] = shared_f[local_i + offset, 0]
+        # output[global_i + offset, 1] = shared_f[local_i + offset, 1]
+    barrier()
 
 
 # ===-----------------------------------------------------------------------===#
@@ -819,7 +824,6 @@ fn _radix_n_fft_kernel[
     address_space: AddressSpace,
     *,
     length: UInt,
-    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], length - 1],
     do_rfft: Bool,
     base: UInt,
     processed: UInt,
@@ -828,6 +832,8 @@ fn _radix_n_fft_kernel[
         out_dtype, out_layout, out_origin, address_space=address_space
     ],
     local_i: UInt,
+    # for some reason it's faster to access when passed as a variable
+    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], length - 1],
 ):
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
     optimizations, at the cost of a bit of branching."""
@@ -847,7 +853,7 @@ fn _radix_n_fft_kernel[
 
     alias Co = ComplexSIMD[out_dtype, output.element_size]
     var x = InlineArray[Co, base](uninitialized=True)
-    var x_out = InlineArray[Co, base](uninitialized=True)
+    var x_out = InlineArray[Co, base](fill=Co(0, 0))
 
     @parameter
     for i in range(base):
@@ -863,36 +869,125 @@ fn _radix_n_fft_kernel[
     @parameter
     for i in range(base):
         ref x_i = x_out[i]
-        x_i = x[0]
+        x_i.re += x[0].re
+        x_i.im += x[0].im
         var idx = n + i * offset
 
         @parameter
         for j in range(1, base):
             ref x_j = x[j]
 
-            @parameter
-            if processed == 1 and i == 0:
-                x_i.re += x_j.re
+            # @parameter
+            # if processed == 1 and i == 0:
+            #     x_i.re += x_j.re
 
-                @parameter
-                if not do_rfft:
-                    x_i.im += x_j.im
-                continue
+            #     @parameter
+            #     if not do_rfft:
+            #         x_i.im += x_j.im
+            #     continue
 
             alias is_even = length % 2 == 0  # avoid evaluating for uneven
             alias next_offset = offset * Sc(base)
             alias ratio = Sc(length) // next_offset
             var twiddle_idx = ((Sc(j) * idx) % next_offset) * ratio
 
+            @parameter
+            if i > base // 2 or (base % 2 == 0 and i == base // 2):
+                if local_i == 0:
+                    print(
+                        "base:",
+                        base,
+                        "local_i:",
+                        local_i,
+                        "idx:",
+                        idx,
+                        "i:",
+                        i,
+                        "j:",
+                        j,
+                        "twiddle_idx:",
+                        twiddle_idx,
+                        "twf:",
+                        twiddle_factors.unsafe_get(
+                            twiddle_idx - 1
+                        ) if twiddle_idx
+                        != 0 else ComplexSIMD[out_dtype, 1](1, 0),
+                    )
+                continue
+            if local_i == 0:
+                print(
+                    "base:",
+                    base,
+                    "local_i:",
+                    local_i,
+                    "idx:",
+                    idx,
+                    "i:",
+                    i,
+                    "j:",
+                    j,
+                    "twiddle_idx:",
+                    twiddle_idx,
+                    "twf:",
+                    twiddle_factors.unsafe_get(twiddle_idx - 1) if twiddle_idx
+                    != 0 else ComplexSIMD[out_dtype, 1](1, 0),
+                    "base - j:",
+                    base - j,
+                )
+
+            var twf = rebind[Co](
+                twiddle_factors.unsafe_get(twiddle_idx - 1) if twiddle_idx
+                != 0 else ComplexSIMD[out_dtype, 1](1, 0)
+            )
+            x_i = twf.fma(x_j, x_i)
+
+            @parameter
+            if base % 2 == 0 and i == 0 and j % 2 != 0:
+                # print("base -i:", base - i, "base -j", base - j, "-twf:", -twf)
+                x_out[base // 2] = (-twf).fma(x[j], x_out[base // 2])
+            elif base % 2 == 0 and i == 0:
+                # print("base -i:", base - i, "base -j", base - j, "-twf:", -twf)
+                x_out[base // 2] = twf.fma(x[j], x_out[base // 2])
+            elif base % 2 != 0 and i == 0:
+                ...
+                # x_i = twf.fma(x[base - j], x_i)
+            # elif base % 2 == 0 and base - i != i and base - j != j:
+            #     x_out[base - i] = (-twf).fma(x[base - j], x_out[base - i])
+            elif base % 2 == 0 and base - i != i:  # and j % 2 != 0:
+                # print("base -i:", base - i, "base -j", base - j, "-twf:", -twf)
+                x_out[base - i] = Co(twf.re, -twf.im).fma(x[j], x_out[base - i])
+                # x_out[base - i] = (-twf).fma(x[j], x_out[base - i])
+            # elif base % 2 == 0 and base - i != i and j % 2 == 0:
+            #     x_out[base - i] = twf.fma(x[j], x_out[base - i])
+            elif base % 2 != 0:  # and j % 2 == 0:
+                x_out[base - i] = Co(twf.re, -twf.im).fma(x[j], x_out[base - i])
+            # elif base - i != i and processed == 1:
+            #     x_out[base - i] = Co(twf.re, -twf.im).fma(
+            #         x[base - j], x_out[base - i]
+            #     )
+            # elif base - i != i and base - j != j and processed == 4:
+            #     x_out[base - i] = (-twf).fma(x[j], x_out[base - i])
+            # elif base - i != i and processed == 4:
+            #     x_out[base - i] = twf.fma(x[j], x_out[base - i])
+
+            continue
             if twiddle_idx == 0:  # Co(1, 0)
                 x_i.re += x_j.re
+
+                # @parameter
+                # if base - j != j:
+                #     x_i.re += x[base - j].re
 
                 @parameter
                 if not is_first_rfft_stage:
                     x_i.im += x_j.im
+
+                    # @parameter
+                    # if base - j != j:
+                    #     x_i.im += -x[base - j].im
                 else:
                     x_i.im += 0
-            elif is_even and 4 * twiddle_idx == length:  # Co(0, -1)
+            elif is_even and 2 * twiddle_idx == length // 2:  # Co(0, -1)
 
                 @parameter
                 if not is_first_rfft_stage:
@@ -900,7 +995,7 @@ fn _radix_n_fft_kernel[
                 else:
                     x_i.re += 0
                 x_i.im += -x_j.re
-            elif is_even and 2 * twiddle_idx == length:  # Co(-1, 0)
+            elif is_even and twiddle_idx == length // 2:  # Co(-1, 0)
                 x_i.re += -x_j.re
 
                 @parameter
@@ -908,7 +1003,7 @@ fn _radix_n_fft_kernel[
                     x_i.im += -x_j.im
                 else:
                     x_i.im += 0
-            elif is_even and 4 * twiddle_idx == 3 * length:  # Co(0, 1)
+            elif is_even and 2 * twiddle_idx == 3 * length // 2:  # Co(0, 1)
 
                 @parameter
                 if not is_first_rfft_stage:
@@ -921,19 +1016,20 @@ fn _radix_n_fft_kernel[
 
                 @parameter
                 if not is_first_rfft_stage:
-                    # x_i = Co(twf.re, twf.im).fma(x_j, x_i)
-                    var res = Co(twf.re, twf.im) * x_j
-                    x_i.re += res.re
-                    x_i.im += res.im
+                    # @parameter
+                    # if base - j != j:
+                    #     x_i = Co(twf.re, -twf.im).fma(x[base - j], x_i)
+                    x_i = rebind[Co](twf).fma(x_j, x_i)
                 else:
                     alias SM = SIMD[out_dtype, output.element_size]
-                    # x_i.re = SM(twf.re).fma(x_j.re, x_i.re)
-                    # x_i.im = SM(twf.im).fma(x_j.re, x_i.im)
-                    x_i.re += SM(twf.re) * x_j.re
-                    x_i.im += SM(twf.im) * x_j.re
+                    # var acc_re = rebind[SM](twf.re).fma(x[base - j].re, x_i.re)
+                    # var acc_im = rebind[SM](-twf.im).fma(x[base - j].re, x_i.im)
+                    x_i.re = rebind[SM](twf.re).fma(x_j.re, x_i.re)
+                    x_i.im = rebind[SM](twf.im).fma(x_j.re, x_i.im)
 
     @parameter
     for i in range(base):
+        # TODO: this could be more efficient
         var idx = n + i * offset
         var ptr = x_out.unsafe_ptr().bitcast[Scalar[out_dtype]]() + 2 * i
         var res = ptr.load[width=2]()
