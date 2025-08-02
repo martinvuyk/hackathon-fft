@@ -4,15 +4,12 @@ from layout import Layout, LayoutTensor
 from gpu.host import DeviceContext
 from os import abort
 from random import seed
-
-# from nn import irfft
-
+from sys.info import is_64bit
+from bit import count_trailing_zeros
 
 from _test_values import _get_test_values_128
 from tests import _TestValues
 from fft import (
-    _intra_block_fft_launch_radix_n,
-    _intra_block_fft_launch,
     _intra_block_fft_kernel_radix_n,
     _get_twiddle_factors,
     _log_mod,
@@ -36,16 +33,50 @@ def _bench_intra_block_fft_launch_radix_n[
     alias twiddle_factors = _get_twiddle_factors[length, out_dtype]()
 
     @parameter
+    fn _reduce_mul[b: List[UInt]](out res: UInt):
+        res = UInt(1)
+        for base in b:
+            res *= base
+
+    @parameter
+    fn _is_all_two() -> Bool:
+        for base in bases:
+            if base != 2:
+                return False
+        return True
+
+    @parameter
     fn _build_ordered_bases() -> List[UInt]:
-        var processed = UInt(1)
-        var new_bases = List[UInt](capacity=len(bases))
+        var new_bases: List[UInt]
 
         @parameter
-        for base in bases:
-            var amnt_divisible = _log_mod[base](length // processed)[0]
-            for _ in range(amnt_divisible):
-                new_bases.append(base)
-                processed *= base
+        if _reduce_mul[bases]() == length:
+            new_bases = bases
+        else:
+            var processed = UInt(1)
+            new_bases = List[UInt](capacity=len(bases))
+
+            @parameter
+            for base in bases:
+                var amnt_divisible: UInt
+
+                @parameter
+                if _is_all_two() and length.is_power_of_two() and base == 2:
+                    # FIXME(#5003): this should just be Scalar[DType.index]
+                    @parameter
+                    if is_64bit():
+                        amnt_divisible = UInt(
+                            count_trailing_zeros(UInt64(length))
+                        )
+                    else:
+                        amnt_divisible = UInt(
+                            count_trailing_zeros(UInt32(length))
+                        )
+                else:
+                    amnt_divisible = _log_mod[base](length // processed)[0]
+                for _ in range(amnt_divisible):
+                    new_bases.append(base)
+                    processed *= base
         sort(new_bases)  # FIXME: this should just be ascending=False
         new_bases.reverse()
         return new_bases
@@ -70,59 +101,6 @@ def _bench_intra_block_fft_launch_radix_n[
         " to equal the sequence length",
     ]()
 
-    # @parameter
-    # fn call_fn[
-    #     in_dtype: DType,
-    #     out_dtype: DType,
-    #     in_layout: Layout,
-    #     out_layout: Layout,
-    #     *,
-    #     twiddle_factors: InlineArray[
-    #         ComplexSIMD[out_dtype, 1], in_layout.shape[0].value() - 1
-    #     ],
-    #     ordered_bases: List[UInt],
-    #     processed_list: List[UInt],
-    # ](
-    #     output: LayoutTensor[mut=True, out_dtype, out_layout],
-    #     x: LayoutTensor[mut=False, in_dtype, in_layout],
-    #     ctx: DeviceContext,
-    # ):
-    #     @always_inline
-    #     @parameter
-    #     fn inner_fn(ctx: DeviceContext) raises:
-    #         _intra_block_fft_kernel_radix_n[
-    #             in_dtype,
-    #             out_dtype,
-    #             in_layout,
-    #             out_layout,
-    #             twiddle_factors=twiddle_factors,
-    #             ordered_bases=ordered_bases,
-    #             processed_list=processed_list,
-    #         ](output, x)
-    #         ctx.synchronize()
-
-    #     try:
-    #         b.iter_custom[inner_fn](ctx)
-    #     except e:
-    #         abort(String("something: ", e))
-
-    # ctx.enqueue_function[
-    #     call_fn[
-    #         in_dtype,
-    #         out_dtype,
-    #         in_layout,
-    #         out_layout,
-    #         twiddle_factors=twiddle_factors,
-    #         ordered_bases=ordered_bases,
-    #         processed_list=processed_list,
-    #     ]
-    # ](
-    #     output,
-    #     x,
-    #     ctx,
-    #     grid_dim=1,
-    #     block_dim=length // ordered_bases[len(ordered_bases) - 1],
-    # )
     @parameter
     fn call_fn[
         in_dtype: DType,
@@ -148,6 +126,7 @@ def _bench_intra_block_fft_launch_radix_n[
                 twiddle_factors=twiddle_factors,
                 ordered_bases=ordered_bases,
                 processed_list=processed_list,
+                inverse=False,
             ](output, x)
 
     ctx.enqueue_function[
@@ -204,17 +183,12 @@ fn bench_intra_block_radix_n[
         @always_inline
         @parameter
         fn call_fn(ctx: DeviceContext) raises:
-            # _intra_block_fft_launch_radix_n[bases=bases](
-            #     out_tensor, x_tensor, ctx
-            # )
-            # ctx.synchronize()
             _bench_intra_block_fft_launch_radix_n[bases=bases](
                 out_tensor, x_tensor, ctx, b
             )
 
         b.iter_custom[call_fn](ctx)
 
-        # b.iter[call_fn]()
         _ = out_tensor
         _ = x_tensor
 
@@ -222,10 +196,18 @@ fn bench_intra_block_radix_n[
 def main():
     seed()
     var m = Bench(BenchConfig(num_repetitions=10))
-    # pure radix-2 implementation takes ~23 ms. the generic one ~90 ms
-    # in my machine. Cufft takes ~40 ms.
-    # NOTE: radix-2 implementation needs fixing to actually pass the tests.
-    alias bases_list: List[List[UInt]] = [[16, 8], [8, 2], [4, 2], [2]]
+    alias bases_list: List[List[UInt]] = [
+        [16, 8],
+        [16, 4, 2],
+        [8, 8, 2],
+        [8, 4, 4],
+        [8, 4, 2, 2],
+        [8, 2, 2, 2, 2],
+        [4, 4, 4, 2],
+        [4, 4, 2, 2, 2],
+        [4, 2, 2, 2, 2, 2],
+        [2],
+    ]
     alias test_values = _get_test_values_128[DType.float32]()
 
     @parameter
@@ -234,8 +216,6 @@ def main():
         m.bench_function[
             bench_intra_block_radix_n[DType.float32, bases, test_values]
         ](BenchId(String("bench_intra_block_radix_n[", suffix)))
-
-    # m.bench_function[bench_cufft[test_values]](BenchId("bench_cufft[128]"))
 
     results = Dict[String, (Float64, Int)]()
     for info in m.info_vec:
