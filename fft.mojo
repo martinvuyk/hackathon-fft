@@ -1,4 +1,4 @@
-from bit import bit_reverse, count_trailing_zeros
+from bit import bit_reverse, count_trailing_zeros, prev_power_of_two
 from complex import ComplexSIMD
 from gpu import thread_idx, block_idx, block_dim, barrier
 from gpu.host import DeviceContext
@@ -6,7 +6,7 @@ from gpu.host.info import _get_info_from_target
 from layout import Layout, LayoutTensor, IntTuple
 from layout.tensor_builder import LayoutTensorBuild as tb
 from math import exp, pi
-from sys.info import has_accelerator, is_64bit, _accelerator_arch
+from sys.info import has_accelerator, is_64bit, _accelerator_arch, simdwidthof
 
 
 def fft[
@@ -68,7 +68,6 @@ def fft[
     constrained[
         out_dtype.is_floating_point(), "out_dtype must be floating point"
     ]()
-    alias twiddle_factors = _get_twiddle_factors[length, out_dtype, inverse]()
 
     @parameter
     fn _reduce_mul[b: List[UInt]](out res: UInt):
@@ -157,7 +156,6 @@ def fft[
                 in_layout,
                 out_layout,
                 inverse=inverse,
-                twiddle_factors=twiddle_factors,
                 ordered_bases=ordered_bases,
                 processed_list=processed_list,
             ]
@@ -202,9 +200,6 @@ fn _intra_block_fft_kernel_radix_n[
     out_layout: Layout,
     *,
     inverse: Bool,
-    twiddle_factors: InlineArray[
-        ComplexSIMD[out_dtype, 1], in_layout.shape[0].value() - 1
-    ],
     ordered_bases: List[UInt],
     processed_list: List[UInt],
 ](
@@ -214,6 +209,7 @@ fn _intra_block_fft_kernel_radix_n[
     """An FFT that assumes `sequence_length <= max_threads_per_block` and that
     there is only one block."""
     alias length = in_layout.shape[0].value()
+    alias twiddle_factors = _get_twiddle_factors[length, out_dtype, inverse]()
     var global_i = block_dim.x * block_idx.x + thread_idx.x
     var local_i = thread_idx.x
     var shared_f = tb[out_dtype]().row_major[length, 2]().shared().alloc()
@@ -224,8 +220,8 @@ fn _intra_block_fft_kernel_radix_n[
     for b in range(len(ordered_bases)):
         alias base = ordered_bases[b]
         alias processed = processed_list[b]
-        alias ratio = length // base
-        var is_execution_thread = local_i < ratio
+        alias amnt_threads = length // base
+        var is_execution_thread = local_i < amnt_threads
 
         @parameter
         if processed == 1:
@@ -237,7 +233,7 @@ fn _intra_block_fft_kernel_radix_n[
                 # reorder input x(global_i) items to match F(current_item) layout
                 @parameter
                 for i in range(base):
-                    alias offset = i * ratio
+                    alias offset = i * amnt_threads
                     var g_idx = global_i + offset
 
                     var current_item: UInt
@@ -259,15 +255,45 @@ fn _intra_block_fft_kernel_radix_n[
                         constrained[len(in_layout) == 2, msg]()
                         constrained[in_layout.shape[1].value() == 2, msg]()
                         # TODO: make this more efficient
-                        shared_f[current_item, 0] = x[g_idx, 0].cast[
-                            out_dtype
-                        ]()
-                        shared_f[current_item, 1] = x[g_idx, 1].cast[
-                            out_dtype
-                        ]()
+                        shared_f.store(
+                            current_item,
+                            0,
+                            x.load[width=2](g_idx, 0).cast[out_dtype](),
+                        )
 
         barrier()
+
+        alias I = InlineArray[ComplexSIMD[out_dtype, 1], base - 1]
+
+        @parameter
+        fn _prep_twiddle_factors(out res: InlineArray[I, length // base]):
+            res = __type_of(res)(uninitialized=True)
+            alias Sc = Scalar[_get_dtype[length * base]()]
+            alias offset = Sc(processed)
+
+            alias next_offset = offset * Sc(base)
+            alias ratio = Sc(length) // next_offset
+            for local_i in range(length // base):
+                res[local_i] = I(uninitialized=True)
+                for j in range(1, base):
+                    var n = Sc(local_i) % offset + (Sc(local_i) // offset) * (
+                        offset * Sc(base)
+                    )
+                    var twiddle_idx = ((Sc(j) * n) % next_offset) * ratio
+                    res[local_i][j - 1] = twiddle_factors[
+                        twiddle_idx - 1
+                    ] if twiddle_idx != 0 else ComplexSIMD[out_dtype, 1](1, 0)
+
         if is_execution_thread:
+            alias twf = _prep_twiddle_factors()
+            # if local_i == 0:
+            #     print("prepared twf:")
+            #     for i in range(length // base):
+            #         print("local_i:", i)
+            #         for j in range(1, base):
+            #             print(twf[i][j - 1], end=", ")
+            #         print()
+
             _radix_n_fft_kernel[
                 out_dtype=out_dtype,
                 out_layout = shared_f.layout,
@@ -277,26 +303,24 @@ fn _intra_block_fft_kernel_radix_n[
                 length=length,
                 processed=processed,
                 inverse=inverse,
+                # twiddle_factors = twf[1] if length // base
+                # > 1 else I(uninitialized=True),
             ](
                 shared_f,
                 local_i,
-                twiddle_factors=twiddle_factors,
+                twiddle_factors=twf[local_i],
             )
         barrier()
 
     # when in the last stage, copy back to global memory
     # all threads should execute
-    # TODO: make this efficient. Each thread could copy a contiguous block of
-    # memory or only e.g. thread 0 could copy the whole thing.
+    # TODO: make this more efficient.
 
     @parameter
     for i in range(ordered_bases[len(ordered_bases) - 1]):
         alias offset = i * length // ordered_bases[len(ordered_bases) - 1]
         var res = shared_f.load[width=2](local_i + offset, 0)
         output.store(global_i + offset, 0, res)
-
-        # output[global_i + offset, 0] = shared_f[local_i + offset, 0]
-        # output[global_i + offset, 1] = shared_f[local_i + offset, 1]
     barrier()
 
 
@@ -322,7 +346,7 @@ fn _radix_n_fft_kernel[
     ],
     local_i: UInt,
     # for some reason it's faster to access when passed as a variable
-    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], length - 1],
+    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], base - 1],
 ):
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
     optimizations, at the cost of a bit of branching."""
@@ -341,22 +365,17 @@ fn _radix_n_fft_kernel[
     var n = Sc(local_i) % offset + (Sc(local_i) // offset) * (offset * Sc(base))
 
     alias Co = ComplexSIMD[out_dtype, output.element_size]
+    alias is_even = length % 2 == 0  # avoid evaluating for uneven
     alias base_twf = _get_twiddle_factors[base, out_dtype, inverse]()
-    var x = InlineArray[Co, base](uninitialized=True)
-    var x_out = InlineArray[Co, base](uninitialized=True)
 
     @parameter
-    for i in range(base):
-        var idx = Int(n + i * offset)
+    fn _transform[i: UInt, j: UInt]() -> ComplexSIMD[out_dtype, 1]:
+        var val = ComplexSIMD[out_dtype, 1](1, 0)
 
         @parameter
-        if do_rfft and processed == 1:
-            x[i] = Co(output[idx, 0], 0)
-        else:
-            var data = output.load[2 * output.element_size](idx, 0)
-            x[i] = UnsafePointer(to=data).bitcast[Co]()[]
-
-    alias is_even = length % 2 == 0  # avoid evaluating for uneven
+        for _ in range(i):
+            val *= base_twf[j - 1]
+        return val
 
     @parameter
     @always_inline
@@ -405,14 +424,19 @@ fn _radix_n_fft_kernel[
         else:
             x_i = twf.fma(x_j, acc)
 
+    var x = InlineArray[Co, base](uninitialized=True)
+    var x_out = InlineArray[Co, base](uninitialized=True)
+
     @parameter
-    fn _transform[i: UInt, j: UInt]() -> ComplexSIMD[out_dtype, 1]:
-        var val = ComplexSIMD[out_dtype, 1](1, 0)
+    for i in range(base):
+        var idx = Int(n + i * offset)
 
         @parameter
-        for _ in range(i):
-            val *= base_twf[j - 1]
-        return val
+        if do_rfft and processed == 1:
+            x[i] = Co(output[idx, 0], 0)
+        else:
+            var data = output.load[2 * output.element_size](idx, 0)
+            x[i] = UnsafePointer(to=data).bitcast[Co]()[]
 
     @parameter
     for j in range(1, base):
@@ -429,15 +453,28 @@ fn _radix_n_fft_kernel[
                     x_out[i] = _twf_fma[transform, True](x[j], x[0])
                 else:
                     x_out[i] = _twf_fma[transform, False](x[j], x_out[i])
-
             continue
 
-        alias next_offset = offset * Sc(base)
-        alias ratio = Sc(length) // next_offset
-        var twiddle_idx = ((Sc(j) * n) % next_offset) * ratio
-        var i0_j_twf = rebind[Co](
-            twiddle_factors.unsafe_get(twiddle_idx - 1)
-        ) if twiddle_idx != 0 else Co(1, 0)
+        var i0_j_twf = rebind[Co](twiddle_factors.unsafe_get(j - 1))
+        # var i0_j_twf = Co(1, 0)
+        # alias phasor = rebind[Co](
+        #     twiddle_factors[j - 1]
+        # ) if length // base > 1 else Co(1, 0)
+
+        # for _ in range(local_i):
+        #     i0_j_twf *= phasor
+        # print(
+        #     "processed:",
+        #     processed,
+        #     "base:",
+        #     base,
+        #     "local_i:",
+        #     local_i,
+        #     "j:",
+        #     j,
+        #     "i0_j_twf:",
+        #     i0_j_twf,
+        # )
 
         @parameter
         for i in range(base):
@@ -642,16 +679,31 @@ fn _get_twiddle_factors[
     alias N = length
     for n in range(1, N):
         # exp((-j * 2 * pi * n) / N)
+        var factor = 2 * n / N
+
+        var num: C
+
+        if factor == 0:
+            num = C(1, 0)
+        elif factor == 0.5:
+            num = C(0, -1)
+        elif factor == 1:
+            num = C(-1, 0)
+        elif factor == 1.5:
+            num = C(0, 1)
+        else:
+            var theta = Scalar[dtype](-factor * pi)
+            # TODO: re: __round__(15). This could be more generic using fputils
+            num = C(
+                _approx_cos(theta).__round__(15),
+                _approx_sin(theta).__round__(15),
+            )
+
         @parameter
         if not inverse:
-            theta = Scalar[dtype]((-2 * pi * n) / N)
+            res[n - 1] = num
         else:
-            theta = Scalar[dtype]((2 * pi * n) / N)
-        # TODO: re: __round__(15). This could be more generic using fputils
-        # TODO: maybe branching on exact sin/cos like for 0, 90, 30 is worth it
-        res[n - 1] = C(
-            _approx_cos(theta).__round__(15), _approx_sin(theta).__round__(15)
-        )
+            res[n - 1] = C(num.re, -num.im)
 
 
 fn _log_mod[base: UInt](x: UInt) -> (UInt, UInt):

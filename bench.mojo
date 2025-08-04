@@ -123,7 +123,7 @@ def _bench_intra_block_fft_launch_radix_n[
                 out_dtype,
                 in_layout,
                 out_layout,
-                twiddle_factors=twiddle_factors,
+                # twiddle_factors=twiddle_factors,
                 ordered_bases=ordered_bases,
                 processed_list=processed_list,
                 inverse=False,

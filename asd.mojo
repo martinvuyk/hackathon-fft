@@ -143,13 +143,7 @@ fn _get_twiddle_factors[
 
 fn main():
     # alias items = _get_ordered_items[8, List[UInt](4, 2)]()
-    # alias items = _get_twiddle_factors[3, DType.float64]()
-    # print(0, "", ComplexSIMD[DType.float64, 1](1, 0))
-    # for i in range(len(items)):
-    #     print(i + 1, "", items[i])
-    from bit import count_trailing_zeros
-
-    c = count_trailing_zeros(128)
-    d = UInt(count_trailing_zeros(UInt64(UInt(128))))
-    print(c, 2**c)
-    print(d, 2**d)
+    alias items = _get_twiddle_factors[8, DType.float64]()
+    print(0, "", ComplexSIMD[DType.float64, 1](1, 0))
+    for i in range(len(items)):
+        print(i + 1, "", items[i])
