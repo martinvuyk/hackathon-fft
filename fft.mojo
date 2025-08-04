@@ -7,6 +7,7 @@ from layout import Layout, LayoutTensor, IntTuple
 from layout.tensor_builder import LayoutTensorBuild as tb
 from math import exp, pi
 from sys.info import has_accelerator, is_64bit, _accelerator_arch, simdwidthof
+from memory.pointer import _GPUAddressSpace
 
 
 def fft[
@@ -184,6 +185,45 @@ def fft[
         ]()
 
 
+@always_inline
+def ifft[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+    *,
+    bases: List[UInt],
+](
+    output: LayoutTensor[mut=True, out_dtype, out_layout],
+    x: LayoutTensor[mut=False, in_dtype, in_layout],
+    ctx: DeviceContext,
+):
+    """Calculate the Discrete Fast Fourier Transform.
+
+    Parameters:
+        in_dtype: The `DType` of the input tensor.
+        out_dtype: The `DType` of the output tensor.
+        in_layout: The `Layout` of the input tensor.
+        out_layout: The `Layout` of the output tensor.
+        bases: The list of bases for which to build the mixed-radix algorithm.
+
+    Args:
+        output: The output tensor.
+        x: The input tensor.
+        ctx: The `DeviceContext`.
+
+    Notes:
+        If the given bases list does not multiply together to equal the length,
+        the builtin algorithm duplicates the biggest values that can still
+        divide the length until reaching it.
+
+        This function automatically runs the rfft if the input is real-valued.
+        Then copies the symetric results into their corresponding slots in the
+        output tensor.
+    """
+    fft[bases=bases, inverse=True](output, x, ctx)
+
+
 # ===-----------------------------------------------------------------------===#
 # inter_block
 # ===-----------------------------------------------------------------------===#
@@ -225,12 +265,12 @@ fn _intra_block_fft_kernel_radix_n[
 
         @parameter
         if processed == 1:
+            # reorder input x(global_i) items to match F(current_item) layout
             if is_execution_thread:
                 alias ordered_items = _get_ordered_items[
                     length, ordered_bases
                 ]()
 
-                # reorder input x(global_i) items to match F(current_item) layout
                 @parameter
                 for i in range(base):
                     alias offset = i * amnt_threads
@@ -254,7 +294,7 @@ fn _intra_block_fft_kernel_radix_n[
                         alias msg = "in_layout must be complex valued"
                         constrained[len(in_layout) == 2, msg]()
                         constrained[in_layout.shape[1].value() == 2, msg]()
-                        # TODO: make this more efficient
+                        # TODO: make sure this is the most efficient
                         shared_f.store(
                             current_item,
                             0,
@@ -263,37 +303,29 @@ fn _intra_block_fft_kernel_radix_n[
 
         barrier()
 
-        alias I = InlineArray[ComplexSIMD[out_dtype, 1], base - 1]
+        alias I = InlineArray[ComplexSIMD[out_dtype, 1], length // base]
 
         @parameter
-        fn _prep_twiddle_factors(out res: InlineArray[I, length // base]):
+        fn _prep_twiddle_factors(out res: InlineArray[I, base - 1]):
             res = __type_of(res)(uninitialized=True)
             alias Sc = Scalar[_get_dtype[length * base]()]
             alias offset = Sc(processed)
 
             alias next_offset = offset * Sc(base)
             alias ratio = Sc(length) // next_offset
-            for local_i in range(length // base):
-                res[local_i] = I(uninitialized=True)
-                for j in range(1, base):
+            for j in range(1, base):
+                res[j - 1] = I(uninitialized=True)
+                for local_i in range(length // base):
                     var n = Sc(local_i) % offset + (Sc(local_i) // offset) * (
                         offset * Sc(base)
                     )
                     var twiddle_idx = ((Sc(j) * n) % next_offset) * ratio
-                    res[local_i][j - 1] = twiddle_factors[
+                    res[j - 1][local_i] = twiddle_factors[
                         twiddle_idx - 1
                     ] if twiddle_idx != 0 else ComplexSIMD[out_dtype, 1](1, 0)
 
         if is_execution_thread:
             alias twf = _prep_twiddle_factors()
-            # if local_i == 0:
-            #     print("prepared twf:")
-            #     for i in range(length // base):
-            #         print("local_i:", i)
-            #         for j in range(1, base):
-            #             print(twf[i][j - 1], end=", ")
-            #         print()
-
             _radix_n_fft_kernel[
                 out_dtype=out_dtype,
                 out_layout = shared_f.layout,
@@ -303,18 +335,13 @@ fn _intra_block_fft_kernel_radix_n[
                 length=length,
                 processed=processed,
                 inverse=inverse,
-                # twiddle_factors = twf[1] if length // base
-                # > 1 else I(uninitialized=True),
-            ](
-                shared_f,
-                local_i,
-                twiddle_factors=twf[local_i],
-            )
+                length_base = length // base,
+                twiddle_factors=twf,
+            ](shared_f, local_i)
         barrier()
 
     # when in the last stage, copy back to global memory
-    # all threads should execute
-    # TODO: make this more efficient.
+    # TODO: make sure this is the most efficient
 
     @parameter
     for i in range(ordered_bases[len(ordered_bases) - 1]):
@@ -340,13 +367,15 @@ fn _radix_n_fft_kernel[
     base: UInt,
     processed: UInt,
     inverse: Bool,
+    length_base: UInt,
+    twiddle_factors: InlineArray[
+        InlineArray[ComplexSIMD[out_dtype, 1], length_base], base - 1
+    ],
 ](
     output: LayoutTensor[
         out_dtype, out_layout, out_origin, address_space=address_space
     ],
     local_i: UInt,
-    # for some reason it's faster to access when passed as a variable
-    twiddle_factors: InlineArray[ComplexSIMD[out_dtype, 1], base - 1],
 ):
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
     optimizations, at the cost of a bit of branching."""
@@ -369,7 +398,7 @@ fn _radix_n_fft_kernel[
     alias base_twf = _get_twiddle_factors[base, out_dtype, inverse]()
 
     @parameter
-    fn _transform[i: UInt, j: UInt]() -> ComplexSIMD[out_dtype, 1]:
+    fn _base_phasor[i: UInt, j: UInt]() -> ComplexSIMD[out_dtype, 1]:
         var val = ComplexSIMD[out_dtype, 1](1, 0)
 
         @parameter
@@ -446,52 +475,34 @@ fn _radix_n_fft_kernel[
 
             @parameter
             for i in range(base):
-                alias transform = rebind[Co](_transform[i, j]())
+                alias base_phasor = rebind[Co](_base_phasor[i, j]())
 
                 @parameter
                 if j == 1:
-                    x_out[i] = _twf_fma[transform, True](x[j], x[0])
+                    x_out[i] = _twf_fma[base_phasor, True](x[j], x[0])
                 else:
-                    x_out[i] = _twf_fma[transform, False](x[j], x_out[i])
+                    x_out[i] = _twf_fma[base_phasor, False](x[j], x_out[i])
             continue
 
-        var i0_j_twf = rebind[Co](twiddle_factors.unsafe_get(j - 1))
-        # var i0_j_twf = Co(1, 0)
-        # alias phasor = rebind[Co](
-        #     twiddle_factors[j - 1]
-        # ) if length // base > 1 else Co(1, 0)
-
-        # for _ in range(local_i):
-        #     i0_j_twf *= phasor
-        # print(
-        #     "processed:",
-        #     processed,
-        #     "base:",
-        #     base,
-        #     "local_i:",
-        #     local_i,
-        #     "j:",
-        #     j,
-        #     "i0_j_twf:",
-        #     i0_j_twf,
-        # )
+        alias j_array = twiddle_factors[j - 1]
+        ref i0_j_twf = j_array.unsafe_get(local_i)
 
         @parameter
         for i in range(base):
-            alias transform = rebind[Co](_transform[i, j]())
+            alias base_phasor = rebind[Co](_base_phasor[i, j]())
             var twf: Co
 
             @parameter
-            if transform.re == 1:  # Co(1, 0)
-                twf = i0_j_twf
-            elif transform.im == -1:  # Co(0, -1)
+            if base_phasor.re == 1:  # Co(1, 0)
+                twf = rebind[Co](i0_j_twf)
+            elif base_phasor.im == -1:  # Co(0, -1)
                 twf = Co(i0_j_twf.im, -i0_j_twf.re)
-            elif transform.re == -1:  # Co(-1, 0)
-                twf = -i0_j_twf
-            elif transform.im == 1:  # Co(0, 1)
+            elif base_phasor.re == -1:  # Co(-1, 0)
+                twf = -rebind[Co](i0_j_twf)
+            elif base_phasor.im == 1:  # Co(0, 1)
                 twf = Co(-i0_j_twf.im, i0_j_twf.re)
             else:
-                twf = i0_j_twf * transform
+                twf = rebind[Co](i0_j_twf) * base_phasor
 
             @parameter
             if j == 1:
@@ -501,16 +512,16 @@ fn _radix_n_fft_kernel[
 
     @parameter
     if inverse and processed * base == length:  # last ifft stage
+        alias factor = Scalar[out_dtype](1 / length)
 
         @parameter
         for i in range(base):
-            alias factor = Scalar[out_dtype](1 / length)
             x_out[i].re *= factor
             x_out[i].im *= factor
 
     @parameter
     for i in range(base):
-        # TODO: this could be more efficient
+        # TODO: make sure this is the most efficient
         var idx = n + i * offset
         var ptr = x_out.unsafe_ptr().bitcast[Scalar[out_dtype]]() + 2 * i
         var res = ptr.load[width=2]()
@@ -553,22 +564,24 @@ fn _mixed_radix_digit_reverse[bases: List[UInt]](idx: UInt) -> UInt:
     """Performs mixed-radix digit reversal for an index `idx` based on a
     sequence of `bases`.
 
-    Given N = R_0 * R_1 * ... * R_{M-1}, an input index `k` is represented as:
-    k = d_0 + d_1*R_0 + d_2*R_0*R_1 + ... + d_{M-1}*R_0*...*R_{M-2}
-    where d_i is the digit for radix R_i.
-
-    The reversed index k' is:
-    k' = d_{M-1} + d_{M-2}*R_{M-1} + ... + d_1*R_{M-1}*...*R_2 + d_0*R_{M-1}*...*R_1
-
     Parameters:
         bases: A List of UInt representing the radices in the order
-            R_0, R_1, ..., R_{M-1}.
+            `R_0, R_1, ..., R_{M-1}`.
 
     Args:
         idx: The input index to be reversed.
 
     Returns:
         The digit-reversed index.
+
+    Notes:
+        Given `N = R_0 * R_1 * ... * R_{M-1}`, an input index `k` is represented
+        as: `k = d_0 + d_1*R_0 + d_2*R_0*R_1 + ... + d_{M-1}*R_0*...*R_{M-2}`
+        where d_i is the digit for radix R_i.
+
+        The reversed index k' is:
+        `k' = d_{M-1} + d_{M-2}*R_{M-1} + ... + d_1*R_{M-1}*...*R_2 + d_0*R_{M-1
+        }*...*R_1`
     """
     var reversed_idx = UInt(0)
     var current_val = idx
@@ -693,7 +706,8 @@ fn _get_twiddle_factors[
             num = C(0, 1)
         else:
             var theta = Scalar[dtype](-factor * pi)
-            # TODO: re: __round__(15). This could be more generic using fputils
+            # TODO: Rounding to 15 is very arbitrary, find a good value and
+            # justify it
             num = C(
                 _approx_cos(theta).__round__(15),
                 _approx_sin(theta).__round__(15),

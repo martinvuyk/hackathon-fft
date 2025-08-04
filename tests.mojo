@@ -187,7 +187,6 @@ def _test_fft[
     func[L(2), values_8]()
     func[L(4, 2), values_8]()
     func[L(2, 4), values_8]()
-    return
 
     alias values_10 = _get_test_values_10[DType.float64]()
     func[L(10), values_10]()

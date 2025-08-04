@@ -1,17 +1,19 @@
-# A simple Fast fourier transform for the Modular hackathon.
+# An evolution of the Fast fourier transform for the Modular hackathon.
 
-[Implementation Link](https://github.com/martinvuyk/hackathon-fft).
+This is the improved and generalized version.
 
-This is my first time programming anything on a GPU beyond just using Tensorflow. As many people have said, it was surprisingly easy. I also decided to do something I'm familiar with and is solved in 1  dimension to avoid the many headaches that arise with multidimensional tensors.
-
-I went for the Fast Fourier Transform because I've run this algorithm by hand in university and it is in my original field of study. Also because while I was doing it I realized how parallelizable it is. Most of the operations get boiled down to an operation between a pair of complex numbers that again get stored in two complex numbers.
-
-The butterfly diagram is this original algorithm:
-
-![image](./Butterfly%208%20Input%20Example.jpg)
-
-Most of the work was figuring out how to setup the compile time constant arrays and how to index into them in parallel.
-
-The implementation itself is the simplest form by constraining to 1D signals and having the input be forced to be made up of a power of two length. A higher level function could then add padding etc. as a future improvement.
-
-Computation-speed-wise I don't think this algorithm will fare badly, I just didn't have time to setup proper benchmarking. I haven't looked at what SOTA algorithms do, this is what came to me over the course of today (yesterday was all puzzle solving to get up to speed).
+The performance beats cufft in most scenarios for sequential fft executions.
+cufft takes ~36 miliseconds running 10k 128-point fft. These are the results
+for my algorithm (the lists are the radixes used):
+```terminal
+bench_intra_block_radix_n[[UInt(16), UInt(8)], 128], 44.08921483703704
+bench_intra_block_radix_n[[UInt(16), UInt(4), UInt(2)], 128], 40.64003441724138
+bench_intra_block_radix_n[[UInt(8), UInt(8), UInt(2)], 128], 27.23606703081395
+bench_intra_block_radix_n[[UInt(8), UInt(4), UInt(4)], 128], 23.717161614
+bench_intra_block_radix_n[[UInt(8), UInt(4), UInt(2), UInt(2)], 128], 28.01864506428571
+bench_intra_block_radix_n[[UInt(8), UInt(2), UInt(2), UInt(2), UInt(2)], 128], 32.51976655833333
+bench_intra_block_radix_n[[UInt(4), UInt(4), UInt(4), UInt(2)], 128], 19.606640216393448
+bench_intra_block_radix_n[[UInt(4), UInt(4), UInt(2), UInt(2), UInt(2)], 128], 24.126215451360544
+bench_intra_block_radix_n[[UInt(4), UInt(2), UInt(2), UInt(2), UInt(2), UInt(2)], 128], 28.409911514285717
+bench_intra_block_radix_n[[UInt(2)], 128], 28.2544759
+```
