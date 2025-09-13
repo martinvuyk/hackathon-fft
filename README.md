@@ -17,3 +17,7 @@ bench_intra_block_radix_n[[UInt(4), UInt(4), UInt(2), UInt(2), UInt(2)], 128], 2
 bench_intra_block_radix_n[[UInt(4), UInt(2), UInt(2), UInt(2), UInt(2), UInt(2)], 128], 28.409911514285717
 bench_intra_block_radix_n[[UInt(2)], 128], 28.2544759
 ```
+
+So the performance improvement depending on the radix used is ~ 10 - 45 %
+(1.1 - 1.8 x) in sequential executions. Plus the benefit of no dynamic
+allocation or planning step which wasn't included in the benchmark.
