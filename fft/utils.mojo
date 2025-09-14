@@ -71,7 +71,8 @@ fn _get_ordered_items[
     length: UInt, bases: List[UInt]
 ](out res: InlineArray[Scalar[_get_dtype[length]()], length]):
     """The Butterfly diagram orders indexes by digit."""
-    res = __type_of(res)(uninitialized=True)
+    res = {uninitialized = True}
+    alias E = __type_of(res).ElementType
 
     @parameter
     fn _is_all_two() -> Bool:
@@ -82,8 +83,8 @@ fn _get_ordered_items[
 
     @parameter
     if _is_all_two():
-        values = List[__type_of(res).ElementType](capacity=length)
-        for i in range(__type_of(res).ElementType(length)):
+        var values = List[E](capacity=length)
+        for i in range(E(length)):
             values.append(bit_reverse(i))
         sort(values)
         for i in range(length):

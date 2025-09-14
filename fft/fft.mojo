@@ -358,6 +358,9 @@ fn _intra_block_fft_kernel_radix_n[
         alias processed = processed_list[b]
         alias amnt_threads = length // base
         var is_execution_thread = local_i < amnt_threads
+        alias twf = _prep_twiddle_factors[
+            length, base, processed, out_dtype, inverse
+        ]()
 
         @parameter
         if processed == 1:
@@ -374,9 +377,6 @@ fn _intra_block_fft_kernel_radix_n[
         # thread copies what it needs to run
 
         if is_execution_thread:
-            alias twf = _prep_twiddle_factors[
-                length, base, processed, out_dtype, inverse
-            ]()
             _radix_n_fft_kernel[
                 out_dtype=out_dtype,
                 out_layout = shared_f.layout,
@@ -424,16 +424,15 @@ fn _cpu_fft_kernel_radix_n[
     x: LayoutTensor[mut=False, in_dtype, in_layout],
 ):
     """An FFT that runs on the CPU."""
-    print("length:", length)
-    print("ordered_bases:", materialize[ordered_bases]().__str__())
 
     @parameter
     for b in range(len(ordered_bases)):
         alias base = ordered_bases[b]
         alias processed = processed_list[b]
         alias amnt_threads = length // base
-        print("processed:", processed)
-        print("base:", base)
+        alias twf = _prep_twiddle_factors[
+            length, base, processed, out_dtype, inverse
+        ]()
 
         @parameter
         fn _inner_kernel(local_i: Int):
@@ -450,9 +449,6 @@ fn _cpu_fft_kernel_radix_n[
             # NOTE: no barrier is needed here when processed == 1 because each
             # thread copies what it needs to run
 
-            alias twf = _prep_twiddle_factors[
-                length, base, processed, out_dtype, inverse
-            ]()
             _radix_n_fft_kernel[
                 out_dtype=out_dtype,
                 out_layout = output.layout,
@@ -466,9 +462,9 @@ fn _cpu_fft_kernel_radix_n[
                 twiddle_factors=twf,
             ](output, local_i)
 
-        # parallelize[func=_inner_kernel](amnt_threads)
-        for i in range(amnt_threads):
-            _inner_kernel(i)
+        parallelize[func=_inner_kernel](amnt_threads)
+        # for i in range(amnt_threads):
+        #     _inner_kernel(i)
 
 
 # ===-----------------------------------------------------------------------===#
@@ -698,16 +694,11 @@ fn _reorder_kernel[
         if base == length:  # do a DFT on the inputs
             current_item = idx
         else:
-            debug_assert(
-                idx < length,
-                "something went wrong with an internal helper function",
-            )
             current_item = UInt(ordered_items.unsafe_get(idx))
 
         @parameter
         if do_rfft:
             output[current_item, 0] = x[idx].cast[out_dtype]()
-            output[current_item, 1] = 0
             # NOTE: filling the imaginary part with 0 is not necessary
             # because the _radix_n_fft_kernel already sets it to 0
             # when do_rfft and processed == 1
