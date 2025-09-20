@@ -445,6 +445,12 @@ fn _cpu_fft_kernel_radix_n[
                     base=base,
                     ordered_bases=ordered_bases,
                 ](output, x, local_i)
+                # print("output: ", end="")
+                # for i in range(length):
+                #     print(
+                #         output[i, 0], ", ", output[i, 1], ", ", sep="", end=""
+                #     )
+                # print()
 
             # NOTE: no barrier is needed here when processed == 1 because each
             # thread copies what it needs to run
@@ -462,9 +468,9 @@ fn _cpu_fft_kernel_radix_n[
                 twiddle_factors=twf,
             ](output, local_i)
 
-        parallelize[func=_inner_kernel](amnt_threads)
-        # for i in range(amnt_threads):
-        #     _inner_kernel(i)
+        # parallelize[func=_inner_kernel](amnt_threads)
+        for i in range(amnt_threads):
+            _inner_kernel(i)
 
 
 # ===-----------------------------------------------------------------------===#
@@ -504,10 +510,10 @@ fn _radix_n_fft_kernel[
     alias rfft_idx_limit = length // 2
     alias is_first_rfft_stage = do_rfft and processed == 1
 
-    @parameter
-    if is_rfft_final_stage:
-        if local_i > rfft_idx_limit:
-            return
+    # @parameter
+    # if is_rfft_final_stage:
+    #     if local_i > rfft_idx_limit:
+    #         return
 
     alias offset = Sc(processed)
     var n = Sc(local_i) % offset + (Sc(local_i) // offset) * (offset * Sc(base))
@@ -617,7 +623,7 @@ fn _radix_n_fft_kernel[
             elif base_phasor.im == -1:  # Co(0, -1)
                 twf = Co(i0_j_twf.im, -i0_j_twf.re)
             elif base_phasor.re == -1:  # Co(-1, 0)
-                twf = -rebind[Co](i0_j_twf)
+                twf = rebind[Co](-i0_j_twf)
             elif base_phasor.im == 1:  # Co(0, 1)
                 twf = Co(-i0_j_twf.im, i0_j_twf.re)
             else:
@@ -642,18 +648,33 @@ fn _radix_n_fft_kernel[
     for i in range(base):
         # TODO: make sure this is the most efficient
         var idx = n + i * offset
-        var ptr = x_out.unsafe_ptr().bitcast[Scalar[out_dtype]]()
-        var res = (ptr + 2 * i).load[width=2]()
-        output.store(Int(idx), 0, res)
+        # var ptr = x_out.unsafe_ptr().bitcast[Scalar[out_dtype]]()
+        # var res = (ptr + 2 * i).load[width=2]()
+        # output.store(Int(idx), 0, res)
+        output[idx, 0] = x_out[i].re
+        output[idx, 1] = x_out[i].im
+        # if processed == 1:
+        #     print(
+        #         "local_i:",
+        #         local_i,
+        #         "idx:",
+        #         idx,
+        #         "x_out[i]:",
+        #         x_out[i],
+        #         "output[idx, 0]:",
+        #         output[idx, 0],
+        #         "output[idx, 1]:",
+        #         output[idx, 1],
+        #     )
 
-        @parameter
-        if is_rfft_final_stage:  # copy the symmetric conjugates
-            # when idx == 0 its conjugate is idx == length + 1
-            # when the sequence length is even then the next_idx can be idx
-            # when idx == rfft_idx_limit
-            var next_idx = Sc(length) * Int(idx != 0) - idx
-            if next_idx != idx:
-                output.store(Int(next_idx), 0, res[0].join(-res[1]))
+        # @parameter
+        # if is_rfft_final_stage:  # copy the symmetric conjugates
+        #     # when idx == 0 its conjugate is idx == length + 1
+        #     # when the sequence length is even then the next_idx can be idx
+        #     # when idx == rfft_idx_limit
+        #     var next_idx = Sc(length) * Int(idx != 0) - idx
+        #     if next_idx != idx:
+        #         output.store(Int(next_idx), 0, res[0].join(-res[1]))
 
 
 # ===-----------------------------------------------------------------------===#

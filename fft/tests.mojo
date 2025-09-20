@@ -176,23 +176,22 @@ def _test_fft[
 ]():
     alias L = List[UInt]
 
-    # alias values_2 = _get_test_values_2[dtype]()
-    # func[L(2), values_2]()
+    alias values_2 = _get_test_values_2[dtype]()
+    func[L(2), values_2]()
 
-    # alias values_3 = _get_test_values_3[dtype]()
-    # func[L(3), values_3]()
+    alias values_3 = _get_test_values_3[dtype]()
+    func[L(3), values_3]()
 
-    # alias values_4 = _get_test_values_4[dtype]()
-    # func[L(4), values_4]()
-    # func[L(2), values_4]()
+    alias values_4 = _get_test_values_4[dtype]()
+    func[L(4), values_4]()
+    func[L(2), values_4]()
 
-    # alias values_5 = _get_test_values_5[dtype]()
-    # func[L(5), values_5]()
+    alias values_5 = _get_test_values_5[dtype]()
+    func[L(5), values_5]()
 
     alias values_6 = _get_test_values_6[dtype]()
-    # func[L(6), values_6]()
+    func[L(6), values_6]()
     func[L(3, 2), values_6]()
-    return
     func[L(2, 3), values_6]()
 
     alias values_7 = _get_test_values_7[dtype]()
@@ -263,8 +262,8 @@ def _test_fft[
 
 def test_fft():
     alias dtype = DType.float64
-    _test_fft[dtype, test_fft_radix_n[dtype, inverse=False, target="cpu"]]()
-    # _test_fft[dtype, test_fft_radix_n[dtype, inverse=False, target="gpu"]]()
+    # _test_fft[dtype, test_fft_radix_n[dtype, inverse=False, target="cpu"]]()
+    _test_fft[dtype, test_fft_radix_n[dtype, inverse=False, target="gpu"]]()
 
 
 def test_ifft():

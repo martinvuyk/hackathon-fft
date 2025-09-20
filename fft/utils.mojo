@@ -1,4 +1,4 @@
-from sys.info import has_accelerator, is_64bit
+from sys.info import is_64bit
 from complex import ComplexSIMD
 from math import exp, pi, ceil
 from bit import (
@@ -9,8 +9,6 @@ from bit import (
 )
 
 
-# I know this seems overkill but it's better to save cache. and some
-# operations like modulo can become faster depending on the micro-architecture.
 fn _get_dtype[length: UInt]() -> DType:
     @parameter
     if length < UInt(UInt8.MAX):
