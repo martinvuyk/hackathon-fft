@@ -358,28 +358,32 @@ fn _intra_block_fft_kernel_radix_n[
     alias last_base = ordered_bases[len(ordered_bases) - 1]
 
     @parameter
-    fn _calc_max() -> UInt:
+    fn _calc_total_offsets() -> (UInt, List[UInt]):
         var bases = materialize[ordered_bases]()
+        var offsets = List[UInt](
+            capacity=(length // last_base) * (last_base - 1) * len(bases)
+        )
         var val = UInt(0)
         for i in range(len(bases)):
-            var v = (length // bases[i]) * (bases[i] - 1)
-            if v > val:
-                val = v
-        return val
+            offsets.append(val)
+            val += (length // bases[i]) * (bases[i] - 1)
+        return val, offsets^
 
-    var twfs = tb[out_dtype]().row_major[_calc_max(), 2]().shared().alloc()
+    alias total_offsets = _calc_total_offsets()
+    alias total_twfs = total_offsets[0]
+    alias twf_offsets = total_offsets[1]
+    var twfs = tb[out_dtype]().row_major[total_twfs, 2]().shared().alloc()
 
-    @parameter
-    for b in range(len(ordered_bases)):
-        alias base = ordered_bases[b]
-        alias processed = processed_list[b]
-        alias amnt_threads = length // base
-        var is_execution_thread = local_i < amnt_threads
-        alias base_twfs = _prep_twiddle_factors[
-            length, base, processed, out_dtype, inverse
-        ]()
+    if local_i == 0:
 
-        if local_i == 0:
+        @parameter
+        for b in range(len(ordered_bases)):
+            alias base = ordered_bases[b]
+            alias processed = processed_list[b]
+            alias amnt_threads = length // base
+            alias base_twfs = _prep_twiddle_factors[
+                length, base, processed, out_dtype, inverse
+            ]()
 
             @parameter
             for i in range(amnt_threads):
@@ -387,10 +391,17 @@ fn _intra_block_fft_kernel_radix_n[
                 @parameter
                 for j in range(base - 1):
                     alias t = base_twfs[i][j]
-                    alias idx = i * (base - 1) + j
+                    alias idx = twf_offsets[b] + i * (base - 1) + j
                     twfs[idx, 0] = t.re
                     twfs[idx, 1] = t.im
-        barrier()
+    barrier()
+
+    @parameter
+    for b in range(len(ordered_bases)):
+        alias base = ordered_bases[b]
+        alias processed = processed_list[b]
+        alias amnt_threads = length // base
+        var is_execution_thread = local_i < amnt_threads
 
         @parameter
         if processed == 1:
@@ -418,6 +429,7 @@ fn _intra_block_fft_kernel_radix_n[
                 length=length,
                 processed=processed,
                 inverse=inverse,
+                twf_offset = twf_offsets[b],
             ](shared_f, local_i, twfs)
         barrier()
 
@@ -521,6 +533,7 @@ fn _radix_n_fft_kernel[
     base: UInt,
     processed: UInt,
     inverse: Bool,
+    twf_offset: UInt,
 ](
     output: LayoutTensor[
         out_dtype, out_layout, out_origin, address_space=out_address_space
@@ -636,9 +649,14 @@ fn _radix_n_fft_kernel[
             continue
 
         var i0_j_twf_vec = twiddle_factors.load[2](
-            local_i * (base - 1) + (j - 1), 0
+            twf_offset + local_i * (base - 1) + (j - 1), 0
         )
-        var i0_j_twf = UnsafePointer(to=i0_j_twf_vec).bitcast[Co]()[]
+        var i0_j_twf = Co(i0_j_twf_vec[0], i0_j_twf_vec[1])
+
+        # var i0_j_twf_vec = twiddle_factors.load[2](
+        #     local_i * (base - 1) + (j - 1), 0
+        # )
+        # var i0_j_twf = UnsafePointer(to=i0_j_twf_vec).bitcast[Co]()[]
 
         @parameter
         for i in range(base):
