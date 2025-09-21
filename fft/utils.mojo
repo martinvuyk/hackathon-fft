@@ -186,33 +186,30 @@ fn _get_twiddle_factors[
             res[n - 1] = C(num.re, -num.im)
 
 
-@parameter
 fn _prep_twiddle_factors[
     length: UInt, base: UInt, processed: UInt, dtype: DType, inverse: Bool
 ](
     out res: InlineArray[
-        InlineArray[ComplexSIMD[dtype, 1], length // base], base - 1
+        InlineArray[ComplexSIMD[dtype, 1], base - 1], length // base
     ]
 ):
     alias twiddle_factors = _get_twiddle_factors[length, dtype, inverse]()
-    res = __type_of(res)(uninitialized=True)
+    res = {uninitialized = True}
     alias Sc = Scalar[_get_dtype[length * base]()]
     alias offset = Sc(processed)
 
     alias next_offset = offset * Sc(base)
     alias ratio = Sc(length) // next_offset
-    for j in range(1, base):
-        res[j - 1] = InlineArray[ComplexSIMD[dtype, 1], length // base](
-            uninitialized=True
-        )
-        for local_i in range(length // base):
+    for local_i in range(length // base):
+        res[local_i] = {uninitialized = True}
+        for j in range(1, base):
             var n = Sc(local_i) % offset + (Sc(local_i) // offset) * (
                 offset * Sc(base)
             )
             var twiddle_idx = ((Sc(j) * n) % next_offset) * ratio
-            res[j - 1][local_i] = twiddle_factors[
+            res[local_i][j - 1] = twiddle_factors[
                 twiddle_idx - 1
-            ] if twiddle_idx != 0 else ComplexSIMD[dtype, 1](1, 0)
+            ] if twiddle_idx != 0 else {1, 0}
 
 
 fn _log_mod[base: UInt](x: UInt) -> (UInt, UInt):
