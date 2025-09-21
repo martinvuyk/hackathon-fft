@@ -6,6 +6,7 @@ version = "0.1.0"
 
 [tasks]
 tests = "mojo run -D ASSERT=warn tests.mojo"
+bench = "mkdir -p build && mojo build bench.mojo -o build/bench && ./build/bench"
 
 [dependencies]
 mojo = "<1.0.0"

@@ -7,12 +7,11 @@ from random import seed
 from sys.info import is_64bit
 from bit import count_trailing_zeros
 
-from _test_values import _get_test_values_128
-from tests import _TestValues
-from fft import (
+from fft._test_values import _get_test_values_128
+from fft.tests import _TestValues
+from fft.fft import (
     _intra_block_fft_kernel_radix_n,
-    _get_twiddle_factors,
-    _log_mod,
+    _get_ordered_bases_processed_list,
 )
 
 
@@ -30,69 +29,9 @@ def _bench_intra_block_fft_launch_radix_n[
     mut b: Bencher,
 ):
     alias length = in_layout.shape[0].value()
-    alias twiddle_factors = _get_twiddle_factors[length, out_dtype]()
-
-    @parameter
-    fn _reduce_mul[b: List[UInt]](out res: UInt):
-        res = UInt(1)
-        for base in b:
-            res *= base
-
-    @parameter
-    fn _is_all_two() -> Bool:
-        for base in bases:
-            if base != 2:
-                return False
-        return True
-
-    @parameter
-    fn _build_ordered_bases() -> List[UInt]:
-        var new_bases: List[UInt]
-
-        @parameter
-        if _reduce_mul[bases]() == length:
-            new_bases = bases
-        else:
-            var processed = UInt(1)
-            new_bases = List[UInt](capacity=len(bases))
-
-            @parameter
-            for base in bases:
-                var amnt_divisible: UInt
-
-                @parameter
-                if _is_all_two() and length.is_power_of_two() and base == 2:
-                    # FIXME(#5003): this should just be Scalar[DType.index]
-                    @parameter
-                    if is_64bit():
-                        amnt_divisible = UInt(
-                            count_trailing_zeros(UInt64(length))
-                        )
-                    else:
-                        amnt_divisible = UInt(
-                            count_trailing_zeros(UInt32(length))
-                        )
-                else:
-                    amnt_divisible = _log_mod[base](length // processed)[0]
-                for _ in range(amnt_divisible):
-                    new_bases.append(base)
-                    processed *= base
-        sort(new_bases)  # FIXME: this should just be ascending=False
-        new_bases.reverse()
-        return new_bases
-
-    alias ordered_bases = _build_ordered_bases()
-
-    @parameter
-    fn _build_processed_list() -> List[UInt]:
-        var processed_list = List[UInt](capacity=len(ordered_bases))
-        var processed = 1
-        for base in ordered_bases:
-            processed_list.append(processed)
-            processed *= base
-        return processed_list
-
-    alias processed_list = _build_processed_list()
+    alias bases_processed = _get_ordered_bases_processed_list[length, bases]()
+    alias ordered_bases = bases_processed[0]
+    alias processed_list = bases_processed[1]
     constrained[
         processed_list[len(processed_list) - 1]
         * ordered_bases[len(ordered_bases) - 1]
@@ -108,9 +47,6 @@ def _bench_intra_block_fft_launch_radix_n[
         in_layout: Layout,
         out_layout: Layout,
         *,
-        twiddle_factors: InlineArray[
-            ComplexSIMD[out_dtype, 1], in_layout.shape[0].value() - 1
-        ],
         ordered_bases: List[UInt],
         processed_list: List[UInt],
     ](
@@ -123,28 +59,24 @@ def _bench_intra_block_fft_launch_radix_n[
                 out_dtype,
                 in_layout,
                 out_layout,
-                # twiddle_factors=twiddle_factors,
+                length=length,
                 ordered_bases=ordered_bases,
                 processed_list=processed_list,
+                do_rfft=True,
                 inverse=False,
             ](output, x)
 
+    alias num_threads = length // ordered_bases[len(ordered_bases) - 1]
     ctx.enqueue_function[
         call_fn[
             in_dtype,
             out_dtype,
             in_layout,
             out_layout,
-            twiddle_factors=twiddle_factors,
             ordered_bases=ordered_bases,
             processed_list=processed_list,
         ]
-    ](
-        output,
-        x,
-        grid_dim=1,
-        block_dim=length // ordered_bases[len(ordered_bases) - 1],
-    )
+    ](output, x, grid_dim=1, block_dim=num_threads)
     ctx.synchronize()
     _ = processed_list  # origin bug
 
@@ -197,15 +129,15 @@ def main():
     seed()
     var m = Bench(BenchConfig(num_repetitions=10))
     alias bases_list: List[List[UInt]] = [
-        [16, 8],
-        [16, 4, 2],
-        [8, 8, 2],
-        [8, 4, 4],
-        [8, 4, 2, 2],
-        [8, 2, 2, 2, 2],
-        [4, 4, 4, 2],
-        [4, 4, 2, 2, 2],
-        [4, 2, 2, 2, 2, 2],
+        # [16, 8],
+        # [16, 4, 2],
+        # [8, 8, 2],
+        # [8, 4, 4],
+        # [8, 4, 2, 2],
+        # [8, 2, 2, 2, 2],
+        # [4, 4, 4, 2],
+        # [4, 4, 2, 2, 2],
+        # [4, 2, 2, 2, 2, 2],
         [2],
     ]
     alias test_values = _get_test_values_128[DType.float32]()

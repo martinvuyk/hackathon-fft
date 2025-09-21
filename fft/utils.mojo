@@ -171,12 +171,12 @@ fn _get_twiddle_factors[
         elif factor == 1.5:
             num = C(0, 1)
         else:
-            var theta = Scalar[dtype](-factor * pi)
+            var theta = Float64(-factor * pi)
             # TODO: Rounding to 15 is very arbitrary, find a good value and
             # justify it
             num = C(
-                _approx_cos(theta).__round__(15),
-                _approx_sin(theta).__round__(15),
+                _approx_cos(theta).__round__(15).cast[dtype](),
+                _approx_sin(theta).__round__(15).cast[dtype](),
             )
 
         @parameter

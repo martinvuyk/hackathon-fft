@@ -490,6 +490,7 @@ fn _radix_n_fft_kernel[
     processed: UInt,
     inverse: Bool,
     length_base: UInt,  # some bug when lowering length//base
+    # NOTE: we use Float64 to avoid precision issues during seq multiplications
     twiddle_factors: InlineArray[
         InlineArray[ComplexSIMD[out_dtype, 1], length_base], base - 1
     ],
@@ -510,26 +511,27 @@ fn _radix_n_fft_kernel[
     alias rfft_idx_limit = length // 2
     alias is_first_rfft_stage = do_rfft and processed == 1
 
-    # @parameter
-    # if is_rfft_final_stage:
-    #     if local_i > rfft_idx_limit:
-    #         return
+    @parameter
+    if is_rfft_final_stage:
+        if local_i > rfft_idx_limit:
+            return
 
     alias offset = Sc(processed)
     var n = Sc(local_i) % offset + (Sc(local_i) // offset) * (offset * Sc(base))
 
-    alias Co = ComplexSIMD[out_dtype, output.element_size]
+    alias Co = ComplexSIMD[out_dtype, 1]
     alias is_even = length % 2 == 0  # avoid evaluating for uneven
-    alias base_twf = _get_twiddle_factors[base, out_dtype, inverse]()
 
     @parameter
-    fn _base_phasor[i: UInt, j: UInt]() -> ComplexSIMD[out_dtype, 1]:
-        var val = ComplexSIMD[out_dtype, 1](1, 0)
+    fn _base_phasor[i: UInt, j: UInt]() -> Co:
+        # NOTE: using Float64 to avoid multiplication error accumulation
+        alias base_twf = _get_twiddle_factors[base, DType.float64, inverse]()
+        var val = ComplexSIMD[DType.float64, 1](1, 0)
 
         @parameter
         for _ in range(i):
             val *= base_twf[j - 1]
-        return val
+        return Co(val.re.cast[out_dtype](), val.im.cast[out_dtype]())
 
     @parameter
     @always_inline
@@ -579,18 +581,20 @@ fn _radix_n_fft_kernel[
             x_i = twf.fma(x_j, acc)
 
     var x = InlineArray[Co, base](uninitialized=True)
-    var x_out = InlineArray[Co, base](uninitialized=True)
 
     @parameter
     for i in range(base):
-        var idx = Int(n + i * offset)
+        alias step = i * offset
+        var idx = Int(n + step)
 
         @parameter
         if do_rfft and processed == 1:
-            x[i] = Co(output[idx, 0], 0)
+            x[i] = Co(rebind[Scalar[out_dtype]](output[idx, 0]), 0)
         else:
-            var data = output.load[2 * output.element_size](idx, 0)
+            var data = output.load[2](idx, 0)
             x[i] = UnsafePointer(to=data).bitcast[Co]()[]
+
+    var x_out = InlineArray[Co, base](fill=x[0])
 
     @parameter
     for j in range(1, base):
@@ -600,13 +604,8 @@ fn _radix_n_fft_kernel[
 
             @parameter
             for i in range(base):
-                alias base_phasor = rebind[Co](_base_phasor[i, j]())
-
-                @parameter
-                if j == 1:
-                    x_out[i] = _twf_fma[base_phasor, True](x[j], x[0])
-                else:
-                    x_out[i] = _twf_fma[base_phasor, False](x[j], x_out[i])
+                alias base_phasor = _base_phasor[i, j]()
+                x_out[i] = _twf_fma[base_phasor, False](x[j], x_out[i])
             continue
 
         alias j_array = twiddle_factors[j - 1]
@@ -614,30 +613,26 @@ fn _radix_n_fft_kernel[
 
         @parameter
         for i in range(base):
-            alias base_phasor = rebind[Co](_base_phasor[i, j]())
+            alias base_phasor = _base_phasor[i, j]()
             var twf: Co
 
             @parameter
             if base_phasor.re == 1:  # Co(1, 0)
-                twf = rebind[Co](i0_j_twf)
+                twf = i0_j_twf
             elif base_phasor.im == -1:  # Co(0, -1)
                 twf = Co(i0_j_twf.im, -i0_j_twf.re)
             elif base_phasor.re == -1:  # Co(-1, 0)
-                twf = rebind[Co](-i0_j_twf)
+                twf = -i0_j_twf
             elif base_phasor.im == 1:  # Co(0, 1)
                 twf = Co(-i0_j_twf.im, i0_j_twf.re)
             else:
-                twf = rebind[Co](i0_j_twf) * base_phasor
+                twf = i0_j_twf * base_phasor
 
-            @parameter
-            if j == 1:
-                x_out[i] = _twf_fma(twf, x[j], x[0])
-            else:
-                x_out[i] = _twf_fma(twf, x[j], x_out[i])
+            x_out[i] = _twf_fma(twf, x[j], x_out[i])
 
     @parameter
     if inverse and processed * base == length:  # last ifft stage
-        alias factor = Scalar[out_dtype](1) / Scalar[out_dtype](length)
+        alias factor = (Float64(1) / Float64(length)).cast[out_dtype]()
 
         @parameter
         for i in range(base):
@@ -646,13 +641,14 @@ fn _radix_n_fft_kernel[
 
     @parameter
     for i in range(base):
+        alias step = i * offset
         # TODO: make sure this is the most efficient
-        var idx = n + i * offset
-        # var ptr = x_out.unsafe_ptr().bitcast[Scalar[out_dtype]]()
-        # var res = (ptr + 2 * i).load[width=2]()
-        # output.store(Int(idx), 0, res)
-        output[idx, 0] = x_out[i].re
-        output[idx, 1] = x_out[i].im
+        var idx = n + step
+        var ptr = x_out.unsafe_ptr().bitcast[Scalar[out_dtype]]()
+        var res = (ptr + 2 * i).load[width=2]()
+        output.store(Int(idx), 0, res)
+        # output[idx, 0] = x_out[i].re
+        # output[idx, 1] = x_out[i].im
         # if processed == 1:
         #     print(
         #         "local_i:",
@@ -667,14 +663,16 @@ fn _radix_n_fft_kernel[
         #         output[idx, 1],
         #     )
 
-        # @parameter
-        # if is_rfft_final_stage:  # copy the symmetric conjugates
-        #     # when idx == 0 its conjugate is idx == length + 1
-        #     # when the sequence length is even then the next_idx can be idx
-        #     # when idx == rfft_idx_limit
-        #     var next_idx = Sc(length) * Int(idx != 0) - idx
-        #     if next_idx != idx:
-        #         output.store(Int(next_idx), 0, res[0].join(-res[1]))
+        @parameter
+        if is_rfft_final_stage:  # copy the symmetric conjugates
+            # when idx == 0 its conjugate is idx == length + 1
+            # when the sequence length is even then the next_idx can be idx
+            # when idx == rfft_idx_limit
+            var next_idx = Sc(length) * Sc(Int(idx != 0)) - idx
+            if next_idx != idx:
+                output.store(Int(next_idx), 0, res[0].join(-res[1]))
+                # output[Int(next_idx), 0] = x_out[i].re
+                # output[Int(next_idx), 1] = -x_out[i].im
 
 
 # ===-----------------------------------------------------------------------===#
