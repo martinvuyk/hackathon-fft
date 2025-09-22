@@ -8,7 +8,6 @@ from layout.tensor_builder import LayoutTensorBuild as tb
 from math import ceil
 from bit import next_power_of_two
 from sys.info import has_accelerator, simd_width_of
-from utils import IndexList
 
 from fft.utils import (
     _get_dtype,
