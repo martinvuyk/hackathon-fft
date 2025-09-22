@@ -6,7 +6,9 @@ from gpu.host.info import is_cpu
 from layout import Layout, LayoutTensor, IntTuple
 from layout.tensor_builder import LayoutTensorBuild as tb
 from math import ceil
-from sys.info import has_accelerator
+from bit import next_power_of_two
+from sys.info import has_accelerator, simd_width_of
+from utils import IndexList
 
 from fft.utils import (
     _get_dtype,
@@ -19,20 +21,20 @@ from fft.utils import (
     _get_ordered_bases_processed_list,
 )
 
-# TODO: benchmark whether adding numbers like 6 or 10 is worth it
+# TODO: benchmark whether adding numbers like 6, 8 or 10 is worth it
 alias _DEFAULT_BASES: List[UInt] = [7, 5, 4, 3, 2]
 
 # TODO: specialized fft_2d and fft_3d. They can have better memory reuse.
 
 
 # TODO: batched fft for multiple sequences intra_block and inter_multiprocessor
-# - For intra_block: the amount of sequences can be sceduled as the amount of
+# - For intra_block: the amount of sequences can be scheduled as the amount of
 # blocks. Multiple calls to enqueue_function can be made if bigger than
 # max_amnt_blocks.
 # - For inter_multiprocessor: _inter_multiprocessor_fft_kernel_radix_n could
 # probably be parametrized to use global_i = global_i % sequence_length.
 # Multiple calls to enqueue_function can be made if bigger than max_threads
-def fft[
+fn fft[
     in_dtype: DType,
     out_dtype: DType,
     in_layout: Layout,
@@ -45,7 +47,7 @@ def fft[
     output: LayoutTensor[mut=True, out_dtype, out_layout],
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     ctx: DeviceContext,
-):
+) raises:
     """Calculate the Discrete Fast Fourier Transform.
 
     Parameters:
@@ -99,13 +101,13 @@ def fft[
 
     @parameter
     if is_cpu[target]():
-        # _cpu_fft_kernel_radix_n[
-        #     length=length,
-        #     ordered_bases=ordered_bases,
-        #     processed_list=processed_list,
-        #     do_rfft=do_rfft,
-        #     inverse=inverse,
-        # ](output, x)
+        _cpu_fft_kernel_radix_n[
+            length=length,
+            ordered_bases=ordered_bases,
+            processed_list=processed_list,
+            do_rfft=do_rfft,
+            inverse=inverse,
+        ](output, x)
         return
     constrained[
         has_accelerator(), "The non-cpu implementation is for GPU only"
@@ -139,50 +141,16 @@ def fft[
             ]
         ](output, x, grid_dim=1, block_dim=num_threads)
     elif num_threads <= max_threads_available:
-        # TODO: Ideally we'd be able to setup a version of the kernel that
-        # has a barrier after each iteration instead of dispatching a single
-        # function each time. But we need a device-wide barrier and the amount
-        # of threads have to be less than the concurrent limit
-        # FIXME: There seems to be a race condition of some sort. This
-        # should work totally fine but memory is being overwritten
-        # when running the kernel on each iteration somewhere.
-        # alias block_dim = ceil(num_threads / num_blocks)
-        # ctx.enqueue_function[
-        #     _inter_multiprocessor_fft_kernel_radix_n[
-        #         in_dtype,
-        #         out_dtype,
-        #         in_layout,
-        #         out_layout,
-        #         length=length,
-        #         base = ordered_bases[0],
-        #         processed = processed_list[0],
-        #         twiddle_factors=twiddle_factors,
-        #         ordered_bases=ordered_bases,
-        #         do_rfft=do_rfft,
-        #         inverse=inverse,
-        #     ]
-        # ](output, x, grid_dim=num_blocks, block_dim=block_dim)
-
-        # @parameter
-        # for i in range(1, len(ordered_bases)):
-        #     ctx.synchronize() # TODO: is this really necessary?
-        #     ctx.enqueue_function[
-        #         _inter_multiprocessor_fft_kernel_radix_n[
-        #             out_dtype,
-        #             out_layout,
-        #             length=length,
-        #             base = ordered_bases[i],
-        #             processed = processed_list[i],
-        #             twiddle_factors=twiddle_factors,
-        #             do_rfft=do_rfft,
-        #             inverse=inverse,
-        #         ]
-        #     ](output, grid_dim=num_blocks, block_dim=block_dim)
-
-        constrained[
-            False,
-            "_inter_multiprocessor_fft_kernel_radix_n is not implemented yet.",
-        ]()
+        alias block_dim = UInt(ceil(num_threads / num_blocks))
+        _launch_inter_multiprocessor_fft[
+            length=length,
+            processed_list=processed_list,
+            ordered_bases=ordered_bases,
+            do_rfft=do_rfft,
+            inverse=inverse,
+            block_dim=block_dim,
+            num_blocks=num_blocks,
+        ](output, x, ctx)
     else:
         # TODO: Implement for sequences > max_threads_available in the same GPU
         constrained[
@@ -194,7 +162,7 @@ def fft[
 
 
 @always_inline
-def ifft[
+fn ifft[
     in_dtype: DType,
     out_dtype: DType,
     in_layout: Layout,
@@ -206,7 +174,7 @@ def ifft[
     output: LayoutTensor[mut=True, out_dtype, out_layout],
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     ctx: DeviceContext,
-):
+) raises:
     """Calculate the Discrete Fast Fourier Transform.
 
     Parameters:
@@ -239,98 +207,175 @@ def ifft[
 # ===-----------------------------------------------------------------------===#
 
 
-# fn _inter_multiprocessor_fft_kernel_radix_n[
-#     in_dtype: DType,
-#     out_dtype: DType,
-#     in_layout: Layout,
-#     out_layout: Layout,
-#     *,
-#     length: UInt,
-#     base: UInt,
-#     processed: UInt,
-#     ordered_bases: List[UInt],
-#     do_rfft: Bool,
-#     inverse: Bool,
-# ](
-#     output: LayoutTensor[mut=True, out_dtype, out_layout],
-#     x: LayoutTensor[mut=False, in_dtype, in_layout],
-# ):
-#     """An FFT that assumes `sequence_length // smallest_base <=
-#     max_threads_available`."""
-#     constrained[processed == 1, "this overload is for the first stage only"]()
-#     alias amnt_threads = length // base
-#     var global_i = block_dim.x * block_idx.x + thread_idx.x
-#     var is_execution_thread = global_i < amnt_threads
+fn _launch_inter_multiprocessor_fft[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+    *,
+    length: UInt,
+    processed_list: List[UInt],
+    ordered_bases: List[UInt],
+    do_rfft: Bool,
+    inverse: Bool,
+    num_blocks: UInt,
+    block_dim: UInt,
+](
+    output: LayoutTensor[mut=True, out_dtype, out_layout],
+    x: LayoutTensor[mut=False, in_dtype, in_layout],
+    ctx: DeviceContext,
+) raises:
+    alias last_base = ordered_bases[len(ordered_bases) - 1]
 
-#     # reorder input x(global_i) items to match F(current_item) layout
-#     if is_execution_thread:
-#         _reorder_kernel[
-#             length=length,
-#             do_rfft=do_rfft,
-#             base=base,
-#             ordered_bases=ordered_bases,
-#         ](output, x, global_i)
+    @parameter
+    fn _calc_total_offsets() -> (UInt, List[UInt]):
+        var bases = materialize[ordered_bases]()
+        var offsets = List[UInt](
+            capacity=(length // last_base) * (last_base - 1) * len(bases)
+        )
+        var val = UInt(0)
+        for i in range(len(bases)):
+            offsets.append(val)
+            val += (length // bases[i]) * (bases[i] - 1)
+        return val, offsets^
 
-#     # NOTE: no barrier is needed here when processed == 1 because each
-#     # thread copies what it needs to run
+    alias total_offsets = _calc_total_offsets()
+    alias total_twfs = total_offsets[0]
+    alias twf_offsets = total_offsets[1]
+    alias twf_layout = Layout.row_major(total_twfs, 2)
+    twfs = ctx.enqueue_create_buffer[out_dtype](total_twfs * 2)
+    with twfs.map_to_host() as twfs_host:
 
-#     if is_execution_thread:
-#         alias twf = _prep_twiddle_factors[
-#             length, base, processed, out_dtype, inverse
-#         ]()
-#         _radix_n_fft_kernel[
-#             out_dtype=out_dtype,
-#             out_layout = output.layout,
-#             address_space = output.address_space,
-#             do_rfft=do_rfft,
-#             base=base,
-#             length=length,
-#             processed=processed,
-#             inverse=inverse,
-#             length_base = twf.size,
-#             twiddle_factors=twf,
-#         ](output, global_i)
+        @parameter
+        for b in range(len(ordered_bases)):
+            alias base = ordered_bases[b]
+            alias processed = processed_list[b]
+            alias amnt_threads = length // base
+            alias base_twfs = _prep_twiddle_factors[
+                length, base, processed, out_dtype, inverse
+            ]()
+
+            @parameter
+            for i in range(amnt_threads):
+
+                @parameter
+                for j in range(base - 1):
+                    alias t = base_twfs[i][j]
+                    alias idx = twf_offsets[b] + i * (base - 1) + j
+                    twfs_host[2 * idx] = t.re
+                    twfs_host[2 * idx + 1] = t.im
+
+    var twiddle_factors = LayoutTensor[mut=False, out_dtype, twf_layout](
+        twfs.unsafe_ptr()
+    )
+
+    ctx.enqueue_function[
+        _inter_multiprocessor_reorder_kernel[
+            in_dtype,
+            out_dtype,
+            in_layout,
+            out_layout,
+            length=length,
+            base = ordered_bases[0],
+            ordered_bases=ordered_bases,
+            do_rfft=do_rfft,
+        ]
+    ](output, x, grid_dim=num_blocks, block_dim=block_dim)
+
+    @parameter
+    for b in range(len(ordered_bases)):
+        ctx.enqueue_function[
+            _inter_multiprocessor_fft_kernel_radix_n[
+                out_dtype,
+                out_layout,
+                twiddle_factors.layout,
+                twiddle_factors.origin,
+                twiddle_factors.address_space,
+                length=length,
+                base = ordered_bases[b],
+                processed = processed_list[b],
+                do_rfft=do_rfft,
+                inverse=inverse,
+                twf_offset = twf_offsets[b],
+            ]
+        ](output, twiddle_factors, grid_dim=num_blocks, block_dim=block_dim)
 
 
-# fn _inter_multiprocessor_fft_kernel_radix_n[
-#     out_dtype: DType,
-#     out_layout: Layout,
-#     *,
-#     length: UInt,
-#     base: UInt,
-#     processed: UInt,
-#     do_rfft: Bool,
-#     inverse: Bool,
-# ](output: LayoutTensor[mut=True, out_dtype, out_layout]):
-#     """An FFT that assumes `sequence_length // smallest_base <=
-#     max_threads_available`."""
-#     alias amnt_threads = length // base
-#     var global_i = block_dim.x * block_idx.x + thread_idx.x
-#     var is_execution_thread = global_i < amnt_threads
+fn _inter_multiprocessor_reorder_kernel[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+    *,
+    length: UInt,
+    base: UInt,
+    ordered_bases: List[UInt],
+    do_rfft: Bool,
+](
+    output: LayoutTensor[mut=True, out_dtype, out_layout],
+    x: LayoutTensor[mut=False, in_dtype, in_layout],
+):
+    """A reorder kernel that assumes `sequence_length // smallest_base <=
+    max_threads_available`."""
+    alias amnt_threads = length // base
+    var global_i = block_dim.x * block_idx.x + thread_idx.x
+    var is_execution_thread = global_i < amnt_threads
 
-#     if is_execution_thread:
-#         alias twf = _prep_twiddle_factors[
-#             length, base, processed, out_dtype, inverse
-#         ]()
-#         _radix_n_fft_kernel[
-#             out_dtype=out_dtype,
-#             out_layout = output.layout,
-#             address_space = output.address_space,
-#             do_rfft=do_rfft,
-#             base=base,
-#             length=length,
-#             processed=processed,
-#             inverse=inverse,
-#             length_base = twf.size,
-#             twiddle_factors=twf,
-#         ](output, global_i)
+    # reorder input x(global_i) items to match F(current_item) layout
+    if is_execution_thread:
+        _reorder_kernel[
+            length=length,
+            do_rfft=do_rfft,
+            base=base,
+            ordered_bases=ordered_bases,
+        ](output, x, global_i)
+
+
+fn _inter_multiprocessor_fft_kernel_radix_n[
+    out_dtype: DType,
+    out_layout: Layout,
+    twf_layout: Layout,
+    twf_origin: ImmutableOrigin,
+    twf_address_space: AddressSpace,
+    *,
+    length: UInt,
+    base: UInt,
+    processed: UInt,
+    do_rfft: Bool,
+    inverse: Bool,
+    twf_offset: UInt,
+](
+    output: LayoutTensor[mut=True, out_dtype, out_layout],
+    twiddle_factors: LayoutTensor[
+        out_dtype, twf_layout, twf_origin, address_space=twf_address_space
+    ],
+):
+    """An FFT that assumes `sequence_length // smallest_base <=
+    max_threads_available`."""
+    alias amnt_threads = length // base
+    var global_i = block_dim.x * block_idx.x + thread_idx.x
+    var is_execution_thread = global_i < amnt_threads
+
+    if is_execution_thread:
+        _radix_n_fft_kernel[
+            out_dtype=out_dtype,
+            out_layout = output.layout,
+            out_address_space = output.address_space,
+            twf_layout = twiddle_factors.layout,
+            twf_origin = twiddle_factors.origin,
+            twf_address_space = twiddle_factors.address_space,
+            do_rfft=do_rfft,
+            base=base,
+            length=length,
+            processed=processed,
+            inverse=inverse,
+            twf_offset=twf_offset,
+        ](output, global_i, twiddle_factors)
 
 
 # ===-----------------------------------------------------------------------===#
 # intra_block_fft
 # ===-----------------------------------------------------------------------===#
-
-from memory import memcpy
 
 
 fn _intra_block_fft_kernel_radix_n[
@@ -430,7 +475,7 @@ fn _intra_block_fft_kernel_radix_n[
                 processed=processed,
                 inverse=inverse,
                 twf_offset = twf_offsets[b],
-            ](shared_f, local_i, twfs)
+            ](shared_f, local_i, twfs.get_immutable())
         barrier()
 
     # when in the last stage, copy back to global memory
@@ -449,69 +494,100 @@ fn _intra_block_fft_kernel_radix_n[
 # ===-----------------------------------------------------------------------===#
 
 
-# fn _cpu_fft_kernel_radix_n[
-#     in_dtype: DType,
-#     out_dtype: DType,
-#     in_layout: Layout,
-#     out_layout: Layout,
-#     *,
-#     length: UInt,
-#     ordered_bases: List[UInt],
-#     processed_list: List[UInt],
-#     do_rfft: Bool,
-#     inverse: Bool,
-# ](
-#     output: LayoutTensor[mut=True, out_dtype, out_layout],
-#     x: LayoutTensor[mut=False, in_dtype, in_layout],
-# ):
-#     """An FFT that runs on the CPU."""
+fn _cpu_fft_kernel_radix_n[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+    *,
+    length: UInt,
+    ordered_bases: List[UInt],
+    processed_list: List[UInt],
+    do_rfft: Bool,
+    inverse: Bool,
+](
+    output: LayoutTensor[mut=True, out_dtype, out_layout],
+    x: LayoutTensor[mut=False, in_dtype, in_layout],
+):
+    """An FFT that runs on the CPU."""
 
-#     @parameter
-#     for b in range(len(ordered_bases)):
-#         alias base = ordered_bases[b]
-#         alias processed = processed_list[b]
-#         alias amnt_threads = length // base
-#         alias twf = _prep_twiddle_factors[
-#             length, base, processed, out_dtype, inverse
-#         ]()
+    alias last_base = ordered_bases[len(ordered_bases) - 1]
 
-#         @parameter
-#         fn _inner_kernel(local_i: Int):
-#             @parameter
-#             if processed == 1:
-#                 # reorder input x(global_i) items to match F(current_item) layout
-#                 _reorder_kernel[
-#                     length=length,
-#                     do_rfft=do_rfft,
-#                     base=base,
-#                     ordered_bases=ordered_bases,
-#                 ](output, x, local_i)
-#                 # print("output: ", end="")
-#                 # for i in range(length):
-#                 #     print(
-#                 #         output[i, 0], ", ", output[i, 1], ", ", sep="", end=""
-#                 #     )
-#                 # print()
+    @parameter
+    fn _calc_total_offsets() -> (UInt, List[UInt]):
+        var bases = materialize[ordered_bases]()
+        var offsets = List[UInt](
+            capacity=(length // last_base) * (last_base - 1) * len(bases)
+        )
+        var val = UInt(0)
+        for i in range(len(bases)):
+            offsets.append(val)
+            val += (length // bases[i]) * (bases[i] - 1)
+        return val, offsets^
 
-#             # NOTE: no barrier is needed here when processed == 1 because each
-#             # thread copies what it needs to run
+    alias total_offsets = _calc_total_offsets()
+    alias total_twfs = total_offsets[0]
+    alias twf_offsets = total_offsets[1]
+    # TODO: this could probably just be a comptime InlineArray LayoutTensor
+    var twfs = tb[out_dtype]().row_major[total_twfs, 2]().alloc()
 
-#             _radix_n_fft_kernel[
-#                 out_dtype=out_dtype,
-#                 out_layout = output.layout,
-#                 out_address_space = output.address_space,
-#                 do_rfft=do_rfft,
-#                 base=base,
-#                 length=length,
-#                 processed=processed,
-#                 inverse=inverse,
-#                 length_base = twf.size,
-#                 twiddle_factors=twf,
-#             ](output, local_i)
+    @parameter
+    for b in range(len(ordered_bases)):
+        alias base = ordered_bases[b]
+        alias processed = processed_list[b]
+        alias amnt_threads = length // base
+        alias base_twfs = _prep_twiddle_factors[
+            length, base, processed, out_dtype, inverse
+        ]()
 
-#         # parallelize[func=_inner_kernel](amnt_threads)
-#         for i in range(amnt_threads):
-#             _inner_kernel(i)
+        @parameter
+        for i in range(amnt_threads):
+
+            @parameter
+            for j in range(base - 1):
+                alias t = base_twfs[i][j]
+                alias idx = twf_offsets[b] + i * (base - 1) + j
+                twfs[idx, 0] = t.re
+                twfs[idx, 1] = t.im
+
+    @parameter
+    for b in range(len(ordered_bases)):
+        alias base = ordered_bases[b]
+        alias processed = processed_list[b]
+        alias amnt_threads = length // base
+
+        @parameter
+        fn _inner_kernel(local_i: Int):
+            @parameter
+            if processed == 1:
+                # reorder input x(global_i) items to match F(current_item) layout
+                _reorder_kernel[
+                    length=length,
+                    do_rfft=do_rfft,
+                    base=base,
+                    ordered_bases=ordered_bases,
+                ](output, x, local_i)
+
+            # NOTE: no barrier is needed here when processed == 1 because each
+            # thread copies what it needs to run
+
+            _radix_n_fft_kernel[
+                out_dtype=out_dtype,
+                out_layout = output.layout,
+                out_address_space = output.address_space,
+                twf_layout = twfs.layout,
+                twf_address_space = twfs.address_space,
+                do_rfft=do_rfft,
+                base=base,
+                length=length,
+                processed=processed,
+                inverse=inverse,
+                twf_offset = twf_offsets[b],
+            ](output, local_i, twfs.get_immutable())
+
+        # parallelize[func=_inner_kernel](amnt_threads)
+        for i in range(amnt_threads):
+            _inner_kernel(i)
 
 
 # ===-----------------------------------------------------------------------===#
@@ -525,7 +601,7 @@ fn _radix_n_fft_kernel[
     out_origin: MutableOrigin,
     out_address_space: AddressSpace,
     twf_layout: Layout,
-    twf_origin: MutableOrigin,
+    twf_origin: ImmutableOrigin,
     twf_address_space: AddressSpace,
     *,
     length: UInt,
@@ -653,11 +729,6 @@ fn _radix_n_fft_kernel[
         )
         var i0_j_twf = Co(i0_j_twf_vec[0], i0_j_twf_vec[1])
 
-        # var i0_j_twf_vec = twiddle_factors.load[2](
-        #     local_i * (base - 1) + (j - 1), 0
-        # )
-        # var i0_j_twf = UnsafePointer(to=i0_j_twf_vec).bitcast[Co]()[]
-
         @parameter
         for i in range(base):
             alias base_phasor = _base_phasor[i, j]()
@@ -691,24 +762,8 @@ fn _radix_n_fft_kernel[
         alias step = i * offset
         # TODO: make sure this is the most efficient
         var idx = n + step
-        # var ptr = x_out.unsafe_ptr().bitcast[Scalar[out_dtype]]()
-        # var res = (ptr + 2 * i).load[width=2]()
-        # output.store(Int(idx), 0, res)
         output[idx, 0] = x_out[i].re
         output[idx, 1] = x_out[i].im
-        # if processed == 1:
-        #     print(
-        #         "local_i:",
-        #         local_i,
-        #         "idx:",
-        #         idx,
-        #         "x_out[i]:",
-        #         x_out[i],
-        #         "output[idx, 0]:",
-        #         output[idx, 0],
-        #         "output[idx, 1]:",
-        #         output[idx, 1],
-        #     )
 
         @parameter
         if is_rfft_final_stage:  # copy the symmetric conjugates
@@ -717,7 +772,6 @@ fn _radix_n_fft_kernel[
             # when idx == rfft_idx_limit
             var next_idx = Sc(length) * Sc(Int(idx != 0)) - idx
             if next_idx != idx:
-                # output.store(Int(next_idx), 0, res[0].join(-res[1]))
                 output[Int(next_idx), 0] = x_out[i].re
                 output[Int(next_idx), 1] = -x_out[i].im
 
