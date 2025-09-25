@@ -111,11 +111,11 @@ fn test_fft[
 
     alias gpu_info = ctx.default_device_info
     alias max_threads_per_block = gpu_info.max_thread_block_size
-    alias threads_per_sm = 48 * gpu_info.warp_size  # gpu_info.threads_per_sm
+    alias threads_per_sm = gpu_info.threads_per_sm
     alias max_threads_available = threads_per_sm * gpu_info.sm_count
     alias num_threads = sequence_length // ordered_bases[len(ordered_bases) - 1]
     alias num_blocks = UInt(
-        ceil(num_threads / max_threads_per_block).cast[DType.index]()
+        ceil(num_threads / max_threads_per_block).cast[DType.uint]()
     )
     alias shared_mem_size = gpu_info.shared_memory_per_multiprocessor
     alias output_size = out_dtype.size_of() * sequence_length * 2
