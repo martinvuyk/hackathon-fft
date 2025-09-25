@@ -28,17 +28,26 @@ def _bench_intra_block_fft_launch_radix_n[
     ctx: DeviceContext,
     mut b: Bencher,
 ):
-    alias length = in_layout.shape[0].value()
+    alias length = in_layout.shape[1].value()
     alias bases_processed = _get_ordered_bases_processed_list[length, bases]()
     alias ordered_bases = bases_processed[0]
     alias processed_list = bases_processed[1]
-    constrained[
-        processed_list[len(processed_list) - 1]
-        * ordered_bases[len(ordered_bases) - 1]
-        == length,
-        "powers of the bases must multiply together",
-        " to equal the sequence length",
-    ]()
+
+    @parameter
+    fn _calc_total_offsets() -> (UInt, List[UInt]):
+        alias last_base = ordered_bases[len(ordered_bases) - 1]
+        var bases = materialize[ordered_bases]()
+        var c = (length // last_base) * (last_base - 1) * len(bases)
+        var offsets = List[UInt](capacity=c)
+        var val = UInt(0)
+        for base in bases:
+            offsets.append(val)
+            val += (length // base) * (base - 1)
+        return val, offsets^
+
+    alias total_offsets = _calc_total_offsets()
+    alias total_twfs = total_offsets[0]
+    alias twf_offsets = total_offsets[1]
 
     @parameter
     fn call_fn[
@@ -64,6 +73,8 @@ def _bench_intra_block_fft_launch_radix_n[
                 processed_list=processed_list,
                 do_rfft=True,
                 inverse=False,
+                total_twfs=total_twfs,
+                twf_offsets=twf_offsets,
             ](output, x)
 
     alias num_threads = length // ordered_bases[len(ordered_bases) - 1]
@@ -87,19 +98,20 @@ fn bench_intra_block_radix_n[
 ](mut b: Bencher) raises:
     alias values = test_values[len(test_values) - 1]
     alias SIZE = len(values[0])
-    alias TPB = SIZE
-    alias BLOCKS_PER_GRID = (1, 1)
-    alias THREADS_PER_BLOCK = (TPB, 1)
     alias in_dtype = dtype
     alias out_dtype = dtype
-    alias in_layout = Layout.row_major(SIZE)
-    alias out_layout = Layout.row_major(SIZE, 2)
+    alias in_layout = Layout.row_major(1, SIZE, 1)
+    alias out_layout = Layout.row_major(1, SIZE, 2)
     alias calc_dtype = dtype
     alias Complex = ComplexSIMD[calc_dtype, 1]
 
     with DeviceContext() as ctx:
-        out = ctx.enqueue_create_buffer[out_dtype](SIZE * 2).enqueue_fill(0)
-        x = ctx.enqueue_create_buffer[in_dtype](SIZE).enqueue_fill(0)
+        out = ctx.enqueue_create_buffer[out_dtype](
+            out_layout.size()
+        ).enqueue_fill(0)
+        x = ctx.enqueue_create_buffer[in_dtype](in_layout.size()).enqueue_fill(
+            0
+        )
         ref series = values[0]
         with x.map_to_host() as x_host:
             for i in range(SIZE):
@@ -129,15 +141,15 @@ def main():
     seed()
     var m = Bench(BenchConfig(num_repetitions=10))
     alias bases_list: List[List[UInt]] = [
-        # [16, 8],
-        # [16, 4, 2],
-        # [8, 8, 2],
-        # [8, 4, 4],
-        # [8, 4, 2, 2],
-        # [8, 2, 2, 2, 2],
-        # [4, 4, 4, 2],
-        # [4, 4, 2, 2, 2],
-        # [4, 2, 2, 2, 2, 2],
+        [16, 8],
+        [16, 4, 2],
+        [8, 8, 2],
+        [8, 4, 4],
+        [8, 4, 2, 2],
+        [8, 2, 2, 2, 2],
+        [4, 4, 4, 2],
+        [4, 4, 2, 2, 2],
+        [4, 2, 2, 2, 2, 2],
         [2],
     ]
     alias test_values = _get_test_values_128[DType.float32]()

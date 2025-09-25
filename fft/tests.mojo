@@ -56,40 +56,53 @@ fn test_fft[
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     ctx: DeviceContext,
 ) raises:
-    constrained[
-        1 <= len(in_layout) <= 2, "in_layout must have only 1 or 2 axis"
-    ]()
+    constrained[len(in_layout) == 3, "in_layout must have rank 3"]()
+    alias batches = in_layout.shape[0].value()
+    alias sequence_length = in_layout.shape[1].value()
+    alias do_rfft = in_layout.shape[2].value() == 1
+    alias do_complex = in_layout.shape[2].value() == 2
 
-    alias do_rfft = len(in_layout) == 1
-
-    @parameter
-    if not do_rfft:
-        constrained[
-            len(in_layout) == 2 and in_layout.shape[1].value() == 2,
-            "input must be a complex value tensor i.e. (sequence_length, 2)",
-            " or a real valued one (sequence_length,)",
-        ]()
-    alias length = in_layout.shape[0].value()
     constrained[
-        out_layout.shape == IntTuple(length, 2),
-        "out_layout shape must be (in_layout.shape[0], 2)",
+        do_rfft or do_complex,
+        "The layout should match one of: {(batches, sequence_length, 1), ",
+        "(batches, sequence_length, 2)}",
     ]()
     constrained[
         out_dtype.is_floating_point(), "out_dtype must be floating point"
     ]()
 
-    alias bases_processed = _get_ordered_bases_processed_list[length, bases]()
+    alias bases_processed = _get_ordered_bases_processed_list[
+        sequence_length, bases
+    ]()
     alias ordered_bases = bases_processed[0]
     alias processed_list = bases_processed[1]
 
     @parameter
+    fn _calc_total_offsets() -> (UInt, List[UInt]):
+        alias last_base = ordered_bases[len(ordered_bases) - 1]
+        var bases = materialize[ordered_bases]()
+        var c = (sequence_length // last_base) * (last_base - 1) * len(bases)
+        var offsets = List[UInt](capacity=c)
+        var val = UInt(0)
+        for base in bases:
+            offsets.append(val)
+            val += (sequence_length // base) * (base - 1)
+        return val, offsets^
+
+    alias total_offsets = _calc_total_offsets()
+    alias total_twfs = total_offsets[0]
+    alias twf_offsets = total_offsets[1]
+
+    @parameter
     if is_cpu[target]():
         _cpu_fft_kernel_radix_n[
-            length=length,
+            length=sequence_length,
             ordered_bases=ordered_bases,
             processed_list=processed_list,
             do_rfft=do_rfft,
             inverse=inverse,
+            total_twfs=total_twfs,
+            twf_offsets=twf_offsets,
         ](output, x)
         return
     constrained[
@@ -98,39 +111,62 @@ fn test_fft[
 
     alias gpu_info = ctx.default_device_info
     alias max_threads_per_block = gpu_info.max_thread_block_size
-    alias max_threads_available = gpu_info.threads_per_sm * gpu_info.sm_count
-    alias num_threads = length // ordered_bases[len(ordered_bases) - 1]
+    alias threads_per_sm = 48 * gpu_info.warp_size  # gpu_info.threads_per_sm
+    alias max_threads_available = threads_per_sm * gpu_info.sm_count
+    alias num_threads = sequence_length // ordered_bases[len(ordered_bases) - 1]
     alias num_blocks = UInt(
         ceil(num_threads / max_threads_per_block).cast[DType.index]()
     )
     alias shared_mem_size = gpu_info.shared_memory_per_multiprocessor
+    alias output_size = out_dtype.size_of() * sequence_length * 2
+    alias twf_size = out_dtype.size_of() * total_twfs * 2
 
     @parameter
     if test_num == 0:
-        ctx.enqueue_function[
-            _intra_block_fft_kernel_radix_n[
-                in_dtype,
-                out_dtype,
-                in_layout,
-                out_layout,
-                length=length,
-                ordered_bases=ordered_bases,
-                processed_list=processed_list,
-                do_rfft=do_rfft,
-                inverse=inverse,
-            ]
-        ](output, x, grid_dim=1, block_dim=num_threads)
+        alias batch_size = max_threads_available // num_threads
+        alias func = _intra_block_fft_kernel_radix_n[
+            in_dtype,
+            out_dtype,
+            in_layout,
+            out_layout,
+            length=sequence_length,
+            ordered_bases=ordered_bases,
+            processed_list=processed_list,
+            do_rfft=do_rfft,
+            inverse=inverse,
+            total_twfs=total_twfs,
+            twf_offsets=twf_offsets,
+        ]
+
+        @parameter
+        for _ in range(batches // batch_size):
+            ctx.enqueue_function[func](
+                output, x, grid_dim=(1, batch_size), block_dim=num_threads
+            )
+        alias remainder = batches % batch_size
+
+        @parameter
+        if remainder > 0:
+            ctx.enqueue_function[func](
+                output, x, grid_dim=(1, remainder), block_dim=num_threads
+            )
     elif test_num == 1:
-        alias block_dim = UInt(ceil(num_threads / num_blocks))
+        alias block_dim = UInt(
+            ceil(num_threads / num_blocks).cast[DType.uint]()
+        )
         _launch_inter_multiprocessor_fft[
-            length=length,
+            length=sequence_length,
             processed_list=processed_list,
             ordered_bases=ordered_bases,
             do_rfft=do_rfft,
             inverse=inverse,
-            block_dim=1,
-            num_blocks=num_threads,
+            block_dim=block_dim,
+            num_blocks=num_blocks,
+            batches=batches,
+            total_twfs=total_twfs,
+            twf_offsets=twf_offsets,
         ](output, x, ctx)
+
     else:
         # TODO: Implement for sequences > max_threads_available in the same GPU
         constrained[
@@ -149,16 +185,14 @@ def test_fft_radix_n[
     target: StaticString,
     test_num: UInt,
 ]():
+    alias BATCHES = len(test_values)
     alias SIZE = len(test_values[0][0])
-    alias TPB = SIZE
-    alias BLOCKS_PER_GRID = (1, 1)
-    alias THREADS_PER_BLOCK = (TPB, 1)
     alias in_dtype = dtype
     alias out_dtype = dtype
     alias in_layout = Layout.row_major(
-        SIZE, 2
-    ) if inverse else Layout.row_major(SIZE)
-    alias out_layout = Layout.row_major(SIZE, 2)
+        BATCHES, SIZE, 2
+    ) if inverse else Layout.row_major(BATCHES, SIZE, 1)
+    alias out_layout = Layout.row_major(BATCHES, SIZE, 2)
     alias calc_dtype = dtype
     alias Complex = ComplexSIMD[calc_dtype, 1]
     print("----------------------------")
@@ -166,8 +200,10 @@ def test_fft_radix_n[
     print("----------------------------")
 
     @parameter
-    fn _eval(
-        result: LayoutTensor[mut=True, out_dtype, out_layout],
+    fn _eval[
+        res_layout: Layout, res_origin: MutableOrigin
+    ](
+        result: LayoutTensor[out_dtype, res_layout, res_origin],
         scalar_in: List[Int],
         complex_out: List[ComplexSIMD[out_dtype, 1]],
     ) raises:
@@ -176,7 +212,7 @@ def test_fft_radix_n[
             if i == 0:
                 print("[", result[i, 0], ", ", result[i, 1], sep="", end="")
             else:
-                print(",", result[i, 0], ",", result[i, 1], end="")
+                print(", ", result[i, 0], ", ", result[i, 1], sep="", end="")
         print("]")
         print("expected: ", end="")
 
@@ -185,9 +221,9 @@ def test_fft_radix_n[
         if inverse:
             for i in range(SIZE):
                 if i == 0:
-                    print("[", scalar_in[i], ",", sep="", end="")
+                    print("[", scalar_in[i], ".0, 0.0", sep="", end="")
                 else:
-                    print(", ", scalar_in[i], sep="", end="")
+                    print(", ", scalar_in[i], ".0, 0.0", sep="", end="")
             print("]")
             for i in range(SIZE):
                 assert_almost_equal(
@@ -223,65 +259,95 @@ def test_fft_radix_n[
 
         @parameter
         if target == "cpu":
-            var out = List[Scalar[in_dtype]](length=SIZE * 2, fill=0)
-            var x = List[Scalar[out_dtype]](length=in_layout.size(), fill=0)
-            var out_tensor = LayoutTensor[mut=True, out_dtype, out_layout](
-                Span(out)
+            var out_data = List[Scalar[in_dtype]](
+                length=out_layout.size(), fill=999
             )
-            var x_tensor = LayoutTensor[mut=False, in_dtype, in_layout](Span(x))
+            var x_data = List[Scalar[out_dtype]](
+                length=in_layout.size(), fill=999
+            )
+            var batch_output = LayoutTensor[mut=True, out_dtype, out_layout](
+                Span(out_data)
+            )
+            var batch_x = LayoutTensor[mut=False, in_dtype, in_layout](
+                Span(x_data)
+            )
 
-            for test in materialize[test_values]():
+            for idx, test in enumerate(materialize[test_values]()):
+                alias x_layout = Layout.row_major(
+                    in_layout.shape[1].value(), in_layout.shape[2].value()
+                )
+                var x = LayoutTensor[mut=True, in_dtype, x_layout](
+                    batch_x.ptr + batch_x.stride[0]() * idx
+                )
                 for i in range(SIZE):
 
                     @parameter
                     if inverse:
-                        x_tensor[i, 0] = test[1][i].re.cast[in_dtype]()
-                        x_tensor[i, 1] = test[1][i].im.cast[in_dtype]()
+                        x[i, 0] = test[1][i].re.cast[in_dtype]()
+                        x[i, 1] = test[1][i].im.cast[in_dtype]()
                     else:
-                        x_tensor[i] = Scalar[in_dtype](test[0][i])
-                test_fft[
-                    bases=bases, inverse=inverse, target=target, test_num=0
-                ](out_tensor, x_tensor, ctx)
+                        x[i, 0] = Scalar[in_dtype](test[0][i])
 
-                _eval(out_tensor, test[0], test[1])
+            test_fft[bases=bases, inverse=inverse, target=target, test_num=0](
+                batch_output, batch_x, ctx
+            )
+
+            for idx, test in enumerate(materialize[test_values]()):
+                alias output_layout = Layout.row_major(
+                    out_layout.shape[1].value(), 2
+                )
+                var output = LayoutTensor[
+                    mut=True, out_dtype, output_layout, batch_output.origin
+                ](batch_output.ptr + batch_output.stride[0]() * idx)
+                _eval(output, test[0], test[1])
         else:
-            var x = ctx.enqueue_create_buffer[in_dtype](
+            var x_data = ctx.enqueue_create_buffer[in_dtype](
                 in_layout.size()
-            ).enqueue_fill(0)
-            var out = ctx.enqueue_create_buffer[out_dtype](
-                SIZE * 2
-            ).enqueue_fill(0)
-            for test in materialize[test_values]():
-                with x.map_to_host() as x_host:
+            ).enqueue_fill(999)
+            var out_data = ctx.enqueue_create_buffer[out_dtype](
+                out_layout.size()
+            ).enqueue_fill(999)
+            var batch_output = LayoutTensor[mut=True, out_dtype, out_layout](
+                out_data.unsafe_ptr()
+            )
+            var batch_x = LayoutTensor[mut=False, in_dtype, in_layout](
+                x_data.unsafe_ptr()
+            )
+            with x_data.map_to_host() as x_host:
+                for idx, test in enumerate(materialize[test_values]()):
+                    alias x_layout = Layout.row_major(
+                        in_layout.shape[1].value(), in_layout.shape[2].value()
+                    )
+                    var x = LayoutTensor[mut=False, in_dtype, x_layout](
+                        x_host.unsafe_ptr() + batch_x.stride[0]() * idx
+                    )
+
                     for i in range(SIZE):
 
                         @parameter
                         if inverse:
-                            x_host[i * 2] = test[1][i].re.cast[in_dtype]()
-                            x_host[i * 2 + 1] = test[1][i].im.cast[in_dtype]()
+                            x[i, 0] = test[1][i].re.cast[in_dtype]()
+                            x[i, 1] = test[1][i].im.cast[in_dtype]()
                         else:
-                            x_host[i] = Scalar[in_dtype](test[0][i])
+                            x[i, 0] = Scalar[in_dtype](test[0][i])
 
-                var out_tensor = LayoutTensor[mut=True, out_dtype, out_layout](
-                    out.unsafe_ptr()
-                )
-                var x_tensor = LayoutTensor[mut=False, in_dtype, in_layout](
-                    x.unsafe_ptr()
-                )
-                test_fft[
-                    bases=bases,
-                    inverse=inverse,
-                    target="gpu",
-                    test_num=test_num,
-                ](out_tensor, x_tensor, ctx)
-
-                ctx.synchronize()
-
-                with out.map_to_host() as out_host:
-                    var tmp = LayoutTensor[mut=True, out_dtype, out_layout](
-                        out_host.unsafe_ptr()
+            ctx.synchronize()
+            test_fft[
+                bases=bases,
+                inverse=inverse,
+                target="gpu",
+                test_num=test_num,
+            ](batch_output, batch_x, ctx)
+            ctx.synchronize()
+            with out_data.map_to_host() as out_host:
+                for idx, test in enumerate(materialize[test_values]()):
+                    alias output_layout = Layout.row_major(
+                        out_layout.shape[1].value(), 2
                     )
-                    _eval(tmp, test[0], test[1])
+                    var output = LayoutTensor[
+                        mut=True, out_dtype, output_layout, batch_output.origin
+                    ](out_host.unsafe_ptr() + batch_output.stride[0]() * idx)
+                    _eval(output, test[0], test[1])
         print("----------------------------")
         print("Tests passed")
         print("----------------------------")
@@ -333,6 +399,7 @@ def _test_fft[
     func[L(2, 8), values_16]()
 
     alias values_20 = _get_test_values_20[dtype]()
+    func[L(20), values_20]()
     func[L(10, 2), values_20]()
     func[L(5, 4), values_20]()
     func[L(5, 2), values_20]()
@@ -377,26 +444,26 @@ def _test_fft[
     func[L(16, 8), values_128]()
 
 
+alias _test[
+    dtype: DType, inverse: Bool, target: StaticString, test_num: UInt = 0
+] = _test_fft[
+    dtype,
+    test_fft_radix_n[dtype, inverse=inverse, target=target, test_num=test_num],
+]
+
+
 def test_fft():
-    alias dtype = DType.float64
-    # _test_fft[dtype, test_fft_radix_n[dtype, inverse=False, target="cpu"]]()
-    _test_fft[
-        dtype, test_fft_radix_n[dtype, inverse=False, target="gpu", test_num=0]
-    ]()
-    _test_fft[
-        dtype, test_fft_radix_n[dtype, inverse=False, target="gpu", test_num=1]
-    ]()
+    alias dtype = DType.float32
+    _test[dtype, False, "cpu", 0]()
+    _test[dtype, False, "gpu", 0]()
+    _test[dtype, False, "gpu", 1]()
 
 
 def test_ifft():
-    alias dtype = DType.float64
-    # _test_fft[dtype, test_fft_radix_n[dtype, inverse=True, target="cpu"]]()
-    _test_fft[
-        dtype, test_fft_radix_n[dtype, inverse=True, target="gpu", test_num=0]
-    ]()
-    _test_fft[
-        dtype, test_fft_radix_n[dtype, inverse=True, target="gpu", test_num=1]
-    ]()
+    alias dtype = DType.float32
+    _test[dtype, True, "cpu", 0]()
+    _test[dtype, True, "gpu", 0]()
+    _test[dtype, True, "gpu", 1]()
 
 
 def main():

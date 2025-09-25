@@ -86,7 +86,7 @@ fn _get_ordered_items[
             values.append(bit_reverse(i))
         sort(values)
         for i in range(length):
-            res[i] = bit_reverse(values[i])
+            res[bit_reverse(values[i])] = i
     else:
 
         @parameter
@@ -97,51 +97,72 @@ fn _get_ordered_items[
             return rev^
 
         for i in range(length):
-            res[i] = _mixed_radix_digit_reverse[_reversed()](i)
+            res[_mixed_radix_digit_reverse[_reversed()](i)] = i
 
 
 # FIXME: mojo limitation. cos and sin can't run at compile time
 fn _approx_sin(theta: Scalar) -> __type_of(theta):
+    t = theta.cast[DType.float64]()
     return (
-        theta
-        - (theta**3) / 6
-        + (theta**5) / 120
-        - (theta**7) / 5040
-        + (theta**9) / 362880
-        - (theta**11) / 39916800
-        + (theta**13) / 6227020800
-        - (theta**15) / 1307674368000
-        + (theta**17) / 355687428096000
-        - (theta**19) / 121645100408832000
-        + (theta**21) / 51090942171709440000
-        - (theta**23) / 25852016738884976640000
-        + (theta**25) / 15511210043330985984000000
-        - (theta**27) / 10888869450418352160768000000
-        + (theta**29) / 8841761993739701954543616000000
-        - (theta**31) / 8222838654177922817725562880000000
-    )
+        t
+        - (t**3) / 6.0
+        + (t**5) / 120.0
+        - (t**7) / 5040.0
+        + (t**9) / 362880.0
+        - (t**11) / 39916800.0
+        + (t**13) / 6227020800.0
+        - (t**15) / 1307674368000.0
+        + (t**17) / 355687428096000.0
+        - (t**19) / 121645100408832000.0
+        + (t**21) / 51090942171709440000.0
+        - (t**23) / 25852016738884976640000.0
+        + (t**25) / 15511210043330985984000000.0
+        - (t**27) / 10888869450418352160768000000.0
+        + (t**29) / 8841761993739701954543616000000.0
+        - (t**31) / 8222838654177922817725562880000000.0
+        + (t**33) / 8683317618811886495518194401280000000.0
+        - (t**35) / 10333147966386144929666651337523200000000.0
+        + (t**37) / 13763753091226345046315979581580902400000000.0
+        - (t**39) / 20397882081197443358640281739902897356800000000.0
+        + (t**41) / 33452526613163807108170062053440751665152000000000.0
+        - (t**43) / 60415263063373835637355132068513997507264512000000000.0
+        + (t**45)
+        / 119622220865480194561963161495657715064383733760000000000.0
+        - (t**47)
+        / 258623241511168180642964355153611979969197632389120000000000.0
+    ).cast[theta.dtype]()
 
 
 # FIXME: mojo limitation. cos and sin can't run at compile time
 fn _approx_cos(theta: Scalar) -> __type_of(theta):
+    t = theta.cast[DType.float64]()
     return (
-        1
-        - (theta**2) / 2
-        + (theta**4) / 24
-        - (theta**6) / 720
-        + (theta**8) / 40320
-        - (theta**10) / 3628800
-        + (theta**12) / 479001600
-        - (theta**14) / 87178291200
-        + (theta**16) / 20922789888000
-        - (theta**18) / 6402373705728000
-        + (theta**20) / 2432902008176640000
-        - (theta**22) / 1124000727777607680000
-        + (theta**24) / 620448401733239439360000
-        - (theta**26) / 403291461126605635584000000
-        + (theta**28) / 304888344611713860501504000000
-        - (theta**30) / 265252859812191058636308480000000
-    )
+        1.0
+        - (t**2) / 2.0
+        + (t**4) / 24.0
+        - (t**6) / 720.0
+        + (t**8) / 40320.0
+        - (t**10) / 3628800.0
+        + (t**12) / 479001600.0
+        - (t**14) / 87178291200.0
+        + (t**16) / 20922789888000.0
+        - (t**18) / 6402373705728000.0
+        + (t**20) / 2432902008176640000.0
+        - (t**22) / 1124000727777607680000.0
+        + (t**24) / 620448401733239439360000.0
+        - (t**26) / 403291461126605635584000000.0
+        + (t**28) / 304888344611713860501504000000.0
+        - (t**30) / 265252859812191058636308480000000.0
+        + (t**32) / 263130836933693530167218012160000000.0
+        - (t**34) / 295232799039604140847618609643520000000.0
+        + (t**36) / 371993326789901217467999448150835200000000.0
+        - (t**38) / 523022617466601111760007224100074291200000000.0
+        + (t**40) / 815915283247897734345611269596115894272000000000.0
+        - (t**42) / 1405006117752879898543142606244511569936384000000000.0
+        + (t**44) / 2658271574788448768043625811014615890319638528000000000.0
+        - (t**46)
+        / 5502622159812088949850305428800254892961651752960000000000.0
+    ).cast[theta.dtype]()
 
 
 fn _get_twiddle_factors[
@@ -172,11 +193,9 @@ fn _get_twiddle_factors[
             num = C(0, 1)
         else:
             var theta = Float64(-factor * pi)
-            # TODO: Rounding to 15 is very arbitrary, find a good value and
-            # justify it
             num = C(
-                _approx_cos(theta).__round__(15).cast[dtype](),
-                _approx_sin(theta).__round__(15).cast[dtype](),
+                _approx_cos(theta).cast[dtype](),
+                _approx_sin(theta).cast[dtype](),
             )
 
         @parameter
@@ -210,6 +229,36 @@ fn _prep_twiddle_factors[
             res[local_i][j - 1] = twiddle_factors[
                 twiddle_idx - 1
             ] if twiddle_idx != 0 else {1, 0}
+
+
+@parameter
+fn _get_flat_twfs[
+    dtype: DType,
+    length: UInt,
+    total_twfs: UInt,
+    ordered_bases: List[UInt],
+    processed_list: List[UInt],
+    inverse: Bool,
+](out res: InlineArray[Scalar[dtype], total_twfs * 2]):
+    res = {uninitialized = True}
+    var idx = 0
+
+    @parameter
+    for b in range(len(ordered_bases)):
+        alias base = ordered_bases[b]
+        alias processed = processed_list[b]
+        alias amnt_threads = length // base
+        var base_twfs = _prep_twiddle_factors[
+            length, base, processed, dtype, inverse
+        ]()
+
+        for i in range(base_twfs.size):
+            for j in range(base_twfs[0].size):
+                var t = base_twfs[i][j]
+                res[idx] = t.re
+                idx += 1
+                res[idx] = t.im
+                idx += 1
 
 
 fn _log_mod[base: UInt](x: UInt) -> (UInt, UInt):
