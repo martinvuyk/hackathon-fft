@@ -9,13 +9,15 @@ from bit import count_trailing_zeros
 
 from fft._test_values import _get_test_values_128
 from fft.tests import _TestValues
+from fft.fft import fft
+
 from fft.fft import (
     _intra_block_fft_kernel_radix_n,
     _get_ordered_bases_processed_list,
 )
 
 
-def _bench_intra_block_fft_launch_radix_n[
+def _profile_intra_block_fft_launch_radix_n[
     in_dtype: DType,
     out_dtype: DType,
     in_layout: Layout,
@@ -62,60 +64,73 @@ def _bench_intra_block_fft_launch_radix_n[
         output: LayoutTensor[mut=True, out_dtype, out_layout],
         x: LayoutTensor[mut=False, in_dtype, in_layout],
     ):
-        for _ in range(10_000):
-            _intra_block_fft_kernel_radix_n[
-                in_dtype,
-                out_dtype,
-                in_layout,
-                out_layout,
-                length=length,
-                ordered_bases=ordered_bases,
-                processed_list=processed_list,
-                do_rfft=True,
-                inverse=False,
-                total_twfs=total_twfs,
-                twf_offsets=twf_offsets,
-            ](output, x)
-
-    alias num_threads = length // ordered_bases[len(ordered_bases) - 1]
-    ctx.enqueue_function[
-        call_fn[
+        _intra_block_fft_kernel_radix_n[
             in_dtype,
             out_dtype,
             in_layout,
             out_layout,
+            length=length,
             ordered_bases=ordered_bases,
             processed_list=processed_list,
-        ]
-    ](output, x, grid_dim=1, block_dim=num_threads)
-    ctx.synchronize()
-    _ = processed_list  # origin bug
+            do_rfft=True,
+            inverse=False,
+            total_twfs=total_twfs,
+            twf_offsets=twf_offsets,
+        ](output, x)
+
+    alias num_threads = length // ordered_bases[len(ordered_bases) - 1]
+    alias batches = in_layout.shape[0].value()
+    alias max_threads_available = 48 * 32 * 170
+    alias batch_size = max_threads_available // num_threads
+    alias func = call_fn[
+        in_dtype,
+        out_dtype,
+        in_layout,
+        out_layout,
+        ordered_bases=ordered_bases,
+        processed_list=processed_list,
+    ]
+
+    @parameter
+    for _ in range(batches // batch_size):
+        ctx.enqueue_function[func](
+            output, x, grid_dim=(1, batch_size), block_dim=num_threads
+        )
+    alias remainder = batches % batch_size
+
+    @parameter
+    if remainder > 0:
+        ctx.enqueue_function[func](
+            output, x, grid_dim=(1, remainder), block_dim=num_threads
+        )
 
 
 @parameter
-fn bench_intra_block_radix_n[
-    dtype: DType, bases: List[UInt], test_values: _TestValues[dtype]
+fn profile_intra_block_radix_n[
+    dtype: DType, ordered_bases: List[UInt], test_values: _TestValues[dtype]
 ](mut b: Bencher) raises:
     alias values = test_values[len(test_values) - 1]
+    alias smallest_base = ordered_bases[len(ordered_bases) - 1]
     alias SIZE = len(values[0])
+    alias max_threads_available = 48 * 32 * 170
+    alias BATCHES = max_threads_available // (SIZE // smallest_base)
     alias in_dtype = dtype
     alias out_dtype = dtype
-    alias in_layout = Layout.row_major(1, SIZE, 1)
-    alias out_layout = Layout.row_major(1, SIZE, 2)
+    alias in_layout = Layout.row_major(BATCHES, SIZE, 1)
+    alias out_layout = Layout.row_major(BATCHES, SIZE, 2)
     alias calc_dtype = dtype
     alias Complex = ComplexSIMD[calc_dtype, 1]
 
     with DeviceContext() as ctx:
-        out = ctx.enqueue_create_buffer[out_dtype](
-            out_layout.size()
-        ).enqueue_fill(0)
-        x = ctx.enqueue_create_buffer[in_dtype](in_layout.size()).enqueue_fill(
-            0
-        )
+        out = ctx.enqueue_create_buffer[out_dtype](out_layout.size())
+        x = ctx.enqueue_create_buffer[in_dtype](in_layout.size())
         ref series = values[0]
+        var idx = 0
         with x.map_to_host() as x_host:
-            for i in range(SIZE):
-                x_host[i] = series[i]
+            for _ in range(BATCHES):
+                for i in range(SIZE):
+                    x_host[idx] = series[i]
+                    idx += 1
 
         var out_tensor = LayoutTensor[mut=True, out_dtype, out_layout](
             out.unsafe_ptr()
@@ -127,11 +142,12 @@ fn bench_intra_block_radix_n[
         @always_inline
         @parameter
         fn call_fn(ctx: DeviceContext) raises:
-            _bench_intra_block_fft_launch_radix_n[bases=bases](
+            _profile_intra_block_fft_launch_radix_n[bases=ordered_bases](
                 out_tensor, x_tensor, ctx, b
             )
 
         b.iter_custom[call_fn](ctx)
+        ctx.synchronize()
 
         _ = out_tensor
         _ = x_tensor
@@ -139,34 +155,10 @@ fn bench_intra_block_radix_n[
 
 def main():
     seed()
-    var m = Bench(BenchConfig(num_repetitions=10))
-    alias bases_list: List[List[UInt]] = [
-        # [16, 8],
-        # [16, 4, 2],
-        # [8, 8, 2],
-        # [8, 4, 4],
-        # [8, 4, 2, 2],
-        # [8, 2, 2, 2, 2],
-        # [4, 4, 4, 2],
-        # [4, 4, 2, 2, 2],
-        # [4, 2, 2, 2, 2, 2],
-        [2],
-    ]
-    alias test_values = _get_test_values_128[DType.float32]()
-
-    @parameter
-    for bases in bases_list:
-        alias suffix = String(bases.__str__(), ", ", 128, "]")
-        m.bench_function[
-            bench_intra_block_radix_n[DType.float32, bases, test_values]
-        ](BenchId(String("bench_intra_block_radix_n[", suffix)))
-
-    results = Dict[String, (Float64, Int)]()
-    for info in m.info_vec:
-        n = info.name
-        time = info.result.mean("ms")
-        avg, amnt = results.get(n, (Float64(0), 0))
-        results[n] = ((avg * amnt + time) / (amnt + 1), amnt + 1)
-    print("")
-    for k_v in results.items():
-        print(k_v.key, k_v.value[0], sep=", ")
+    var m = Bench(BenchConfig(num_repetitions=1))
+    alias ordered_bases: List[UInt] = [2]
+    alias dtype = DType.float32
+    alias test_values = _get_test_values_128[dtype]()
+    m.bench_function[
+        profile_intra_block_radix_n[dtype, ordered_bases, test_values]
+    ](BenchId(String("profile_intra_block_radix_n")))

@@ -642,16 +642,8 @@ fn _radix_n_fft_kernel[
     optimizations, at the cost of a bit of branching."""
     constrained[length >= base, "length must be >= base"]()
     alias Sc = Scalar[_get_dtype[length * base]()]
-    alias is_rfft_final_stage = do_rfft and processed * base == length
-    alias rfft_idx_limit = (length // base) // 2
-    alias is_first_rfft_stage = do_rfft and processed == 1 and length != base
     alias offset = Sc(processed)
     var n = Sc(local_i) % offset + (Sc(local_i) // offset) * (offset * Sc(base))
-
-    @parameter
-    if is_rfft_final_stage:
-        if n > rfft_idx_limit:
-            return
 
     alias Co = ComplexSIMD[out_dtype, 1]
     alias is_even = length % 2 == 0  # avoid evaluating for uneven
@@ -765,14 +757,6 @@ fn _radix_n_fft_kernel[
         var vec = UnsafePointer(to=x_out[i]).bitcast[Scalar[out_dtype]]()
         var res = vec.load[width=2]()
         output.store(Int(idx), 0, res)
-
-        @parameter
-        if is_rfft_final_stage:  # copy the symmetric conjugates
-            # when idx == 0 its conjugate is idx == length + 1
-            # when the sequence length is even then the next_idx can be == idx
-            var next_idx = length - idx
-            if idx > 0 and idx != next_idx:
-                output.store(Int(next_idx), 0, res[0].join(-res[1]))
 
 
 # ===-----------------------------------------------------------------------===#
