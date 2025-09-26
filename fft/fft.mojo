@@ -12,14 +12,10 @@ from math import ceil
 
 from fft.utils import (
     _get_dtype,
-    _get_ordered_items,
-    _approx_sin,
-    _approx_cos,
     _get_twiddle_factors,
-    _prep_twiddle_factors,
-    _log_mod,
     _get_ordered_bases_processed_list,
     _get_flat_twfs,
+    _mixed_radix_digit_reverse,
 )
 
 # TODO: benchmark whether adding numbers like 6, 8 or 10 is worth it
@@ -732,6 +728,7 @@ fn _radix_n_fft_kernel[
                 alias base_phasor = _base_phasor[i, j]()
                 x_out[i] = _twf_fma[base_phasor, j == 1](x[j], x_out[i])
             continue
+
         var i0_j_twf_vec = twiddle_factors.load[2](
             twf_offset + local_i * (base - 1) + (j - 1), 0
         )
@@ -814,19 +811,17 @@ fn _reorder_kernel[
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     local_i: UInt,
 ):
-    alias ordered_items = _get_ordered_items[length, ordered_bases]()
-
     @parameter
     for i in range(base):
-        var idx = local_i * base + i
+        var copy_from = local_i * base + i
 
-        var copy_from: UInt
+        var idx: UInt
 
         @parameter
         if base == length:  # do a DFT on the inputs
-            copy_from = idx
+            idx = copy_from
         else:
-            copy_from = UInt(ordered_items.unsafe_get(idx))
+            idx = _mixed_radix_digit_reverse[length, ordered_bases](copy_from)
 
         output[idx, 0] = x[copy_from, 0].cast[out_dtype]()
 

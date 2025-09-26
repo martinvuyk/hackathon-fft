@@ -25,19 +25,11 @@ fn _get_dtype[length: UInt]() -> DType:
         return DType.uint256
 
 
-fn _mixed_radix_digit_reverse[bases: List[UInt]](idx: UInt) -> UInt:
+fn _mixed_radix_digit_reverse[
+    length: UInt, ordered_bases: List[UInt]
+](idx: UInt) -> UInt:
     """Performs mixed-radix digit reversal for an index `idx` based on a
-    sequence of `bases`.
-
-    Parameters:
-        bases: A List of UInt representing the radices in the order
-            `R_0, R_1, ..., R_{M-1}`.
-
-    Args:
-        idx: The input index to be reversed.
-
-    Returns:
-        The digit-reversed index.
+    sequence of `ordered_bases`.
 
     Notes:
         Given `N = R_0 * R_1 * ... * R_{M-1}`, an input index `k` is represented
@@ -50,23 +42,19 @@ fn _mixed_radix_digit_reverse[bases: List[UInt]](idx: UInt) -> UInt:
     """
     var reversed_idx = UInt(0)
     var current_val = idx
-    var digits = InlineArray[UInt, len(bases)](uninitialized=True)
+    var base_offset = length
 
-    for i in range(len(materialize[bases]())):
-        var current_base = materialize[bases]()[i]
-        digits[i] = current_val % current_base
-        current_val //= current_base
-
-    var current_product_term_base = UInt(1)
-    for i in reversed(range(len(materialize[bases]()))):
-        var digit_to_add = digits[i]
-        reversed_idx += digit_to_add * current_product_term_base
-        current_product_term_base *= materialize[bases]()[i]
+    @parameter
+    for i in reversed(range(len(ordered_bases))):
+        alias base = ordered_bases[i]
+        base_offset //= base
+        reversed_idx += (current_val % base) * base_offset
+        current_val //= base
     return reversed_idx
 
 
 fn _get_ordered_items[
-    length: UInt, bases: List[UInt]
+    length: UInt, ordered_bases: List[UInt]
 ](out res: InlineArray[Scalar[_get_dtype[length]()], length]):
     """The Butterfly diagram orders indexes by digit."""
     res = {uninitialized = True}
@@ -74,7 +62,7 @@ fn _get_ordered_items[
 
     @parameter
     fn _is_all_two() -> Bool:
-        for base in materialize[bases]():
+        for base in materialize[ordered_bases]():
             if base != 2:
                 return False
         return True
@@ -88,16 +76,8 @@ fn _get_ordered_items[
         for i in range(length):
             res[bit_reverse(values[i])] = i
     else:
-
-        @parameter
-        fn _reversed() -> List[UInt]:
-            var rev = List[UInt](capacity=len(materialize[bases]()))
-            for item in reversed(materialize[bases]()):
-                rev.append(item)
-            return rev^
-
         for i in range(length):
-            res[_mixed_radix_digit_reverse[_reversed()](i)] = i
+            res[_mixed_radix_digit_reverse[length, ordered_bases](i)] = i
 
 
 # FIXME: mojo limitation. cos and sin can't run at compile time
