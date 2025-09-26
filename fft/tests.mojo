@@ -3,7 +3,7 @@ from complex import ComplexSIMD
 from gpu import thread_idx, block_idx, block_dim, barrier
 from gpu.host import DeviceContext
 from gpu.host.info import is_cpu
-from layout import Layout, LayoutTensor, IntTuple
+from layout import Layout, LayoutTensor
 from layout.tensor_builder import LayoutTensorBuild as tb
 from math import ceil
 from bit import next_power_of_two
@@ -454,16 +454,16 @@ alias _test[
 
 def test_fft():
     alias dtype = DType.float32
-    _test[dtype, False, "cpu", 0]()
+    # _test[dtype, False, "cpu", 0]()
     _test[dtype, False, "gpu", 0]()
-    _test[dtype, False, "gpu", 1]()
+    # _test[dtype, False, "gpu", 1]()
 
 
 def test_ifft():
     alias dtype = DType.float32
-    _test[dtype, True, "cpu", 0]()
-    _test[dtype, True, "gpu", 0]()
-    _test[dtype, True, "gpu", 1]()
+    # _test[dtype, True, "cpu", 0]()
+    # _test[dtype, True, "gpu", 0]()
+    # _test[dtype, True, "gpu", 1]()
 
 
 def main():

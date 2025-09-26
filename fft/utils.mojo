@@ -353,4 +353,5 @@ fn _get_ordered_bases_processed_list[
         "length. The builtin algorithm was only able to produce: ",
         ordered_bases.__str__(),
     ]()
+    constrained[1 not in ordered_bases, "Cannot do an fft with base 1."]()
     return materialize[ordered_bases](), materialize[processed_list]()

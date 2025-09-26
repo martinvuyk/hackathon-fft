@@ -7,6 +7,42 @@ version = "0.1.0"
 [tasks]
 tests = "mojo run -D ASSERT=warn tests.mojo"
 bench = "mkdir -p build && mojo build bench.mojo -o build/bench && ./build/bench"
+profile-nsys = """mojo build --debug-level=full -o build/profile profile.mojo && \
+    nsys profile \
+    --output=profile_results \
+    --trace=cuda,osrt,nvtx  \
+    --force-overwrite=true \
+    --trace-fork-before-exec=true \
+    --cuda-memory-usage=true \
+    --cuda-um-cpu-page-faults=true \
+    --cuda-um-gpu-page-faults=true \
+    --opengl-gpu-workload=false \    
+    --sample=cpu \
+    --cpuctxsw=process-tree \
+    build/profile && \
+    nsys stats --force-export=true profile_results.nsys-rep && \
+    rm -f profile_results.nsys-rep profile_results.sqlite profile_results.qdstrm
+"""
+profile-ncu = """mojo build --debug-level=full -o build/profile profile.mojo && \
+    /opt/nvidia/nsight-compute/2025.3.1/target/linux-desktop-glibc_2_11_3-x64/ncu \
+    -o kernel_analysis \
+    --set full \
+    --import-source=on \
+    --kernel-id=:::1 \
+    --launch-skip=0 \
+    --launch-count=1 \
+    --target-processes=all \
+    --replay-mode=kernel \
+    --cache-control=all \
+    --clock-control=base \
+    --apply-rules=yes \
+    --check-exit-code=yes \
+    --force-overwrite \
+    build/profile && \
+    /opt/nvidia/nsight-compute/2025.3.1/target/linux-desktop-glibc_2_11_3-x64/ncu \
+    --import kernel_analysis.ncu-rep --page details && \
+    rm -f kernel_analysis.ncu-rep
+"""
 
 [dependencies]
 mojo = "<1.0.0"

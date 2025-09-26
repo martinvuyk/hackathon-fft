@@ -1,8 +1,9 @@
-from algorithm import parallelize
+from algorithm import parallelize, vectorize
 from complex import ComplexSIMD
 from gpu import thread_idx, block_idx, block_dim, barrier
 from gpu.host import DeviceContext
 from gpu.host.info import is_cpu
+from gpu.memory import async_copy_wait_all
 from layout import Layout, LayoutTensor, IntTuple
 from layout.tensor_builder import LayoutTensorBuild as tb
 from bit import next_power_of_two
@@ -649,6 +650,16 @@ fn _radix_n_fft_kernel[
     alias is_even = length % 2 == 0  # avoid evaluating for uneven
 
     @parameter
+    fn _offsets(out res: SIMD[Sc.dtype, base * 2]):
+        res = {}
+        var idx = 0
+        for i in range(base):
+            res[idx] = i * offset * 2
+            idx += 1
+            res[idx] = i * offset * 2 + 1
+            idx += 1
+
+    @parameter
     fn _base_phasor[i: UInt, j: UInt](out res: Co):
         alias base_twf = _get_twiddle_factors[base, out_dtype, inverse]()
         res = {1, 0}
@@ -691,18 +702,22 @@ fn _radix_n_fft_kernel[
             x_i = twf.fma(x_j, acc)
 
     var x = InlineArray[Co, base](uninitialized=True)
+    var x_ptr = x.unsafe_ptr().bitcast[Scalar[out_dtype]]()
+    var out_ptr = output.ptr.offset(n * 2)
 
     @parameter
-    for i in range(base):
-        alias step = i * offset
-        var idx = Int(n + step)
+    if base.is_power_of_two() and processed == 1:
+        x_ptr.store(out_ptr.load[width = base * 2]())
+    elif base.is_power_of_two() and out_address_space is AddressSpace.GENERIC:
+        alias offsets = _offsets()
+        x_ptr.store(out_ptr.gather(offsets))
+    else:
 
         @parameter
-        if do_rfft and processed == 1:
-            x[i] = Co(rebind[Scalar[out_dtype]](output[idx, 0]), 0)
-        else:
-            var data = output.load[2](idx, 0)
-            x[i] = UnsafePointer(to=data).bitcast[Co]()[]
+        for i in range(base):
+            alias step = i * offset
+            alias x_idx = i * 2
+            (x_ptr + x_idx).store(output.load[2](Int(n + step), 0))
 
     var x_out = InlineArray[Co, base](fill=x[0])
 
@@ -743,20 +758,36 @@ fn _radix_n_fft_kernel[
     @parameter
     if inverse and processed * base == length:  # last ifft stage
         alias factor = (Float64(1) / Float64(length)).cast[out_dtype]()
+        var ptr = x_out.unsafe_ptr().bitcast[Scalar[out_dtype]]()
+
+        @parameter
+        if base.is_power_of_two():
+            ptr.store(ptr.load[width = base * 2]() * factor)
+        else:
+
+            @parameter
+            for i in range(base):
+                var p = ptr.offset(2 * i)
+                p.store(p.load[width=2]() * factor)
+
+    var x_out_ptr = (
+        x_out.unsafe_ptr().origin_cast[False]().bitcast[Scalar[out_dtype]]()
+    )
+
+    @parameter
+    if base.is_power_of_two() and processed == 1:
+        output.ptr.offset(n * 2).store(x_out_ptr.load[width = base * 2]())
+    elif base.is_power_of_two() and out_address_space is AddressSpace.GENERIC:
+        alias offsets = _offsets()
+        var v = x_out_ptr.load[width = base * 2]()
+        output.ptr.offset(n * 2).scatter(offsets, v)
+    else:
 
         @parameter
         for i in range(base):
-            x_out[i].re *= factor
-            x_out[i].im *= factor
-
-    @parameter
-    for i in range(base):
-        alias step = i * offset
-        # TODO: make sure this is the most efficient
-        var idx = n + step
-        var vec = UnsafePointer(to=x_out[i]).bitcast[Scalar[out_dtype]]()
-        var res = vec.load[width=2]()
-        output.store(Int(idx), 0, res)
+            alias step = i * offset
+            alias shift = 2 * i
+            output.store(Int(n + step), 0, (x_out_ptr + shift).load[width=2]())
 
 
 # ===-----------------------------------------------------------------------===#
@@ -783,7 +814,6 @@ fn _reorder_kernel[
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     local_i: UInt,
 ):
-    alias amnt_threads = length // base
     alias ordered_items = _get_ordered_items[length, ordered_bases]()
 
     @parameter
@@ -798,15 +828,10 @@ fn _reorder_kernel[
         else:
             copy_from = UInt(ordered_items.unsafe_get(idx))
 
+        output[idx, 0] = x[copy_from, 0].cast[out_dtype]()
+
         @parameter
         if do_rfft:
-            output[idx, 0] = x[copy_from, 0].cast[out_dtype]()
-            # NOTE: filling the imaginary part with 0 is not necessary
-            # because the _radix_n_fft_kernel already sets it to 0
-            # when do_rfft and processed == 1
+            output[idx, 1] = 0
         else:
-            alias msg = "in_layout must be complex valued"
-            constrained[len(in_layout) == 2, msg]()
-            constrained[in_layout.shape[1].value() == 2, msg]()
-            var v = x.load[width=2](copy_from, 0).cast[out_dtype]()
-            output.store(idx, 0, v)
+            output[idx, 1] = x[copy_from, 1].cast[out_dtype]()
