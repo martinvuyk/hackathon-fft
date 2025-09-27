@@ -813,15 +813,15 @@ fn _reorder_kernel[
 ):
     @parameter
     for i in range(base):
-        var copy_from = local_i * base + i
+        var idx = local_i * base + i
 
-        var idx: UInt
+        var copy_from: UInt
 
         @parameter
         if base == length:  # do a DFT on the inputs
-            idx = copy_from
+            copy_from = idx
         else:
-            idx = _mixed_radix_digit_reverse[length, ordered_bases](copy_from)
+            copy_from = _mixed_radix_digit_reverse[length, ordered_bases](idx)
 
         output[idx, 0] = x[copy_from, 0].cast[out_dtype]()
 

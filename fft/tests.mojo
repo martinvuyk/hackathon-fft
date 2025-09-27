@@ -454,9 +454,9 @@ alias _test[
 
 def test_fft():
     alias dtype = DType.float32
-    # _test[dtype, False, "cpu", 0]()
+    _test[dtype, False, "cpu", 0]()
     _test[dtype, False, "gpu", 0]()
-    # _test[dtype, False, "gpu", 1]()
+    _test[dtype, False, "gpu", 1]()
 
 
 def test_ifft():

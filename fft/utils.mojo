@@ -42,10 +42,20 @@ fn _mixed_radix_digit_reverse[
     """
     var reversed_idx = UInt(0)
     var current_val = idx
+    # var base_offset = length
+
+    # @parameter
+    # for i in reversed(range(len(ordered_bases))):
+    #     alias base = ordered_bases[i]
+    #     base_offset //= base
+    #     reversed_idx += (current_val % base) * base_offset
+    #     current_val //= base
+    # return reversed_idx
+
     var base_offset = length
 
     @parameter
-    for i in reversed(range(len(ordered_bases))):
+    for i in range(len(ordered_bases)):
         alias base = ordered_bases[i]
         base_offset //= base
         reversed_idx += (current_val % base) * base_offset
