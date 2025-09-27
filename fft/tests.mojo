@@ -8,6 +8,7 @@ from layout.tensor_builder import LayoutTensorBuild as tb
 from math import ceil
 from bit import next_power_of_two
 from sys.info import has_accelerator, simd_width_of
+from utils.numerics import nan
 
 from testing import assert_almost_equal
 
@@ -260,10 +261,10 @@ def test_fft_radix_n[
         @parameter
         if target == "cpu":
             var out_data = List[Scalar[in_dtype]](
-                length=out_layout.size(), fill=999
+                length=out_layout.size(), fill=nan[in_dtype]()
             )
             var x_data = List[Scalar[out_dtype]](
-                length=in_layout.size(), fill=999
+                length=in_layout.size(), fill=nan[out_dtype]()
             )
             var batch_output = LayoutTensor[mut=True, out_dtype, out_layout](
                 Span(out_data)
@@ -303,10 +304,10 @@ def test_fft_radix_n[
         else:
             var x_data = ctx.enqueue_create_buffer[in_dtype](
                 in_layout.size()
-            ).enqueue_fill(999)
+            ).enqueue_fill(nan[in_dtype]())
             var out_data = ctx.enqueue_create_buffer[out_dtype](
                 out_layout.size()
-            ).enqueue_fill(999)
+            ).enqueue_fill(nan[out_dtype]())
             var batch_output = LayoutTensor[mut=True, out_dtype, out_layout](
                 out_data.unsafe_ptr()
             )
@@ -461,9 +462,9 @@ def test_fft():
 
 def test_ifft():
     alias dtype = DType.float32
-    # _test[dtype, True, "cpu", 0]()
-    # _test[dtype, True, "gpu", 0]()
-    # _test[dtype, True, "gpu", 1]()
+    _test[dtype, True, "cpu", 0]()
+    _test[dtype, True, "gpu", 0]()
+    _test[dtype, True, "gpu", 1]()
 
 
 def main():

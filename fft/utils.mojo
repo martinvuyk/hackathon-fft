@@ -27,7 +27,7 @@ fn _get_dtype[length: UInt]() -> DType:
 
 fn _mixed_radix_digit_reverse[
     length: UInt, ordered_bases: List[UInt]
-](idx: UInt) -> UInt:
+](idx: Scalar) -> __type_of(idx):
     """Performs mixed-radix digit reversal for an index `idx` based on a
     sequence of `ordered_bases`.
 
@@ -40,18 +40,8 @@ fn _mixed_radix_digit_reverse[
         `k' = d_{M-1} + d_{M-2}*R_{M-1} + ... + d_1*R_{M-1}*...*R_2 + d_0*R_{M-1
         }*...*R_1`
     """
-    var reversed_idx = UInt(0)
+    var reversed_idx = __type_of(idx)(0)
     var current_val = idx
-    # var base_offset = length
-
-    # @parameter
-    # for i in reversed(range(len(ordered_bases))):
-    #     alias base = ordered_bases[i]
-    #     base_offset //= base
-    #     reversed_idx += (current_val % base) * base_offset
-    #     current_val //= base
-    # return reversed_idx
-
     var base_offset = length
 
     @parameter
@@ -61,33 +51,6 @@ fn _mixed_radix_digit_reverse[
         reversed_idx += (current_val % base) * base_offset
         current_val //= base
     return reversed_idx
-
-
-fn _get_ordered_items[
-    length: UInt, ordered_bases: List[UInt]
-](out res: InlineArray[Scalar[_get_dtype[length]()], length]):
-    """The Butterfly diagram orders indexes by digit."""
-    res = {uninitialized = True}
-    alias E = __type_of(res).ElementType
-
-    @parameter
-    fn _is_all_two() -> Bool:
-        for base in materialize[ordered_bases]():
-            if base != 2:
-                return False
-        return True
-
-    @parameter
-    if _is_all_two():
-        var values = List[E](capacity=length)
-        for i in range(E(length)):
-            values.append(bit_reverse(i))
-        sort(values)
-        for i in range(length):
-            res[bit_reverse(values[i])] = i
-    else:
-        for i in range(length):
-            res[_mixed_radix_digit_reverse[length, ordered_bases](i)] = i
 
 
 # FIXME: mojo limitation. cos and sin can't run at compile time

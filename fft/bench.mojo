@@ -93,7 +93,52 @@ def _bench_intra_block_fft_launch_radix_n[
 
 
 @parameter
-fn bench_intra_block_radix_n[
+fn bench_intra_block_radix_n_rfft[
+    dtype: DType, bases: List[UInt], test_values: _TestValues[dtype]
+](mut b: Bencher) raises:
+    alias values = test_values[len(test_values) - 1]
+    alias SIZE = len(values[0])
+    alias in_dtype = dtype
+    alias out_dtype = dtype
+    alias in_layout = Layout.row_major(1, SIZE, 1)
+    alias out_layout = Layout.row_major(1, SIZE, 2)
+    alias calc_dtype = dtype
+    alias Complex = ComplexSIMD[calc_dtype, 1]
+
+    with DeviceContext() as ctx:
+        out = ctx.enqueue_create_buffer[out_dtype](
+            out_layout.size()
+        ).enqueue_fill(0)
+        x = ctx.enqueue_create_buffer[in_dtype](in_layout.size()).enqueue_fill(
+            0
+        )
+        ref series = values[0]
+        with x.map_to_host() as x_host:
+            for i in range(SIZE):
+                x_host[i] = series[i]
+
+        var out_tensor = LayoutTensor[mut=True, out_dtype, out_layout](
+            out.unsafe_ptr()
+        )
+        var x_tensor = LayoutTensor[mut=False, in_dtype, in_layout](
+            x.unsafe_ptr()
+        )
+
+        @always_inline
+        @parameter
+        fn call_fn(ctx: DeviceContext) raises:
+            _bench_intra_block_fft_launch_radix_n[bases=bases](
+                out_tensor, x_tensor, ctx, b
+            )
+
+        b.iter_custom[call_fn](ctx)
+
+        _ = out_tensor
+        _ = x_tensor
+
+
+@parameter
+fn bench_cpu_radix_n_rfft[
     dtype: DType, bases: List[UInt], test_values: _TestValues[dtype]
 ](mut b: Bencher) raises:
     alias values = test_values[len(test_values) - 1]
@@ -158,8 +203,8 @@ def main():
     for bases in bases_list:
         alias suffix = String(bases.__str__(), ", ", 128, "]")
         m.bench_function[
-            bench_intra_block_radix_n[DType.float32, bases, test_values]
-        ](BenchId(String("bench_intra_block_radix_n[", suffix)))
+            bench_intra_block_radix_n_rfft[DType.float32, bases, test_values]
+        ](BenchId(String("bench_intra_block_radix_n_rfft[", suffix)))
 
     results = Dict[String, (Float64, Int)]()
     for info in m.info_vec:
