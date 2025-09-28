@@ -7,6 +7,7 @@ from bit import (
     prev_power_of_two,
     next_power_of_two,
 )
+from gpu.host.info import is_cpu
 
 
 fn _get_dtype[length: UInt]() -> DType:
@@ -214,7 +215,7 @@ fn _get_flat_twfs[
                 idx += 1
 
 
-fn _log_mod[base: UInt](x: UInt) -> (UInt, UInt):
+fn _log_mod(x: UInt, base: UInt) -> (UInt, UInt):
     """Get the maximum exponent of base that fully divides x and the
     remainder.
     """
@@ -222,7 +223,7 @@ fn _log_mod[base: UInt](x: UInt) -> (UInt, UInt):
 
     @parameter
     fn _run() -> (UInt, UInt):
-        ref res = _log_mod[base](div)
+        ref res = _log_mod(div, base)
         res[0] += 1
         return res
 
@@ -233,7 +234,7 @@ fn _log_mod[base: UInt](x: UInt) -> (UInt, UInt):
 
 
 fn _get_ordered_bases_processed_list[
-    length: UInt, bases: List[UInt]
+    length: UInt, bases: List[UInt], target: StaticString
 ]() -> (List[UInt], List[UInt]):
     @parameter
     fn _reduce_mul[b: List[UInt]](out res: UInt):
@@ -242,29 +243,37 @@ fn _get_ordered_bases_processed_list[
             res *= base
 
     @parameter
-    fn _is_all_two() -> Bool:
-        for base in materialize[bases]():
+    fn _is_all_two(existing_bases: List[UInt]) -> Bool:
+        for base in existing_bases:
             if base != 2:
                 return False
         return True
 
     @parameter
-    fn _build_ordered_bases() -> List[UInt]:
-        var new_bases: List[UInt]
-
+    fn _build_ordered_bases(out new_bases: List[UInt]):
         @parameter
         if _reduce_mul[bases]() == length:
             new_bases = materialize[bases]()
+            sort(new_bases)  # FIXME: this should just be ascending=False
+            new_bases.reverse()
         else:
-            var processed = UInt(1)
-            new_bases = List[UInt](capacity=len(materialize[bases]()))
+            var existing_bases = materialize[bases]()
+            sort(existing_bases)
 
             @parameter
-            for base in bases:
+            if is_cpu[target]():
+                existing_bases.reverse()  # FIXME: this should just be ascending=False
+            new_bases = List[UInt](capacity=len(existing_bases))
+
+            var processed = UInt(1)
+            for base in existing_bases:
                 var amnt_divisible: UInt
 
-                @parameter
-                if _is_all_two() and length.is_power_of_two() and base == 2:
+                if (
+                    _is_all_two(existing_bases)
+                    and length.is_power_of_two()
+                    and base == 2
+                ):
                     # FIXME(#5003): this should just be Scalar[DType.index]
                     @parameter
                     if is_64bit():
@@ -276,13 +285,14 @@ fn _get_ordered_bases_processed_list[
                             count_trailing_zeros(UInt32(length))
                         )
                 else:
-                    amnt_divisible = _log_mod[base](length // processed)[0]
+                    amnt_divisible = _log_mod(length // processed, base)[0]
                 for _ in range(amnt_divisible):
                     new_bases.append(base)
                     processed *= base
-        sort(new_bases)  # FIXME: this should just be ascending=False
-        new_bases.reverse()
-        return new_bases^
+
+            @parameter
+            if not is_cpu[target]():
+                new_bases.reverse()
 
     alias ordered_bases = _build_ordered_bases()
 

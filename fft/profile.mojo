@@ -31,7 +31,9 @@ def _profile_intra_block_fft_launch_radix_n[
     mut b: Bencher,
 ):
     alias length = in_layout.shape[1].value()
-    alias bases_processed = _get_ordered_bases_processed_list[length, bases]()
+    alias bases_processed = _get_ordered_bases_processed_list[
+        length, bases, "gpu"
+    ]()
     alias ordered_bases = bases_processed[0]
     alias processed_list = bases_processed[1]
 

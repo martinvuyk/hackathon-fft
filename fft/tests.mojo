@@ -13,7 +13,6 @@ from utils.numerics import nan
 from testing import assert_almost_equal
 
 from fft.fft import (
-    _DEFAULT_BASES,
     _cpu_fft_kernel_radix_n,
     _intra_block_fft_kernel_radix_n,
     _launch_inter_multiprocessor_fft,
@@ -49,7 +48,7 @@ fn test_fft[
     out_layout: Layout,
     *,
     test_num: UInt,
-    bases: List[UInt] = _DEFAULT_BASES,
+    bases: List[UInt],
     inverse: Bool = False,
     target: StaticString = "cpu",
 ](
@@ -73,7 +72,7 @@ fn test_fft[
     ]()
 
     alias bases_processed = _get_ordered_bases_processed_list[
-        sequence_length, bases
+        sequence_length, bases, target
     ]()
     alias ordered_bases = bases_processed[0]
     alias processed_list = bases_processed[1]
@@ -185,6 +184,7 @@ def test_fft_radix_n[
     inverse: Bool,
     target: StaticString,
     test_num: UInt,
+    debug: Bool,
 ]():
     alias BATCHES = len(test_values)
     alias SIZE = len(test_values[0][0])
@@ -196,9 +196,12 @@ def test_fft_radix_n[
     alias out_layout = Layout.row_major(BATCHES, SIZE, 2)
     alias calc_dtype = dtype
     alias Complex = ComplexSIMD[calc_dtype, 1]
-    print("----------------------------")
-    print("Buffers")
-    print("----------------------------")
+
+    @parameter
+    if debug:
+        print("----------------------------")
+        print("Buffers")
+        print("----------------------------")
 
     @parameter
     fn _eval[
@@ -208,24 +211,31 @@ def test_fft_radix_n[
         scalar_in: List[Int],
         complex_out: List[ComplexSIMD[out_dtype, 1]],
     ) raises:
-        print("out: ", end="")
-        for i in range(SIZE):
-            if i == 0:
-                print("[", result[i, 0], ", ", result[i, 1], sep="", end="")
-            else:
-                print(", ", result[i, 0], ", ", result[i, 1], sep="", end="")
-        print("]")
-        print("expected: ", end="")
+        @parameter
+        if debug:
+            print("out: ", end="")
+            for i in range(SIZE):
+                if i == 0:
+                    print("[", result[i, 0], ", ", result[i, 1], sep="", end="")
+                else:
+                    print(
+                        ", ", result[i, 0], ", ", result[i, 1], sep="", end=""
+                    )
+            print("]")
+            print("expected: ", end="")
 
         # gather all real parts and then the imaginary parts
         @parameter
         if inverse:
-            for i in range(SIZE):
-                if i == 0:
-                    print("[", scalar_in[i], ".0, 0.0", sep="", end="")
-                else:
-                    print(", ", scalar_in[i], ".0, 0.0", sep="", end="")
-            print("]")
+
+            @parameter
+            if debug:
+                for i in range(SIZE):
+                    if i == 0:
+                        print("[", scalar_in[i], ".0, 0.0", sep="", end="")
+                    else:
+                        print(", ", scalar_in[i], ".0, 0.0", sep="", end="")
+                print("]")
             for i in range(SIZE):
                 assert_almost_equal(
                     result[i, 0],
@@ -235,13 +245,16 @@ def test_fft_radix_n[
                 )
                 assert_almost_equal(result[i, 1], 0, atol=1e-3, rtol=1e-5)
         else:
-            for i in range(SIZE):
-                if i == 0:
-                    print("[", complex_out[i].re, ", ", sep="", end="")
-                else:
-                    print(", ", complex_out[i].re, ", ", sep="", end="")
-                print(complex_out[i].im, end="")
-            print("]")
+
+            @parameter
+            if debug:
+                for i in range(SIZE):
+                    if i == 0:
+                        print("[", complex_out[i].re, ", ", sep="", end="")
+                    else:
+                        print(", ", complex_out[i].re, ", ", sep="", end="")
+                    print(complex_out[i].im, end="")
+                print("]")
             for i in range(SIZE):
                 assert_almost_equal(
                     result[i, 0],
@@ -349,9 +362,12 @@ def test_fft_radix_n[
                         mut=True, out_dtype, output_layout, batch_output.origin
                     ](out_host.unsafe_ptr() + batch_output.stride[0]() * idx)
                     _eval(output, test[0], test[1])
-        print("----------------------------")
-        print("Tests passed")
-        print("----------------------------")
+
+        @parameter
+        if debug:
+            print("----------------------------")
+            print("Tests passed")
+            print("----------------------------")
 
 
 def _test_fft[
@@ -361,110 +377,116 @@ def _test_fft[
     alias L = List[UInt]
 
     alias values_2 = _get_test_values_2[dtype]()
-    func[L(2), values_2]()
+    func[[2], values_2]()
 
     alias values_3 = _get_test_values_3[dtype]()
-    func[L(3), values_3]()
+    func[[3], values_3]()
 
     alias values_4 = _get_test_values_4[dtype]()
-    func[L(4), values_4]()
-    func[L(2), values_4]()
+    func[[4], values_4]()
+    func[[2], values_4]()
 
     alias values_5 = _get_test_values_5[dtype]()
-    func[L(5), values_5]()
+    func[[5], values_5]()
 
     alias values_6 = _get_test_values_6[dtype]()
-    func[L(6), values_6]()
-    func[L(3, 2), values_6]()
-    func[L(2, 3), values_6]()
+    func[[6], values_6]()
+    func[[3, 2], values_6]()
+    func[[2, 3], values_6]()
 
     alias values_7 = _get_test_values_7[dtype]()
-    func[L(7), values_7]()
+    func[[7], values_7]()
 
     alias values_8 = _get_test_values_8[dtype]()
-    func[L(8), values_8]()
-    func[L(2), values_8]()
-    func[L(4, 2), values_8]()
-    func[L(2, 4), values_8]()
+    func[[8], values_8]()
+    func[[2], values_8]()
+    func[[4, 2], values_8]()
+    func[[2, 4], values_8]()
 
     alias values_10 = _get_test_values_10[dtype]()
-    func[L(10), values_10]()
-    func[L(5, 2), values_10]()
+    func[[10], values_10]()
+    func[[5, 2], values_10]()
 
     alias values_16 = _get_test_values_16[dtype]()
-    func[L(16), values_16]()
-    func[L(2), values_16]()
-    func[L(4), values_16]()
-    func[L(2, 4), values_16]()
-    func[L(8, 2), values_16]()
-    func[L(2, 8), values_16]()
+    func[[16], values_16]()
+    func[[2], values_16]()
+    func[[4], values_16]()
+    func[[2, 4], values_16]()
+    func[[8, 2], values_16]()
+    func[[2, 8], values_16]()
 
     alias values_20 = _get_test_values_20[dtype]()
-    func[L(20), values_20]()
-    func[L(10, 2), values_20]()
-    func[L(5, 4), values_20]()
-    func[L(5, 2), values_20]()
+    func[[20], values_20]()
+    func[[10, 2], values_20]()
+    func[[5, 4], values_20]()
+    func[[5, 2], values_20]()
 
     alias values_21 = _get_test_values_21[dtype]()
-    func[L(7, 3), values_21]()
+    func[[7, 3], values_21]()
 
     alias values_32 = _get_test_values_32[dtype]()
-    func[L(2), values_32]()
-    func[L(16, 2), values_32]()
-    func[L(8, 4), values_32]()
-    func[L(4, 2), values_32]()
-    func[L(8, 2), values_32]()
+    func[[2], values_32]()
+    func[[16, 2], values_32]()
+    func[[8, 4], values_32]()
+    func[[4, 2], values_32]()
+    func[[8, 2], values_32]()
 
     alias values_35 = _get_test_values_35[dtype]()
-    func[L(7, 5), values_35]()
+    func[[7, 5], values_35]()
 
     alias values_48 = _get_test_values_48[dtype]()
-    func[L(8, 6), values_48]()
-    func[L(3, 2), values_48]()
+    func[[8, 6], values_48]()
+    func[[3, 2], values_48]()
 
     alias values_60 = _get_test_values_60[dtype]()
-    func[L(10, 6), values_60]()
-    func[L(6, 5, 2), values_60]()
-    func[L(5, 4, 3), values_60]()
-    func[L(3, 4, 5), values_60]()
-    func[L(5, 3, 2), values_60]()
+    func[[10, 6], values_60]()
+    func[[6, 5, 2], values_60]()
+    func[[5, 4, 3], values_60]()
+    func[[3, 4, 5], values_60]()
+    func[[5, 3, 2], values_60]()
 
     alias values_64 = _get_test_values_64[dtype]()
-    func[L(2), values_64]()
-    func[L(8), values_64]()
-    func[L(4), values_64]()
-    func[L(16, 4), values_64]()
+    func[[2], values_64]()
+    func[[8], values_64]()
+    func[[4], values_64]()
+    func[[16, 4], values_64]()
 
     alias values_100 = _get_test_values_100[dtype]()
-    func[L(20, 5), values_100]()
-    func[L(10), values_100]()
-    func[L(5, 4), values_100]()
+    func[[20, 5], values_100]()
+    func[[10], values_100]()
+    func[[5, 4], values_100]()
 
     alias values_128 = _get_test_values_128[dtype]()
-    func[L(2), values_128]()
-    func[L(16, 8), values_128]()
+    func[[2], values_128]()
+    func[[16, 8], values_128]()
 
 
 alias _test[
-    dtype: DType, inverse: Bool, target: StaticString, test_num: UInt = 0
+    dtype: DType,
+    inverse: Bool,
+    target: StaticString,
+    test_num: UInt,
+    debug: Bool,
 ] = _test_fft[
     dtype,
-    test_fft_radix_n[dtype, inverse=inverse, target=target, test_num=test_num],
+    test_fft_radix_n[
+        dtype, inverse=inverse, target=target, test_num=test_num, debug=debug
+    ],
 ]
 
 
 def test_fft():
     alias dtype = DType.float32
-    _test[dtype, False, "cpu", 0]()
-    _test[dtype, False, "gpu", 0]()
-    _test[dtype, False, "gpu", 1]()
+    _test[dtype, False, "cpu", 0, debug=False]()
+    _test[dtype, False, "gpu", 0, debug=False]()
+    _test[dtype, False, "gpu", 1, debug=False]()
 
 
 def test_ifft():
     alias dtype = DType.float32
-    _test[dtype, True, "cpu", 0]()
-    _test[dtype, True, "gpu", 0]()
-    _test[dtype, True, "gpu", 1]()
+    _test[dtype, True, "cpu", 0, debug=False]()
+    _test[dtype, True, "gpu", 0, debug=False]()
+    _test[dtype, True, "gpu", 1, debug=False]()
 
 
 def main():

@@ -10,6 +10,7 @@ from bit import count_trailing_zeros
 from fft._test_values import _get_test_values_128
 from fft.tests import _TestValues
 from fft.fft import (
+    fft,
     _intra_block_fft_kernel_radix_n,
     _get_ordered_bases_processed_list,
 )
@@ -29,7 +30,9 @@ def _bench_intra_block_fft_launch_radix_n[
     mut b: Bencher,
 ):
     alias length = in_layout.shape[1].value()
-    alias bases_processed = _get_ordered_bases_processed_list[length, bases]()
+    alias bases_processed = _get_ordered_bases_processed_list[
+        length, bases, "gpu"
+    ]()
     alias ordered_bases = bases_processed[0]
     alias processed_list = bases_processed[1]
 
@@ -106,12 +109,12 @@ fn bench_intra_block_radix_n_rfft[
     alias Complex = ComplexSIMD[calc_dtype, 1]
 
     with DeviceContext() as ctx:
-        out = ctx.enqueue_create_buffer[out_dtype](
+        var out = ctx.enqueue_create_buffer[out_dtype](
             out_layout.size()
         ).enqueue_fill(0)
-        x = ctx.enqueue_create_buffer[in_dtype](in_layout.size()).enqueue_fill(
-            0
-        )
+        var x = ctx.enqueue_create_buffer[in_dtype](
+            in_layout.size()
+        ).enqueue_fill(0)
         ref series = values[0]
         with x.map_to_host() as x_host:
             for i in range(SIZE):
@@ -139,53 +142,56 @@ fn bench_intra_block_radix_n_rfft[
 
 @parameter
 fn bench_cpu_radix_n_rfft[
-    dtype: DType, bases: List[UInt], test_values: _TestValues[dtype]
+    dtype: DType,
+    bases: List[UInt],
+    batches: UInt,
+    test_values: _TestValues[dtype],
+    *,
+    cpu_workers: Optional[UInt] = None,
 ](mut b: Bencher) raises:
     alias values = test_values[len(test_values) - 1]
     alias SIZE = len(values[0])
+    alias BATCHES = batches
     alias in_dtype = dtype
     alias out_dtype = dtype
-    alias in_layout = Layout.row_major(1, SIZE, 1)
-    alias out_layout = Layout.row_major(1, SIZE, 2)
+    alias in_layout = Layout.row_major(BATCHES, SIZE, 1)
+    alias out_layout = Layout.row_major(BATCHES, SIZE, 2)
     alias calc_dtype = dtype
     alias Complex = ComplexSIMD[calc_dtype, 1]
 
-    with DeviceContext() as ctx:
-        out = ctx.enqueue_create_buffer[out_dtype](
-            out_layout.size()
-        ).enqueue_fill(0)
-        x = ctx.enqueue_create_buffer[in_dtype](in_layout.size()).enqueue_fill(
-            0
+    var out = List[Scalar[out_dtype]](capacity=out_layout.size())
+    var x = List[Scalar[in_dtype]](capacity=in_layout.size())
+    ref series = values[0]
+    var idx = 0
+    for _ in range(BATCHES):
+        for i in range(SIZE):
+            x[idx] = series[i]
+            idx += 1
+
+    var out_tensor = LayoutTensor[mut=True, out_dtype, out_layout](
+        out.unsafe_ptr()
+    )
+    var x_tensor = LayoutTensor[mut=False, in_dtype, in_layout](x.unsafe_ptr())
+
+    @always_inline
+    @parameter
+    fn call_fn() raises:
+        fft[bases=bases, target="cpu"](
+            out_tensor, x_tensor, DeviceContext(), cpu_workers=cpu_workers
         )
-        ref series = values[0]
-        with x.map_to_host() as x_host:
-            for i in range(SIZE):
-                x_host[i] = series[i]
 
-        var out_tensor = LayoutTensor[mut=True, out_dtype, out_layout](
-            out.unsafe_ptr()
-        )
-        var x_tensor = LayoutTensor[mut=False, in_dtype, in_layout](
-            x.unsafe_ptr()
-        )
+    b.iter[call_fn]()
 
-        @always_inline
-        @parameter
-        fn call_fn(ctx: DeviceContext) raises:
-            _bench_intra_block_fft_launch_radix_n[bases=bases](
-                out_tensor, x_tensor, ctx, b
-            )
-
-        b.iter_custom[call_fn](ctx)
-
-        _ = out_tensor
-        _ = x_tensor
+    _ = out_tensor
+    _ = x_tensor
 
 
 def main():
     seed()
-    var m = Bench(BenchConfig(num_repetitions=10))
+    var m = Bench(BenchConfig(num_repetitions=1))
     alias bases_list: List[List[UInt]] = [
+        [64, 2],
+        [32, 4],
         [16, 8],
         [16, 4, 2],
         [8, 8, 2],
@@ -197,14 +203,46 @@ def main():
         [4, 2, 2, 2, 2, 2],
         [2],
     ]
-    alias test_values = _get_test_values_128[DType.float32]()
+    alias test_values_fp32 = _get_test_values_128[DType.float32]()
+    alias test_values_fp64 = _get_test_values_128[DType.float64]()
 
     @parameter
     for bases in bases_list:
-        alias suffix = String(bases.__str__(), ", ", 128, "]")
+        alias b = bases.__str__().replace("UInt(", "").replace(")", "")
         m.bench_function[
-            bench_intra_block_radix_n_rfft[DType.float32, bases, test_values]
-        ](BenchId(String("bench_intra_block_radix_n_rfft[", suffix)))
+            bench_intra_block_radix_n_rfft[
+                DType.float32, bases, test_values_fp32
+            ]
+        ](BenchId(String("bench_intra_block_radix_n_rfft[", b, ", 128]")))
+        alias cpu_bench = "bench_cpu_radix_n_rfft["
+        m.bench_function[
+            bench_cpu_radix_n_rfft[
+                DType.float64,
+                bases,
+                100_000,
+                test_values_fp64,
+                cpu_workers = UInt(1),
+            ]
+        ](BenchId(String(cpu_bench, b, ", 100_000, 128, workers=1]")))
+        m.bench_function[
+            bench_cpu_radix_n_rfft[
+                DType.float64,
+                bases,
+                1_000_000,
+                test_values_fp64,
+                cpu_workers = UInt(1),
+            ]
+        ](BenchId(String(cpu_bench, b, ", 1_000_000, 128, workers=1]")))
+        m.bench_function[
+            bench_cpu_radix_n_rfft[
+                DType.float64, bases, 100_000, test_values_fp64
+            ]
+        ](BenchId(String(cpu_bench, b, ", 100_000, 128, workers=n]")))
+        m.bench_function[
+            bench_cpu_radix_n_rfft[
+                DType.float64, bases, 1_000_000, test_values_fp64
+            ]
+        ](BenchId(String(cpu_bench, b, ", 1_000_000, 128, workers=n]")))
 
     results = Dict[String, (Float64, Int)]()
     for info in m.info_vec:
@@ -214,4 +252,4 @@ def main():
         results[n] = ((avg * amnt + time) / (amnt + 1), amnt + 1)
     print("")
     for k_v in results.items():
-        print(k_v.key, k_v.value[0], sep=", ")
+        print(k_v.key, k_v.value[0].__round__(3), sep=", ")

@@ -7,8 +7,11 @@ from gpu.memory import async_copy_wait_all
 from layout import Layout, LayoutTensor, IntTuple
 from layout.tensor_builder import LayoutTensorBuild as tb
 from bit import next_power_of_two
-from sys.info import simd_width_of, has_accelerator
 from math import ceil
+from runtime.asyncrt import parallelism_level
+from sys.info import simd_width_of, has_accelerator, num_logical_cores
+
+
 from fft.utils import (
     _get_dtype,
     _get_twiddle_factors,
@@ -17,8 +20,50 @@ from fft.utils import (
     _mixed_radix_digit_reverse,
 )
 
-# TODO: benchmark whether adding numbers like 6, 8 or 10 is worth it
-alias _DEFAULT_BASES: List[UInt] = [7, 5, 4, 3, 2]
+alias _DEFAULT_DEVICE = "cpu" if not has_accelerator() else "gpu"
+
+
+fn _check_layout_conditions[in_layout: Layout, out_layout: Layout]():
+    constrained[len(in_layout) == 3, "in_layout must have rank 3"]()
+    constrained[
+        1 <= in_layout.shape[2].value() <= 2,
+        "The layout should match one of: {(batches, sequence_length, 1), ",
+        "(batches, sequence_length, 2)}",
+    ]()
+    constrained[len(out_layout) == 3, "out_layout must have rank 3"]()
+    constrained[
+        out_layout.shape[0].value() == in_layout.shape[0].value(),
+        "out_layout must have the same number of batches in axis 0",
+    ]()
+    constrained[
+        out_layout.shape[1].value() == in_layout.shape[1].value(),
+        "out_layout must have the same sequence length in axis 1",
+    ]()
+    constrained[
+        out_layout.shape[2].value() == 2,
+        "out_layout must have the third axis equal to 2 for the complex values",
+    ]()
+
+
+fn _estimate_best_bases[
+    in_layout: Layout, out_layout: Layout, target: StaticString
+]() -> List[UInt]:
+    _check_layout_conditions[in_layout, out_layout]()
+    if not is_cpu[target]():
+        # NOTE: The more threads the better. Let the user realize when too many
+        # threads causes the implementation to fall back on running on several
+        # blocks instead of just one. This makes the default be faster for short
+        # sequences like (assuming max_threads_per_sm == 1024) <= 2048 for base
+        # 2 and <= 7168 for base 7.
+        return [7, 5, 3, 2]  # common prime factors
+    # NOTE: We want the bases (length // base determines the amount of
+    # threads per block) such that the amount of threads per block is as close
+    # as possible to the num_logical_cores() for most stages. This is guesswork.
+    var close_pow2_num_cores = next_power_of_two(num_logical_cores())
+    var bases = List[UInt](capacity=close_pow2_num_cores)
+    for i in reversed(range(2, close_pow2_num_cores + 1)):
+        bases.append(i)
+    return bases^
 
 
 fn fft[
@@ -27,13 +72,15 @@ fn fft[
     in_layout: Layout,
     out_layout: Layout,
     *,
-    bases: List[UInt] = _DEFAULT_BASES,
     inverse: Bool = False,
-    target: StaticString = "cpu",
+    target: StaticString = _DEFAULT_DEVICE,
+    bases: List[UInt] = _estimate_best_bases[in_layout, out_layout, target](),
 ](
     output: LayoutTensor[mut=True, out_dtype, out_layout],
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     ctx: DeviceContext,
+    *,
+    cpu_workers: Optional[UInt] = None,
 ) raises:
     """Calculate the Fast Fourier Transform.
 
@@ -42,50 +89,40 @@ fn fft[
         out_dtype: The `DType` of the output tensor.
         in_layout: The `Layout` of the input tensor.
         out_layout: The `Layout` of the output tensor.
-        bases: The list of bases for which to build the mixed-radix algorithm.
         inverse: Whether to run the inverse fourier transform.
         target: Target device ("cpu" or "gpu").
+        bases: The list of bases for which to build the mixed-radix algorithm.
 
     Args:
         output: The output tensor.
         x: The input tensor.
         ctx: The `DeviceContext`.
+        cpu_workers: The amount of workers to use when running on CPU.
 
     Constraints:
         The layout should match one of: `{(batches, sequence_length, 1),
         (batches, sequence_length, 2)}`
 
     Notes:
-        If the given bases list does not multiply together to equal the length,
-        the builtin algorithm duplicates the biggest values that can still
-        divide the length until reaching it.
-
-        This function automatically runs the rfft if the input is real-valued.
-        Then copies the symetric results into their corresponding slots in the
-        output tensor.
-
-        For very long sequences on GPUs, it is worth considering bigger radix
+        - This function automatically runs the rfft if the input is real-valued.
+        - If the given bases list does not multiply together to equal the
+        length, the builtin algorithm duplicates the biggest (CPU) / smallest
+        (GPU) values that can still divide the length until reaching it.
+        - For very long sequences on GPUs, it is worth considering bigger radix
         factors, due to the potential of being able to run the fft within a
         single block. Keep in mind that the amount of threads that will be
         launched is equal to the `sequence_length // smallest_base`.
     """
-    constrained[len(in_layout) == 3, "in_layout must have rank 3"]()
+    _check_layout_conditions[in_layout, out_layout]()
     alias batches = in_layout.shape[0].value()
     alias sequence_length = in_layout.shape[1].value()
     alias do_rfft = in_layout.shape[2].value() == 1
-    alias do_complex = in_layout.shape[2].value() == 2
-
-    constrained[
-        do_rfft or do_complex,
-        "The layout should match one of: {(batches, sequence_length, 1), ",
-        "(batches, sequence_length, 2)}",
-    ]()
     constrained[
         out_dtype.is_floating_point(), "out_dtype must be floating point"
     ]()
 
     alias bases_processed = _get_ordered_bases_processed_list[
-        sequence_length, bases
+        sequence_length, bases, target
     ]()
     alias ordered_bases = bases_processed[0]
     alias processed_list = bases_processed[1]
@@ -116,7 +153,7 @@ fn fft[
             inverse=inverse,
             total_twfs=total_twfs,
             twf_offsets=twf_offsets,
-        ](output, x)
+        ](output, x, cpu_workers=cpu_workers)
         return
     constrained[
         has_accelerator(), "The non-cpu implementation is for GPU only"
@@ -204,12 +241,14 @@ fn ifft[
     in_layout: Layout,
     out_layout: Layout,
     *,
-    bases: List[UInt] = _DEFAULT_BASES,
-    target: StaticString = "cpu",
+    target: StaticString = _DEFAULT_DEVICE,
+    bases: List[UInt] = _estimate_best_bases[in_layout, out_layout, target](),
 ](
     output: LayoutTensor[mut=True, out_dtype, out_layout],
     x: LayoutTensor[mut=False, in_dtype, in_layout],
     ctx: DeviceContext,
+    *,
+    cpu_workers: Optional[UInt] = None,
 ) raises:
     """Calculate the inverse Fast Fourier Transform.
 
@@ -218,24 +257,22 @@ fn ifft[
         out_dtype: The `DType` of the output tensor.
         in_layout: The `Layout` of the input tensor.
         out_layout: The `Layout` of the output tensor.
-        bases: The list of bases for which to build the mixed-radix algorithm.
         target: Target device ("cpu" or "gpu").
+        bases: The list of bases for which to build the mixed-radix algorithm.
 
     Args:
         output: The output tensor.
         x: The input tensor.
         ctx: The `DeviceContext`.
+        cpu_workers: The amount of workers to use when running on CPU.
 
     Notes:
-        If the given bases list does not multiply together to equal the length,
-        the builtin algorithm duplicates the biggest values that can still
-        divide the length until reaching it.
-
-        This function automatically runs the rfft if the input is real-valued.
-        Then copies the symetric results into their corresponding slots in the
-        output tensor.
+        This function is provided as a wrapper for the `fft` function. The
+        documentation is more complete there.
     """
-    fft[bases=bases, inverse=True, target=target](output, x, ctx)
+    fft[bases=bases, inverse=True, target=target](
+        output, x, ctx, cpu_workers=cpu_workers
+    )
 
 
 # ===-----------------------------------------------------------------------===#
@@ -455,6 +492,7 @@ fn _cpu_fft_kernel_radix_n[
 ](
     batch_output: LayoutTensor[mut=True, out_dtype, out_layout],
     batch_x: LayoutTensor[mut=False, in_dtype, in_layout],
+    cpu_workers: Optional[UInt] = None,
 ):
     """An FFT that runs on the CPU."""
 
@@ -504,7 +542,9 @@ fn _cpu_fft_kernel_radix_n[
                 ordered_bases=ordered_bases,
             ](output, x, local_i, twfs)
 
-        parallelize[func=_inner_kernel](amnt_threads)
+        parallelize[func=_inner_kernel](
+            amnt_threads, cpu_workers.or_else(parallelism_level())
+        )
 
 
 # ===-----------------------------------------------------------------------===#
