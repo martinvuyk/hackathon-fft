@@ -207,7 +207,7 @@ fn fft[
         and (output_size + twf_size) <= shared_mem_size
     ):
         alias batch_size = max_threads_available // num_threads
-        alias func = _intra_block_fft_kernel_radix_n[
+        alias func[batch_amnt: UInt] = _intra_block_fft_kernel_radix_n[
             in_dtype,
             out_dtype,
             in_layout,
@@ -219,20 +219,54 @@ fn fft[
             inverse=inverse,
             total_twfs=total_twfs,
             twf_offsets=twf_offsets,
-            warp_exec = UInt(gpu_info.warp_size) >= batches * num_threads,
+            warp_exec = UInt(gpu_info.warp_size) >= batch_amnt * num_threads,
         ]
 
         @parameter
-        for _ in range(batches // batch_size):
-            ctx.enqueue_function[func](
-                output, x, grid_dim=(1, batch_size), block_dim=num_threads
+        for i in range(batches // batch_size):
+            alias out_batch_layout = Layout.row_major(
+                batch_size, sequence_length, 2
             )
+            var out_batch = LayoutTensor[mut=True, out_dtype, out_batch_layout](
+                output.ptr + output.stride[0]() * i * batch_size
+            )
+            alias x_batch_layout = Layout.row_major(
+                batch_size, sequence_length, in_layout.shape[2].value()
+            )
+            var x_batch = LayoutTensor[mut=True, in_dtype, x_batch_layout](
+                x.ptr + x.stride[0]() * i * batch_size
+            )
+
+            ctx.enqueue_function[func[batch_size]](
+                out_batch,
+                x_batch,
+                grid_dim=(1, batch_size),
+                block_dim=num_threads,
+            )
+
         alias remainder = batches % batch_size
 
         @parameter
         if remainder > 0:
-            ctx.enqueue_function[func](
-                output, x, grid_dim=(1, remainder), block_dim=num_threads
+            alias offset = (batches - remainder) * batch_size
+            alias out_batch_layout = Layout.row_major(
+                remainder, sequence_length, 2
+            )
+            var out_batch = LayoutTensor[mut=True, out_dtype, out_batch_layout](
+                output.ptr + output.stride[0]() * offset
+            )
+            alias x_batch_layout = Layout.row_major(
+                remainder, sequence_length, in_layout.shape[2].value()
+            )
+            var x_batch = LayoutTensor[mut=True, in_dtype, x_batch_layout](
+                x.ptr + x.stride[0]() * offset
+            )
+
+            ctx.enqueue_function[func[remainder]](
+                out_batch,
+                x_batch,
+                grid_dim=(1, remainder),
+                block_dim=num_threads,
             )
     elif num_threads <= max_threads_available:
         alias block_dim = UInt(
@@ -744,7 +778,7 @@ fn _radix_n_fft_kernel[
     x_out: LayoutTensor[mut=True, out_dtype, x_out_layout],
 ):
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
-    optimizations, at the cost of a bit of branching."""
+    optimizations."""
     constrained[length >= base, "length must be >= base"]()
     alias Sc = Scalar[_get_dtype[length]()]
     alias offset = Sc(processed)
@@ -848,7 +882,7 @@ fn _radix_n_fft_kernel[
     var x_0 = _get_x[0]()
 
     @parameter
-    for j in range(1, base):
+    for j in range(UInt(1), base):
         var x_j = _get_x[j]()
 
         @parameter

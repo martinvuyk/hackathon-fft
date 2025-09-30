@@ -122,7 +122,7 @@ fn test_fft[
     alias twf_size = out_dtype.size_of() * total_twfs * 2
 
     @parameter
-    if test_num == 0:
+    if test_num == 0 or test_num == 1:
         alias batch_size = max_threads_available // num_threads
         alias func = _intra_block_fft_kernel_radix_n[
             in_dtype,
@@ -136,7 +136,10 @@ fn test_fft[
             inverse=inverse,
             total_twfs=total_twfs,
             twf_offsets=twf_offsets,
-            warp_exec = UInt(gpu_info.warp_size) >= batches * num_threads,
+            warp_exec = (
+                UInt(gpu_info.warp_size) >= batches * num_threads
+            ) if test_num
+            == 1 else False,
         ]
 
         @parameter
@@ -151,7 +154,7 @@ fn test_fft[
             ctx.enqueue_function[func](
                 output, x, grid_dim=(1, remainder), block_dim=num_threads
             )
-    elif test_num == 1 or test_num == 2:
+    elif test_num == 2 or test_num == 3:
         alias block_dim = UInt(
             ceil(num_threads / num_blocks).cast[DType.uint]()
         )
@@ -465,8 +468,8 @@ def _test_fft[
     func[[5, 4], values_100]()
 
     alias values_128 = _get_test_values_128[dtype]()
-    # func[[64, 2], values_128]()  # long compile times
-    # func[[32, 4], values_128]()  # long compile times
+    # func[[64, 2], values_128]()  # long compile times, but important to test
+    # func[[32, 4], values_128]()  # long compile times, but important to test
     func[[16, 8], values_128]()
     func[[16, 4, 2], values_128]()
     func[[8, 8, 2], values_128]()
@@ -499,6 +502,7 @@ def test_fft():
     _test[dtype, False, "gpu", 0, debug=False]()
     _test[dtype, False, "gpu", 1, debug=False]()
     _test[dtype, False, "gpu", 2, debug=False]()
+    _test[dtype, False, "gpu", 3, debug=False]()
 
 
 def test_ifft():
@@ -507,6 +511,7 @@ def test_ifft():
     _test[dtype, True, "gpu", 0, debug=False]()
     _test[dtype, True, "gpu", 1, debug=False]()
     _test[dtype, True, "gpu", 2, debug=False]()
+    _test[dtype, True, "gpu", 3, debug=False]()
 
 
 def main():
