@@ -1,13 +1,9 @@
-from algorithm import parallelize
 from complex import ComplexSIMD
-from gpu import thread_idx, block_idx, block_dim, barrier
 from gpu.host import DeviceContext
 from gpu.host.info import is_cpu
 from layout import Layout, LayoutTensor
-from layout.tensor_builder import LayoutTensorBuild as tb
 from math import ceil
-from bit import next_power_of_two
-from sys.info import has_accelerator, simd_width_of
+from sys.info import has_accelerator
 from utils.numerics import nan
 
 from testing import assert_almost_equal

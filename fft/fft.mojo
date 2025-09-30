@@ -1,20 +1,15 @@
-from algorithm import parallelize, vectorize
+from algorithm import parallelize
 from complex import ComplexSIMD
 from gpu import thread_idx, block_idx, block_dim, barrier
 from gpu.cluster import cluster_arrive_relaxed, cluster_wait
 from gpu.host import DeviceContext
 from gpu.host.info import is_cpu, Vendor
-from gpu.warp import shuffle_idx
-from layout import Layout, LayoutTensor, IntTuple
+from layout import Layout, LayoutTensor
 from layout.tensor_builder import LayoutTensorBuild as tb
 from bit import next_power_of_two
 from math import ceil
 from runtime.asyncrt import parallelism_level
-from sys.info import (
-    simd_width_of,
-    has_accelerator,
-    num_logical_cores,
-)
+from sys.info import has_accelerator, num_logical_cores
 
 
 from fft.utils import (

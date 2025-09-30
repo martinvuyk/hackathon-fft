@@ -2,13 +2,9 @@ from complex import ComplexSIMD
 from benchmark import Bench, BenchConfig, Bencher, BenchId, keep
 from layout import Layout, LayoutTensor
 from gpu.host import DeviceContext
-from os import abort
 from random import seed
-from sys.info import is_64bit
-from bit import count_trailing_zeros
 
-from fft._test_values import _get_test_values_128
-from fft.tests import _TestValues
+from fft._test_values import _get_test_values_128, _TestValues
 from fft.fft import (
     fft,
     _intra_block_fft_kernel_radix_n,
@@ -16,7 +12,7 @@ from fft.fft import (
 )
 
 
-def _bench_intra_block_fft_launch_radix_n[
+def _bench_sequential_intra_block_fft_launch_radix_n[
     in_dtype: DType,
     out_dtype: DType,
     in_layout: Layout,
@@ -131,7 +127,7 @@ fn bench_intra_block_radix_n_rfft[
         @always_inline
         @parameter
         fn call_fn(ctx: DeviceContext) raises:
-            _bench_intra_block_fft_launch_radix_n[bases=bases](
+            _bench_sequential_intra_block_fft_launch_radix_n[bases=bases](
                 out_tensor, x_tensor, ctx, b
             )
 

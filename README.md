@@ -29,7 +29,7 @@ allocation or planning step which wasn't included in the benchmark.
 
 ## CPU implementation on an Intel i5-12600KF
 
-These are several implementations with different default behaviour. Some use
+These are several implementations with different default behavior. Some use
 multi-threading on by default depending on the platform's linalg libs.
 
 ```terminal

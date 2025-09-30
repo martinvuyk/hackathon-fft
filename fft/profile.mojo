@@ -2,10 +2,7 @@ from complex import ComplexSIMD
 from benchmark import Bench, BenchConfig, Bencher, BenchId, keep
 from layout import Layout, LayoutTensor
 from gpu.host import DeviceContext
-from os import abort
 from random import seed
-from sys.info import is_64bit
-from bit import count_trailing_zeros
 
 from fft._test_values import _get_test_values_128
 from fft.tests import _TestValues
