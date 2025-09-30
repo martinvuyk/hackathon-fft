@@ -9,22 +9,22 @@ cufft takes ~36 miliseconds running 10k 128-point fft. These are the results
 for my algorithm (the lists are the radixes used):
 
 ```terminal
-bench_intra_block_radix_n_rfft[[64, 2], 128], 33.56
-bench_intra_block_radix_n_rfft[[32, 4], 128], 10.104
-bench_intra_block_radix_n_rfft[[16, 8], 128], 5.199
-bench_intra_block_radix_n_rfft[[16, 4, 2], 128], 4.421
-bench_intra_block_radix_n_rfft[[8, 8, 2], 128], 5.009
-bench_intra_block_radix_n_rfft[[8, 4, 4], 128], 3.009
-bench_intra_block_radix_n_rfft[[8, 4, 2, 2], 128], 3.004
-bench_intra_block_radix_n_rfft[[8, 2, 2, 2, 2], 128], 2.892
-bench_intra_block_radix_n_rfft[[4, 4, 4, 2], 128], 3.211
-bench_intra_block_radix_n_rfft[[4, 4, 2, 2, 2], 128], 2.938
-bench_intra_block_radix_n_rfft[[4, 2, 2, 2, 2, 2], 128], 2.576
-bench_intra_block_radix_n_rfft[[2], 128], 2.338
+bench_intra_block_radix_n_rfft[[64, 2], 128], 34.393
+bench_intra_block_radix_n_rfft[[32, 4], 128], 9.551
+bench_intra_block_radix_n_rfft[[16, 8], 128], 4.793
+bench_intra_block_radix_n_rfft[[16, 4, 2], 128], 4.698
+bench_intra_block_radix_n_rfft[[8, 8, 2], 128], 4.618
+bench_intra_block_radix_n_rfft[[8, 4, 4], 128], 2.563
+bench_intra_block_radix_n_rfft[[8, 4, 2, 2], 128], 2.899
+bench_intra_block_radix_n_rfft[[8, 2, 2, 2, 2], 128], 2.657
+bench_intra_block_radix_n_rfft[[4, 4, 4, 2], 128], 2.525
+bench_intra_block_radix_n_rfft[[4, 4, 2, 2, 2], 128], 2.649
+bench_intra_block_radix_n_rfft[[4, 2, 2, 2, 2, 2], 128], 2.356
+bench_intra_block_radix_n_rfft[[2], 128], 1.976
 ```
 
-So the performance improvement depending on the radix used is ~ 85 - 93 %
-(7 - 15 x) in sequential executions. Plus the benefit of no dynamic
+So the performance improvement depending on the radix used is ~ 85 - 94 %
+(7 - 18 x) in sequential executions. Plus the benefit of no dynamic
 allocation or planning step which wasn't included in the benchmark.
 
 ## CPU implementation on an Intel i5-12600KF
@@ -43,13 +43,13 @@ Bellow are the results for different radix sizes, but for the sake of brevity
 if we choose the best multi-threaded combination we get:
 
 ```terminal
-bench_cpu_radix_n_rfft[[16, 8], 100_000, 128, workers=n], 34.431
-bench_cpu_radix_n_rfft[[16, 8], 1_000_000, 128, workers=n], 271.565
+bench_cpu_radix_n_rfft[[16, 8], 100_000, 128, workers=n], 28.802
+bench_cpu_radix_n_rfft[[16, 8], 1_000_000, 128, workers=n], 306.103
 ```
 
-Which means a ~ 21.5 % (1.27 x) improvement for long sequences compared to the
-fastest implementation of the 3 (scipy). This is highly dependent on the chosen
-radix factors.
+Which means a ~ 10 % improvement for long sequences compared to the fastest
+implementation of the 3 (scipy). This is highly dependent on the chosen radix
+factors.
 
 This is all ignoring the cost of interop between Python and the C/C++
 implementations. I tried setting up fftw locally but it was a headache, and
@@ -83,57 +83,57 @@ aren't running the Cooley-Tukey algorithm.
 Results for the Mojo fft implementation when using a single thread on CPU:
 
 ```terminal
-bench_cpu_radix_n_rfft[[64, 2], 100_000, 128, workers=1], 354.506
-bench_cpu_radix_n_rfft[[64, 2], 1_000_000, 128, workers=1], 3438.661
-bench_cpu_radix_n_rfft[[32, 4], 100_000, 128, workers=1], 106.815
-bench_cpu_radix_n_rfft[[32, 4], 1_000_000, 128, workers=1], 1029.569
-bench_cpu_radix_n_rfft[[16, 8], 100_000, 128, workers=1], 73.957
-bench_cpu_radix_n_rfft[[16, 8], 1_000_000, 128, workers=1], 744.5
-bench_cpu_radix_n_rfft[[16, 4, 2], 100_000, 128, workers=1], 77.536
-bench_cpu_radix_n_rfft[[16, 4, 2], 1_000_000, 128, workers=1], 799.327
-bench_cpu_radix_n_rfft[[8, 8, 2], 100_000, 128, workers=1], 81.54
-bench_cpu_radix_n_rfft[[8, 8, 2], 1_000_000, 128, workers=1], 817.486
-bench_cpu_radix_n_rfft[[8, 4, 4], 100_000, 128, workers=1], 83.961
-bench_cpu_radix_n_rfft[[8, 4, 4], 1_000_000, 128, workers=1], 736.94
-bench_cpu_radix_n_rfft[[8, 4, 2, 2], 100_000, 128, workers=1], 98.817
-bench_cpu_radix_n_rfft[[8, 4, 2, 2], 1_000_000, 128, workers=1], 922.319
-bench_cpu_radix_n_rfft[[8, 2, 2, 2, 2], 100_000, 128, workers=1], 113.178
-bench_cpu_radix_n_rfft[[8, 2, 2, 2, 2], 1_000_000, 128, workers=1], 1194.745
-bench_cpu_radix_n_rfft[[4, 4, 4, 2], 100_000, 128, workers=1], 96.392
-bench_cpu_radix_n_rfft[[4, 4, 4, 2], 1_000_000, 128, workers=1], 936.58
-bench_cpu_radix_n_rfft[[4, 4, 2, 2, 2], 100_000, 128, workers=1], 111.692
-bench_cpu_radix_n_rfft[[4, 4, 2, 2, 2], 1_000_000, 128, workers=1], 1191.075
-bench_cpu_radix_n_rfft[[4, 2, 2, 2, 2, 2], 100_000, 128, workers=1], 136.179
-bench_cpu_radix_n_rfft[[4, 2, 2, 2, 2, 2], 1_000_000, 128, workers=1], 1420.303
-bench_cpu_radix_n_rfft[[2], 100_000, 128, workers=1], 162.594
-bench_cpu_radix_n_rfft[[2], 1_000_000, 128, workers=1], 1695.749
+bench_cpu_radix_n_rfft[[64, 2], 100_000, 128, workers=1], 434.76
+bench_cpu_radix_n_rfft[[64, 2], 1_000_000, 128, workers=1], 4261.257
+bench_cpu_radix_n_rfft[[32, 4], 100_000, 128, workers=1], 134.495
+bench_cpu_radix_n_rfft[[32, 4], 1_000_000, 128, workers=1], 1301.183
+bench_cpu_radix_n_rfft[[16, 8], 100_000, 128, workers=1], 115.614
+bench_cpu_radix_n_rfft[[16, 8], 1_000_000, 128, workers=1], 1148.454
+bench_cpu_radix_n_rfft[[16, 4, 2], 100_000, 128, workers=1], 88.025
+bench_cpu_radix_n_rfft[[16, 4, 2], 1_000_000, 128, workers=1], 805.408
+bench_cpu_radix_n_rfft[[8, 8, 2], 100_000, 128, workers=1], 110.555
+bench_cpu_radix_n_rfft[[8, 8, 2], 1_000_000, 128, workers=1], 1082.624
+bench_cpu_radix_n_rfft[[8, 4, 4], 100_000, 128, workers=1], 68.18
+bench_cpu_radix_n_rfft[[8, 4, 4], 1_000_000, 128, workers=1], 686.936
+bench_cpu_radix_n_rfft[[8, 4, 2, 2], 100_000, 128, workers=1], 82.91
+bench_cpu_radix_n_rfft[[8, 4, 2, 2], 1_000_000, 128, workers=1], 808.935
+bench_cpu_radix_n_rfft[[8, 2, 2, 2, 2], 100_000, 128, workers=1], 97.149
+bench_cpu_radix_n_rfft[[8, 2, 2, 2, 2], 1_000_000, 128, workers=1], 956.262
+bench_cpu_radix_n_rfft[[4, 4, 4, 2], 100_000, 128, workers=1], 89.543
+bench_cpu_radix_n_rfft[[4, 4, 4, 2], 1_000_000, 128, workers=1], 843.657
+bench_cpu_radix_n_rfft[[4, 4, 2, 2, 2], 100_000, 128, workers=1], 95.985
+bench_cpu_radix_n_rfft[[4, 4, 2, 2, 2], 1_000_000, 128, workers=1], 1004.276
+bench_cpu_radix_n_rfft[[4, 2, 2, 2, 2, 2], 100_000, 128, workers=1], 121.523
+bench_cpu_radix_n_rfft[[4, 2, 2, 2, 2, 2], 1_000_000, 128, workers=1], 1127.333
+bench_cpu_radix_n_rfft[[2], 100_000, 128, workers=1], 145.242
+bench_cpu_radix_n_rfft[[2], 1_000_000, 128, workers=1], 1336.504
 ```
 
 And these are the results when using multiple threads on CPU:
 
 ```terminal
-bench_cpu_radix_n_rfft[[64, 2], 100_000, 128, workers=n], 87.337
-bench_cpu_radix_n_rfft[[64, 2], 1_000_000, 128, workers=n], 821.523
-bench_cpu_radix_n_rfft[[32, 4], 100_000, 128, workers=n], 29.619
-bench_cpu_radix_n_rfft[[32, 4], 1_000_000, 128, workers=n], 288.772
-bench_cpu_radix_n_rfft[[16, 8], 100_000, 128, workers=n], 34.431
-bench_cpu_radix_n_rfft[[16, 8], 1_000_000, 128, workers=n], 271.565
-bench_cpu_radix_n_rfft[[16, 4, 2], 100_000, 128, workers=n], 46.793
-bench_cpu_radix_n_rfft[[16, 4, 2], 1_000_000, 128, workers=n], 385.535
-bench_cpu_radix_n_rfft[[8, 8, 2], 100_000, 128, workers=n], 49.381
-bench_cpu_radix_n_rfft[[8, 8, 2], 1_000_000, 128, workers=n], 411.286
-bench_cpu_radix_n_rfft[[8, 4, 4], 100_000, 128, workers=n], 41.265
-bench_cpu_radix_n_rfft[[8, 4, 4], 1_000_000, 128, workers=n], 418.261
-bench_cpu_radix_n_rfft[[8, 4, 2, 2], 100_000, 128, workers=n], 52.641
-bench_cpu_radix_n_rfft[[8, 4, 2, 2], 1_000_000, 128, workers=n], 534.925
-bench_cpu_radix_n_rfft[[8, 2, 2, 2, 2], 100_000, 128, workers=n], 67.329
-bench_cpu_radix_n_rfft[[8, 2, 2, 2, 2], 1_000_000, 128, workers=n], 669.196
-bench_cpu_radix_n_rfft[[4, 4, 4, 2], 100_000, 128, workers=n], 55.902
-bench_cpu_radix_n_rfft[[4, 4, 4, 2], 1_000_000, 128, workers=n], 574.819
-bench_cpu_radix_n_rfft[[4, 4, 2, 2, 2], 100_000, 128, workers=n], 70.171
-bench_cpu_radix_n_rfft[[4, 4, 2, 2, 2], 1_000_000, 128, workers=n], 700.39
-bench_cpu_radix_n_rfft[[4, 2, 2, 2, 2, 2], 100_000, 128, workers=n], 78.673
-bench_cpu_radix_n_rfft[[4, 2, 2, 2, 2, 2], 1_000_000, 128, workers=n], 799.775
-bench_cpu_radix_n_rfft[[2], 100_000, 128, workers=n], 95.492
-bench_cpu_radix_n_rfft[[2], 1_000_000, 128, workers=n], 987.712
+bench_cpu_radix_n_rfft[[64, 2], 100_000, 128, workers=n], 101.729
+bench_cpu_radix_n_rfft[[64, 2], 1_000_000, 128, workers=n], 992.453
+bench_cpu_radix_n_rfft[[32, 4], 100_000, 128, workers=n], 41.277
+bench_cpu_radix_n_rfft[[32, 4], 1_000_000, 128, workers=n], 356.703
+bench_cpu_radix_n_rfft[[16, 8], 100_000, 128, workers=n], 28.802
+bench_cpu_radix_n_rfft[[16, 8], 1_000_000, 128, workers=n], 306.103
+bench_cpu_radix_n_rfft[[16, 4, 2], 100_000, 128, workers=n], 47.942
+bench_cpu_radix_n_rfft[[16, 4, 2], 1_000_000, 128, workers=n], 412.996
+bench_cpu_radix_n_rfft[[8, 8, 2], 100_000, 128, workers=n], 43.685
+bench_cpu_radix_n_rfft[[8, 8, 2], 1_000_000, 128, workers=n], 430.616
+bench_cpu_radix_n_rfft[[8, 4, 4], 100_000, 128, workers=n], 41.552
+bench_cpu_radix_n_rfft[[8, 4, 4], 1_000_000, 128, workers=n], 399.767
+bench_cpu_radix_n_rfft[[8, 4, 2, 2], 100_000, 128, workers=n], 52.064
+bench_cpu_radix_n_rfft[[8, 4, 2, 2], 1_000_000, 128, workers=n], 507.537
+bench_cpu_radix_n_rfft[[8, 2, 2, 2, 2], 100_000, 128, workers=n], 76.505
+bench_cpu_radix_n_rfft[[8, 2, 2, 2, 2], 1_000_000, 128, workers=n], 646.568
+bench_cpu_radix_n_rfft[[4, 4, 4, 2], 100_000, 128, workers=n], 63.228
+bench_cpu_radix_n_rfft[[4, 4, 4, 2], 1_000_000, 128, workers=n], 571.997
+bench_cpu_radix_n_rfft[[4, 4, 2, 2, 2], 100_000, 128, workers=n], 72.065
+bench_cpu_radix_n_rfft[[4, 4, 2, 2, 2], 1_000_000, 128, workers=n], 699.373
+bench_cpu_radix_n_rfft[[4, 2, 2, 2, 2, 2], 100_000, 128, workers=n], 76.774
+bench_cpu_radix_n_rfft[[4, 2, 2, 2, 2, 2], 1_000_000, 128, workers=n], 771.757
+bench_cpu_radix_n_rfft[[2], 100_000, 128, workers=n], 96.144
+bench_cpu_radix_n_rfft[[2], 1_000_000, 128, workers=n], 939.783
 ```

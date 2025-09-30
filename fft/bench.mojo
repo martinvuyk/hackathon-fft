@@ -51,6 +51,7 @@ def _bench_intra_block_fft_launch_radix_n[
     alias total_offsets = _calc_total_offsets()
     alias total_twfs = total_offsets[0]
     alias twf_offsets = total_offsets[1]
+    alias num_threads = length // ordered_bases[len(ordered_bases) - 1]
 
     @parameter
     fn call_fn[
@@ -78,9 +79,9 @@ def _bench_intra_block_fft_launch_radix_n[
                 inverse=False,
                 total_twfs=total_twfs,
                 twf_offsets=twf_offsets,
+                warp_exec = 32 >= num_threads,
             ](output, x)
 
-    alias num_threads = length // ordered_bases[len(ordered_bases) - 1]
     ctx.enqueue_function[
         call_fn[
             in_dtype,
@@ -215,34 +216,34 @@ def main():
             ]
         ](BenchId(String("bench_intra_block_radix_n_rfft[", b, ", 128]")))
         alias cpu_bench = "bench_cpu_radix_n_rfft["
-        m.bench_function[
-            bench_cpu_radix_n_rfft[
-                DType.float64,
-                bases,
-                100_000,
-                test_values_fp64,
-                cpu_workers = UInt(1),
-            ]
-        ](BenchId(String(cpu_bench, b, ", 100_000, 128, workers=1]")))
-        m.bench_function[
-            bench_cpu_radix_n_rfft[
-                DType.float64,
-                bases,
-                1_000_000,
-                test_values_fp64,
-                cpu_workers = UInt(1),
-            ]
-        ](BenchId(String(cpu_bench, b, ", 1_000_000, 128, workers=1]")))
-        m.bench_function[
-            bench_cpu_radix_n_rfft[
-                DType.float64, bases, 100_000, test_values_fp64
-            ]
-        ](BenchId(String(cpu_bench, b, ", 100_000, 128, workers=n]")))
-        m.bench_function[
-            bench_cpu_radix_n_rfft[
-                DType.float64, bases, 1_000_000, test_values_fp64
-            ]
-        ](BenchId(String(cpu_bench, b, ", 1_000_000, 128, workers=n]")))
+        # m.bench_function[
+        #     bench_cpu_radix_n_rfft[
+        #         DType.float64,
+        #         bases,
+        #         100_000,
+        #         test_values_fp64,
+        #         cpu_workers = UInt(1),
+        #     ]
+        # ](BenchId(String(cpu_bench, b, ", 100_000, 128, workers=1]")))
+        # m.bench_function[
+        #     bench_cpu_radix_n_rfft[
+        #         DType.float64,
+        #         bases,
+        #         1_000_000,
+        #         test_values_fp64,
+        #         cpu_workers = UInt(1),
+        #     ]
+        # ](BenchId(String(cpu_bench, b, ", 1_000_000, 128, workers=1]")))
+        # m.bench_function[
+        #     bench_cpu_radix_n_rfft[
+        #         DType.float64, bases, 100_000, test_values_fp64
+        #     ]
+        # ](BenchId(String(cpu_bench, b, ", 100_000, 128, workers=n]")))
+        # m.bench_function[
+        #     bench_cpu_radix_n_rfft[
+        #         DType.float64, bases, 1_000_000, test_values_fp64
+        #     ]
+        # ](BenchId(String(cpu_bench, b, ", 1_000_000, 128, workers=n]")))
 
     results = Dict[String, (Float64, Int)]()
     for info in m.info_vec:

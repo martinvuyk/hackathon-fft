@@ -136,6 +136,7 @@ fn test_fft[
             inverse=inverse,
             total_twfs=total_twfs,
             twf_offsets=twf_offsets,
+            warp_exec = UInt(gpu_info.warp_size) >= batches * num_threads,
         ]
 
         @parameter
@@ -150,7 +151,7 @@ fn test_fft[
             ctx.enqueue_function[func](
                 output, x, grid_dim=(1, remainder), block_dim=num_threads
             )
-    elif test_num == 1:
+    elif test_num == 1 or test_num == 2:
         alias block_dim = UInt(
             ceil(num_threads / num_blocks).cast[DType.uint]()
         )
@@ -165,8 +166,8 @@ fn test_fft[
             batches=batches,
             total_twfs=total_twfs,
             twf_offsets=twf_offsets,
+            max_cluster_size = 0 if test_num == 2 else 8,
         ](output, x, ctx)
-
     else:
         # TODO: Implement for sequences > max_threads_available in the same GPU
         constrained[
@@ -200,7 +201,9 @@ def test_fft_radix_n[
     @parameter
     if debug:
         print("----------------------------")
-        print("Buffers")
+        print("Buffers for Bases:")
+        var b = materialize[bases]()
+        print(b.__str__().replace("UInt(", "").replace(")", ""))
         print("----------------------------")
 
     @parameter
@@ -224,6 +227,11 @@ def test_fft_radix_n[
             print("]")
             print("expected: ", end="")
 
+        alias ATOL = 1e-3 if dtype is DType.float64 else (
+            1e-2 if dtype is DType.float32 else 1e-1
+        )
+        alias RTOL = 1e-5
+
         # gather all real parts and then the imaginary parts
         @parameter
         if inverse:
@@ -240,10 +248,10 @@ def test_fft_radix_n[
                 assert_almost_equal(
                     result[i, 0],
                     Scalar[out_dtype](scalar_in[i]),
-                    atol=1e-3,
-                    rtol=1e-5,
+                    atol=ATOL,
+                    rtol=RTOL,
                 )
-                assert_almost_equal(result[i, 1], 0, atol=1e-3, rtol=1e-5)
+                assert_almost_equal(result[i, 1], 0, atol=ATOL, rtol=RTOL)
         else:
 
             @parameter
@@ -259,14 +267,14 @@ def test_fft_radix_n[
                 assert_almost_equal(
                     result[i, 0],
                     complex_out[i].re.cast[out_dtype](),
-                    atol=1e-3,
-                    rtol=1e-5,
+                    atol=ATOL,
+                    rtol=RTOL,
                 )
                 assert_almost_equal(
                     result[i, 1],
                     complex_out[i].im.cast[out_dtype](),
-                    atol=1e-3,
-                    rtol=1e-5,
+                    atol=ATOL,
+                    rtol=RTOL,
                 )
 
     with DeviceContext() as ctx:
@@ -457,8 +465,18 @@ def _test_fft[
     func[[5, 4], values_100]()
 
     alias values_128 = _get_test_values_128[dtype]()
-    func[[2], values_128]()
+    # func[[64, 2], values_128]()  # long compile times
+    # func[[32, 4], values_128]()  # long compile times
     func[[16, 8], values_128]()
+    func[[16, 4, 2], values_128]()
+    func[[8, 8, 2], values_128]()
+    func[[8, 4, 4], values_128]()
+    func[[8, 4, 2, 2], values_128]()
+    func[[8, 2, 2, 2, 2], values_128]()
+    func[[4, 4, 4, 2], values_128]()
+    func[[4, 4, 2, 2, 2], values_128]()
+    func[[4, 2, 2, 2, 2, 2], values_128]()
+    func[[2], values_128]()
 
 
 alias _test[
@@ -480,6 +498,7 @@ def test_fft():
     _test[dtype, False, "cpu", 0, debug=False]()
     _test[dtype, False, "gpu", 0, debug=False]()
     _test[dtype, False, "gpu", 1, debug=False]()
+    _test[dtype, False, "gpu", 2, debug=False]()
 
 
 def test_ifft():
@@ -487,6 +506,7 @@ def test_ifft():
     _test[dtype, True, "cpu", 0, debug=False]()
     _test[dtype, True, "gpu", 0, debug=False]()
     _test[dtype, True, "gpu", 1, debug=False]()
+    _test[dtype, True, "gpu", 2, debug=False]()
 
 
 def main():
