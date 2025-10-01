@@ -514,7 +514,7 @@ fn _inter_block_fft_kernel_radix_n[
         out_dtype, twf_layout, twf_origin, address_space=twf_address_space
     ],
 ):
-    """A reorder that assumes `sequence_length // smallest_base <=
+    """A kernel that assumes `sequence_length // smallest_base <=
     max_threads_available`."""
     var global_i = block_dim.x * block_idx.x + thread_idx.x
     var block_num = block_dim.y * block_idx.y
