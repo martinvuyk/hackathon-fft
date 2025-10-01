@@ -73,7 +73,7 @@ algorithm.
 
 The only limitation is that a radix factor bigger than 100 leads to compilation
 issues, it might be solvable by adding one of those slower fallback algorithms;
-but I would rather se users using padding or other common ways to adjust the
+but I would rather see users using padding or other common ways to adjust the
 sequence to the more efficient versions. Other fallback algorithms can be
 implemented independently from this one and shouldn't be called fft given they
 aren't running the Cooley-Tukey algorithm.
