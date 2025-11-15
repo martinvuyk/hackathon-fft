@@ -1,18 +1,17 @@
 from algorithm import parallelize
-from complex import ComplexSIMD
+from complex import ComplexScalar
 from gpu import thread_idx, block_idx, block_dim, barrier
 from gpu.cluster import cluster_arrive_relaxed, cluster_wait
 from gpu.host import DeviceContext
 from gpu.host.info import is_cpu, Vendor
 from layout import Layout, LayoutTensor
-from layout.tensor_builder import LayoutTensorBuild as tb
 from bit import next_power_of_two
 from math import ceil
 from runtime.asyncrt import parallelism_level
-from sys.info import has_accelerator, num_logical_cores
+from sys.info import has_accelerator, num_logical_cores, size_of
 
 
-from fft.utils import (
+from .utils import (
     _get_dtype,
     _get_twiddle_factors,
     _get_ordered_bases_processed_list,
@@ -20,7 +19,7 @@ from fft.utils import (
     _mixed_radix_digit_reverse,
 )
 
-alias _DEFAULT_DEVICE = "cpu" if not has_accelerator() else "gpu"
+comptime _DEFAULT_DEVICE = "cpu" if not has_accelerator() else "gpu"
 
 
 fn _check_layout_conditions[in_layout: Layout, out_layout: Layout]():
@@ -49,15 +48,15 @@ fn _estimate_best_bases[
     in_layout: Layout, out_layout: Layout, target: StaticString
 ](out bases: List[UInt]):
     _check_layout_conditions[in_layout, out_layout]()
-    alias length = out_layout.shape[1].value()
-    alias max_radix_number = 64
+    comptime length = out_layout.shape[1].value()
+    comptime max_radix_number = 64
 
     @parameter
     if not is_cpu[target]():
         # NOTE: The more threads the better, but estimate the best ranges such
         # that the thread number preferably fits in a block.
-        alias common_thread_block_size = 1024
-        alias min_radix_for_block = length // common_thread_block_size
+        comptime common_thread_block_size = 1024
+        comptime min_radix_for_block = length // common_thread_block_size
 
         @parameter
         if length // max_radix_number <= common_thread_block_size:
@@ -65,7 +64,7 @@ fn _estimate_best_bases[
             # TODO: replace this with inline for generators once they properly
             # preallocate the sequence length (`[i for i in range(...)]`)
             bases = List[UInt](capacity=len(radixes))
-            for i in range(len(radixes)):
+            for i in range(UInt(len(radixes))):
                 bases.append(i)
         else:
             return [7, 5, 3, 2]  # common prime factors
@@ -77,7 +76,7 @@ fn _estimate_best_bases[
         var close_pow2_num_cores = next_power_of_two(num_logical_cores())
         bases = List[UInt](capacity=close_pow2_num_cores)
         for i in reversed(range(2, close_pow2_num_cores + 1)):
-            bases.append(i)
+            bases.append(UInt(i))
 
 
 fn fft[
@@ -134,34 +133,34 @@ fn fft[
         launched is equal to the `sequence_length // smallest_base`.
     """
     _check_layout_conditions[in_layout, out_layout]()
-    alias batches = in_layout.shape[0].value()
-    alias sequence_length = in_layout.shape[1].value()
-    alias do_rfft = in_layout.shape[2].value() == 1
+    comptime batches = UInt(in_layout.shape[0].value())
+    comptime sequence_length = UInt(in_layout.shape[1].value())
+    comptime do_rfft = in_layout.shape[2].value() == 1
     constrained[
         out_dtype.is_floating_point(), "out_dtype must be floating point"
     ]()
 
-    alias bases_processed = _get_ordered_bases_processed_list[
+    comptime bases_processed = _get_ordered_bases_processed_list[
         sequence_length, bases, target
     ]()
-    alias ordered_bases = bases_processed[0]
-    alias processed_list = bases_processed[1]
+    comptime ordered_bases = bases_processed[0]
+    comptime processed_list = bases_processed[1]
 
     @parameter
-    fn _calc_total_offsets() -> (UInt, List[UInt]):
-        alias last_base = ordered_bases[len(ordered_bases) - 1]
+    fn _calc_total_offsets() -> Tuple[UInt, List[UInt]]:
+        comptime last_base = ordered_bases[len(ordered_bases) - 1]
         var bases = materialize[ordered_bases]()
-        var c = (sequence_length // last_base) * (last_base - 1) * len(bases)
-        var offsets = List[UInt](capacity=c)
+        var c = Int((sequence_length // last_base) * (last_base - 1))
+        var offsets = List[UInt](capacity=c * len(bases))
         var val = UInt(0)
         for base in bases:
             offsets.append(val)
             val += (sequence_length // base) * (base - 1)
         return val, offsets^
 
-    alias total_offsets = _calc_total_offsets()
-    alias total_twfs = total_offsets[0]
-    alias twf_offsets = total_offsets[1]
+    comptime total_offsets = _calc_total_offsets()
+    comptime total_twfs = total_offsets[0]
+    comptime twf_offsets = total_offsets[1]
 
     @parameter
     if is_cpu[target]():
@@ -179,34 +178,38 @@ fn fft[
         has_accelerator(), "The non-cpu implementation is for GPU only"
     ]()
 
-    alias gpu_info = ctx.default_device_info
-    alias max_threads_per_block = gpu_info.max_thread_block_size
-    alias threads_per_sm = gpu_info.threads_per_sm
+    comptime gpu_info = ctx.default_device_info
+    comptime max_threads_per_block = UInt(gpu_info.max_thread_block_size)
+    comptime threads_per_sm = gpu_info.threads_per_multiprocessor
     constrained[
         threads_per_sm > 0,
         "Unknown number of threads per sm for the given device. ",
         "It is needed in order to run the gpu implementation.",
     ]()
-    alias max_threads_available = threads_per_sm * gpu_info.sm_count
-    alias num_threads = sequence_length // ordered_bases[len(ordered_bases) - 1]
-    alias num_blocks = UInt(
+    comptime max_threads_available = UInt(threads_per_sm * gpu_info.sm_count)
+    comptime num_threads = sequence_length // ordered_bases[
+        len(ordered_bases) - 1
+    ]
+    comptime num_blocks = UInt(
         ceil(num_threads / max_threads_per_block).cast[DType.uint]()
     )
-    alias shared_mem_size = gpu_info.shared_memory_per_multiprocessor
-    alias output_size = out_dtype.size_of() * sequence_length * 2
-    alias twf_size = out_dtype.size_of() * total_twfs * 2
+    comptime shared_mem_size = UInt(gpu_info.shared_memory_per_multiprocessor)
+    comptime output_size = UInt(size_of[out_dtype]()) * sequence_length * 2
+    comptime twf_size = UInt(size_of[out_dtype]()) * total_twfs * 2
 
     @parameter
     if (
         num_threads <= max_threads_per_block
         and (output_size + twf_size) <= shared_mem_size
     ):
-        alias batch_size = max_threads_available // num_threads
-        alias func[batch_amnt: UInt] = _intra_block_fft_kernel_radix_n[
+        comptime batch_size = max_threads_available // num_threads
+        comptime func[batch_amnt: UInt] = _intra_block_fft_kernel_radix_n[
             in_dtype,
             out_dtype,
             in_layout,
             out_layout,
+            x.origin,
+            output.origin,
             length=sequence_length,
             ordered_bases=ordered_bases,
             processed_list=processed_list,
@@ -219,52 +222,55 @@ fn fft[
 
         @parameter
         for i in range(batches // batch_size):
-            alias out_batch_layout = Layout.row_major(
-                batch_size, sequence_length, 2
+            comptime out_batch_layout = Layout.row_major(
+                Int(batch_size), Int(sequence_length), 2
             )
             var out_batch = LayoutTensor[mut=True, out_dtype, out_batch_layout](
-                output.ptr + output.stride[0]() * i * batch_size
+                output.ptr + output.stride[0]() * Int(i * batch_size)
             )
-            alias x_batch_layout = Layout.row_major(
-                batch_size, sequence_length, in_layout.shape[2].value()
+            comptime x_batch_layout = Layout.row_major(
+                Int(batch_size),
+                Int(sequence_length),
+                in_layout.shape[2].value(),
             )
             var x_batch = LayoutTensor[mut=True, in_dtype, x_batch_layout](
-                x.ptr + x.stride[0]() * i * batch_size
+                x.ptr + x.stride[0]() * Int(i * batch_size)
             )
 
-            ctx.enqueue_function[func[batch_size]](
+            ctx.enqueue_function_checked[func[batch_size], func[batch_size]](
                 out_batch,
                 x_batch,
                 grid_dim=(1, batch_size),
-                block_dim=num_threads,
+                block_dim=Int(num_threads),
             )
 
-        alias remainder = batches % batch_size
+        comptime remainder = batches % batch_size
 
         @parameter
         if remainder > 0:
-            alias offset = (batches - remainder) * batch_size
-            alias out_batch_layout = Layout.row_major(
-                remainder, sequence_length, 2
+            comptime offset = (batches - remainder) * batch_size
+            comptime out_batch_layout = Layout.row_major(
+                Int(remainder), Int(sequence_length), 2
             )
             var out_batch = LayoutTensor[mut=True, out_dtype, out_batch_layout](
-                output.ptr + output.stride[0]() * offset
+                output.ptr + output.stride[0]() * Int(offset)
             )
-            alias x_batch_layout = Layout.row_major(
-                remainder, sequence_length, in_layout.shape[2].value()
+            comptime x_batch_layout = Layout.row_major(
+                Int(remainder), Int(sequence_length), in_layout.shape[2].value()
             )
             var x_batch = LayoutTensor[mut=True, in_dtype, x_batch_layout](
-                x.ptr + x.stride[0]() * offset
+                x.ptr + x.stride[0]() * Int(offset)
             )
 
-            ctx.enqueue_function[func[remainder]](
+            ctx.enqueue_function_checked[func[remainder], func[remainder]](
                 out_batch,
                 x_batch,
                 grid_dim=(1, remainder),
-                block_dim=num_threads,
+                block_dim=Int(num_threads),
             )
     elif num_threads <= max_threads_available:
-        alias block_dim = UInt(
+        # TODO: implement slicing and iterating over smaller batches
+        comptime block_dim = UInt(
             ceil(num_threads / num_blocks).cast[DType.uint]()
         )
         _launch_inter_multiprocessor_fft[
@@ -341,6 +347,8 @@ fn _launch_inter_multiprocessor_fft[
     out_dtype: DType,
     in_layout: Layout,
     out_layout: Layout,
+    in_origin: ImmutOrigin,
+    out_origin: MutOrigin,
     *,
     length: UInt,
     processed_list: List[UInt],
@@ -354,12 +362,12 @@ fn _launch_inter_multiprocessor_fft[
     twf_offsets: List[UInt],
     max_cluster_size: UInt,
 ](
-    output: LayoutTensor[mut=True, out_dtype, out_layout],
-    x: LayoutTensor[mut=False, in_dtype, in_layout],
+    output: LayoutTensor[out_dtype, out_layout, out_origin],
+    x: LayoutTensor[in_dtype, in_layout, in_origin],
     ctx: DeviceContext,
 ) raises:
-    alias twf_layout = Layout.row_major(total_twfs, 2)
-    alias twfs_array = _get_flat_twfs[
+    comptime twf_layout = Layout.row_major(Int(total_twfs), 2)
+    comptime twfs_array = _get_flat_twfs[
         out_dtype, length, total_twfs, ordered_bases, processed_list, inverse
     ]()
     var twfs = ctx.enqueue_create_buffer[out_dtype](twf_layout.size())
@@ -368,39 +376,48 @@ fn _launch_inter_multiprocessor_fft[
         twfs.unsafe_ptr()
     )
 
-    alias grid_dim = (num_blocks, batches)
-    alias gpu_info = ctx.default_device_info
-    alias is_sm_90_or_newer = (
+    comptime grid_dim = (Int(num_blocks), Int(batches))
+    comptime gpu_info = ctx.default_device_info
+    comptime is_sm_90_or_newer = (
         gpu_info.vendor == Vendor.NVIDIA_GPU and gpu_info.compute >= 9.0
     )
 
     @parameter
     if is_sm_90_or_newer and num_blocks * batches <= max_cluster_size:
         # TODO: this should use distributed shared memory for twfs
-        ctx.enqueue_function[
-            _inter_block_fft_kernel_radix_n[
-                in_dtype,
-                out_dtype,
-                in_layout,
-                out_layout,
-                twiddle_factors.layout,
-                twiddle_factors.origin,
-                twiddle_factors.address_space,
-                length=length,
-                ordered_bases=ordered_bases,
-                processed_list=processed_list,
-                do_rfft=do_rfft,
-                inverse=inverse,
-                twf_offsets=twf_offsets,
-            ]
-        ](output, x, twiddle_factors, grid_dim=grid_dim, block_dim=block_dim)
-    else:
-        alias func[b: Int] = _inter_multiprocessor_fft_kernel_radix_n[
+        comptime func = _inter_block_fft_kernel_radix_n[
             in_dtype,
             out_dtype,
             in_layout,
             out_layout,
             twiddle_factors.layout,
+            x.origin,
+            output.origin,
+            twiddle_factors.origin,
+            twiddle_factors.address_space,
+            length=length,
+            ordered_bases=ordered_bases,
+            processed_list=processed_list,
+            do_rfft=do_rfft,
+            inverse=inverse,
+            twf_offsets=twf_offsets,
+        ]
+        ctx.enqueue_function_checked[func, func](
+            output,
+            x,
+            twiddle_factors,
+            grid_dim=grid_dim,
+            block_dim=Int(block_dim),
+        )
+    else:
+        comptime func[b: Int] = _inter_multiprocessor_fft_kernel_radix_n[
+            in_dtype,
+            out_dtype,
+            in_layout,
+            out_layout,
+            twiddle_factors.layout,
+            x.origin,
+            output.origin,
             twiddle_factors.origin,
             twiddle_factors.address_space,
             length=length,
@@ -414,12 +431,12 @@ fn _launch_inter_multiprocessor_fft[
 
         @parameter
         for b in range(len(ordered_bases)):
-            ctx.enqueue_function[func[b]](
+            ctx.enqueue_function_checked[func[b], func[b]](
                 output,
                 x,
                 twiddle_factors,
                 grid_dim=grid_dim,
-                block_dim=block_dim,
+                block_dim=Int(block_dim),
             )
 
 
@@ -429,7 +446,9 @@ fn _inter_multiprocessor_fft_kernel_radix_n[
     in_layout: Layout,
     out_layout: Layout,
     twf_layout: Layout,
-    twf_origin: ImmutableOrigin,
+    in_origin: ImmutOrigin,
+    out_origin: MutOrigin,
+    twf_origin: ImmutOrigin,
     twf_address_space: AddressSpace,
     *,
     length: UInt,
@@ -440,30 +459,35 @@ fn _inter_multiprocessor_fft_kernel_radix_n[
     inverse: Bool,
     twf_offset: UInt,
 ](
-    batch_output: LayoutTensor[mut=True, out_dtype, out_layout],
-    batch_x: LayoutTensor[mut=False, in_dtype, in_layout],
+    batch_output: LayoutTensor[out_dtype, out_layout, out_origin],
+    batch_x: LayoutTensor[in_dtype, in_layout, in_origin],
     twiddle_factors: LayoutTensor[
         out_dtype, twf_layout, twf_origin, address_space=twf_address_space
     ],
 ):
     """A kernel that assumes `sequence_length // smallest_base <=
     max_threads_available`."""
-    alias amnt_threads = length // base
+    comptime amnt_threads = length // base
     var global_i = block_dim.x * block_idx.x + thread_idx.x
     var block_num = block_dim.y * block_idx.y
-    alias x_layout = Layout.row_major(length, in_layout.shape[2].value())
-    var x = LayoutTensor[mut=False, in_dtype, x_layout, batch_x.origin](
-        batch_x.ptr + batch_x.stride[0]() * block_num
+    comptime x_layout = Layout.row_major(
+        Int(length), in_layout.shape[2].value()
     )
-    alias block_out_layout = Layout.row_major(length, 2)
+    var x = LayoutTensor[mut=False, in_dtype, x_layout, batch_x.origin](
+        batch_x.ptr + batch_x.stride[0]() * Int(block_num)
+    )
+    comptime block_out_layout = Layout.row_major(Int(length), 2)
     var output = LayoutTensor[
         mut=True, out_dtype, block_out_layout, batch_output.origin
-    ](batch_output.ptr + batch_output.stride[0]() * block_num)
-    var x_out = tb[out_dtype]().row_major[base, 2]().alloc()
+    ](batch_output.ptr + batch_output.stride[0]() * Int(block_num))
+    comptime x_out_layout = Layout.row_major(Int(base), 2)
+    var x_out = LayoutTensor[
+        out_dtype, x_out_layout, MutAnyOrigin
+    ].stack_allocation()
 
-    alias last_base = ordered_bases[len(ordered_bases) - 1]
-    alias total_threads = length // last_base
-    alias func = _radix_n_fft_kernel[
+    comptime last_base = ordered_bases[len(ordered_bases) - 1]
+    comptime total_threads = length // last_base
+    comptime func = _radix_n_fft_kernel[
         out_dtype=out_dtype,
         out_layout = output.layout,
         out_address_space = output.address_space,
@@ -498,7 +522,9 @@ fn _inter_block_fft_kernel_radix_n[
     in_layout: Layout,
     out_layout: Layout,
     twf_layout: Layout,
-    twf_origin: ImmutableOrigin,
+    in_origin: ImmutOrigin,
+    out_origin: MutOrigin,
+    twf_origin: ImmutOrigin,
     twf_address_space: AddressSpace,
     *,
     length: UInt,
@@ -508,8 +534,8 @@ fn _inter_block_fft_kernel_radix_n[
     inverse: Bool,
     twf_offsets: List[UInt],
 ](
-    batch_output: LayoutTensor[mut=True, out_dtype, out_layout],
-    batch_x: LayoutTensor[mut=False, in_dtype, in_layout],
+    batch_output: LayoutTensor[out_dtype, out_layout, out_origin],
+    batch_x: LayoutTensor[in_dtype, in_layout, in_origin],
     twiddle_factors: LayoutTensor[
         out_dtype, twf_layout, twf_origin, address_space=twf_address_space
     ],
@@ -518,25 +544,30 @@ fn _inter_block_fft_kernel_radix_n[
     max_threads_available`."""
     var global_i = block_dim.x * block_idx.x + thread_idx.x
     var block_num = block_dim.y * block_idx.y
-    alias x_layout = Layout.row_major(length, in_layout.shape[2].value())
-    var x = LayoutTensor[mut=False, in_dtype, x_layout, batch_x.origin](
-        batch_x.ptr + batch_x.stride[0]() * block_num
+    comptime x_layout = Layout.row_major(
+        Int(length), in_layout.shape[2].value()
     )
-    alias block_out_layout = Layout.row_major(length, 2)
+    var x = LayoutTensor[mut=False, in_dtype, x_layout, batch_x.origin](
+        batch_x.ptr + batch_x.stride[0]() * Int(block_num)
+    )
+    comptime block_out_layout = Layout.row_major(Int(length), 2)
     # TODO: this should use distributed shared memory for the intermediate output
     var output = LayoutTensor[
         mut=True, out_dtype, block_out_layout, batch_output.origin
-    ](batch_output.ptr + batch_output.stride[0]() * block_num)
-    alias last_base = ordered_bases[len(ordered_bases) - 1]
-    alias total_threads = length // last_base
-    var x_out = tb[out_dtype]().row_major[ordered_bases[0], 2]().alloc()
+    ](batch_output.ptr + batch_output.stride[0]() * Int(block_num))
+    comptime last_base = ordered_bases[len(ordered_bases) - 1]
+    comptime total_threads = length // last_base
+    comptime x_out_layout = Layout.row_major(Int(ordered_bases[0]), 2)
+    var x_out = LayoutTensor[
+        out_dtype, x_out_layout, MutAnyOrigin
+    ].stack_allocation()
 
     @parameter
     for b in range(len(ordered_bases)):
-        alias base = ordered_bases[b]
-        alias processed = processed_list[b]
-        alias amnt_threads = length // base
-        alias func = _radix_n_fft_kernel[
+        comptime base = ordered_bases[b]
+        comptime processed = processed_list[b]
+        comptime amnt_threads = length // base
+        comptime func = _radix_n_fft_kernel[
             out_dtype=out_dtype,
             out_layout = output.layout,
             out_address_space = output.address_space,
@@ -573,6 +604,8 @@ fn _intra_block_fft_kernel_radix_n[
     out_dtype: DType,
     in_layout: Layout,
     out_layout: Layout,
+    in_origin: ImmutOrigin,
+    out_origin: MutOrigin,
     *,
     length: UInt,
     ordered_bases: List[UInt],
@@ -583,8 +616,8 @@ fn _intra_block_fft_kernel_radix_n[
     twf_offsets: List[UInt],
     warp_exec: Bool,
 ](
-    batch_output: LayoutTensor[mut=True, out_dtype, out_layout],
-    batch_x: LayoutTensor[mut=False, in_dtype, in_layout],
+    batch_output: LayoutTensor[out_dtype, out_layout, out_origin],
+    batch_x: LayoutTensor[in_dtype, in_layout, in_origin],
 ):
     """An FFT that assumes `sequence_length // smallest_base <=
     max_threads_per_block` and that `sequence_length` out_dtype items fit in
@@ -592,32 +625,40 @@ fn _intra_block_fft_kernel_radix_n[
 
     var local_i = thread_idx.x
     var block_num = block_dim.y * block_idx.y
-    alias x_layout = Layout.row_major(length, in_layout.shape[2].value())
-    var x = LayoutTensor[mut=False, in_dtype, x_layout, batch_x.origin](
-        batch_x.ptr + batch_x.stride[0]() * block_num
+    comptime x_layout = Layout.row_major(
+        Int(length), in_layout.shape[2].value()
     )
-    alias block_out_layout = Layout.row_major(length, 2)
+    var x = LayoutTensor[mut=False, in_dtype, x_layout, batch_x.origin](
+        batch_x.ptr + batch_x.stride[0]() * Int(block_num)
+    )
+    comptime block_out_layout = Layout.row_major(Int(length), 2)
     var output = LayoutTensor[
         mut=True, out_dtype, block_out_layout, batch_output.origin
-    ](batch_output.ptr + batch_output.stride[0]() * block_num)
-    var shared_f = tb[out_dtype]().row_major[length, 2]().shared().alloc()
-    alias twfs_array = _get_flat_twfs[
+    ](batch_output.ptr + batch_output.stride[0]() * Int(block_num))
+    comptime shared_f_layout = Layout.row_major(Int(length), 2)
+    var shared_f = LayoutTensor[
+        out_dtype, shared_f_layout, MutAnyOrigin
+    ].stack_allocation()
+    comptime twfs_array = _get_flat_twfs[
         out_dtype, length, total_twfs, ordered_bases, processed_list, inverse
     ]()
-    alias twfs_layout = Layout.row_major(total_twfs, 2)
+    comptime twfs_layout = Layout.row_major(Int(total_twfs), 2)
     var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
         twfs_array.unsafe_ptr()
     )
-    alias last_base = ordered_bases[len(ordered_bases) - 1]
-    alias total_threads = length // last_base
-    var x_out = tb[out_dtype]().row_major[ordered_bases[0], 2]().alloc()
+    comptime last_base = ordered_bases[len(ordered_bases) - 1]
+    comptime total_threads = length // last_base
+    comptime x_out_layout = Layout.row_major(Int(ordered_bases[0]), 2)
+    var x_out = LayoutTensor[
+        out_dtype, x_out_layout, MutAnyOrigin
+    ].stack_allocation()
 
     @parameter
     for b in range(len(ordered_bases)):
-        alias base = ordered_bases[b]
-        alias processed = processed_list[b]
-        alias amnt_threads = length // base
-        alias func = _radix_n_fft_kernel[
+        comptime base = ordered_bases[b]
+        comptime processed = processed_list[b]
+        comptime amnt_threads = length // base
+        comptime func = _radix_n_fft_kernel[
             out_dtype=out_dtype,
             out_layout = shared_f.layout,
             out_address_space = shared_f.address_space,
@@ -645,9 +686,9 @@ fn _intra_block_fft_kernel_radix_n[
 
     @parameter
     for i in range(last_base):
-        alias offset = i * total_threads
-        var res = shared_f.load[width=2](local_i + offset, 0)
-        output.store(local_i + offset, 0, res)
+        comptime offset = i * total_threads
+        var res = shared_f.load[width=2](Int(local_i + offset), 0)
+        output.store(Int(local_i + offset), 0, res)
 
     @parameter
     if not warp_exec:
@@ -679,41 +720,41 @@ fn _cpu_fft_kernel_radix_n[
 ):
     """An FFT that runs on the CPU."""
 
-    alias twfs_array = _get_flat_twfs[
+    comptime twfs_array = _get_flat_twfs[
         out_dtype, length, total_twfs, ordered_bases, processed_list, inverse
     ]()
-    alias twfs_layout = Layout.row_major(total_twfs, 2)
+    comptime twfs_layout = Layout.row_major(Int(total_twfs), 2)
     var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
         twfs_array.unsafe_ptr()
     )
 
     @parameter
     for b in range(len(ordered_bases)):
-        alias base = ordered_bases[b]
-        alias processed = processed_list[b]
-        alias batches = in_layout.shape[0].value()
-        alias amnt_threads_per_block = length // base
-        alias amnt_threads = batches * amnt_threads_per_block
+        comptime base = ordered_bases[b]
+        comptime processed = processed_list[b]
+        comptime batches = UInt(in_layout.shape[0].value())
+        comptime amnt_threads_per_block = length // base
+        comptime amnt_threads = batches * amnt_threads_per_block
 
         @parameter
         fn _inner_kernel(global_i: Int):
-            var block_num = global_i // amnt_threads_per_block
-            var local_i = global_i % amnt_threads_per_block
-            alias block_out_layout = Layout.row_major(length, 2)
+            var block_num = UInt(global_i) // amnt_threads_per_block
+            var local_i = UInt(global_i) % amnt_threads_per_block
+            comptime block_out_layout = Layout.row_major(Int(length), 2)
             var output = LayoutTensor[
                 mut=True, out_dtype, block_out_layout, batch_output.origin
-            ](batch_output.ptr + batch_output.stride[0]() * block_num)
-            alias x_layout = Layout.row_major(
-                length, in_layout.shape[2].value()
+            ](batch_output.ptr + batch_output.stride[0]() * Int(block_num))
+            comptime x_layout = Layout.row_major(
+                Int(length), in_layout.shape[2].value()
             )
             var x = LayoutTensor[mut=False, in_dtype, x_layout, batch_x.origin](
-                batch_x.ptr + batch_x.stride[0]() * block_num
+                batch_x.ptr + batch_x.stride[0]() * Int(block_num)
             )
-            var x_out_array = InlineArray[Scalar[out_dtype], base * 2](
+            var x_out_array = InlineArray[Scalar[out_dtype], Int(base * 2)](
                 uninitialized=True
             )
             var x_out = LayoutTensor[
-                mut=True, out_dtype, Layout.row_major(base, 2)
+                mut=True, out_dtype, Layout.row_major(Int(base), 2)
             ](x_out_array.unsafe_ptr())
 
             _radix_n_fft_kernel[
@@ -732,7 +773,8 @@ fn _cpu_fft_kernel_radix_n[
             ](output, x, local_i, twfs, x_out)
 
         parallelize[func=_inner_kernel](
-            amnt_threads, cpu_workers.or_else(parallelism_level())
+            Int(amnt_threads),
+            Int(cpu_workers.or_else(UInt(parallelism_level()))),
         )
 
 
@@ -747,10 +789,10 @@ fn _radix_n_fft_kernel[
     out_dtype: DType,
     out_layout: Layout,
     in_layout: Layout,
-    out_origin: MutableOrigin,
+    out_origin: MutOrigin,
     out_address_space: AddressSpace,
     twf_layout: Layout,
-    twf_origin: ImmutableOrigin,
+    twf_origin: ImmutOrigin,
     twf_address_space: AddressSpace,
     x_out_layout: Layout,
     *,
@@ -775,13 +817,13 @@ fn _radix_n_fft_kernel[
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
     optimizations."""
     constrained[length >= base, "length must be >= base"]()
-    alias Sc = Scalar[_get_dtype[length]()]
-    alias offset = Sc(processed)
+    comptime Sc = Scalar[_get_dtype[length]()]
+    comptime offset = Sc(processed)
     var n = Sc(local_i) % offset + (Sc(local_i) // offset) * (offset * Sc(base))
 
-    alias Co = ComplexSIMD[out_dtype, 1]
-    alias CoV = SIMD[out_dtype, 2]
-    alias is_even = length % 2 == 0
+    comptime Co = ComplexScalar[out_dtype]
+    comptime CoV = SIMD[out_dtype, 2]
+    comptime is_even = length % 2 == 0
 
     @always_inline
     fn to_Co(v: CoV) -> Co:
@@ -792,7 +834,7 @@ fn _radix_n_fft_kernel[
         return UnsafePointer(to=c).bitcast[CoV]()[]
 
     @parameter
-    fn _scatter_offsets(out res: SIMD[Sc.dtype, base * 2]):
+    fn _scatter_offsets(out res: SIMD[Sc.dtype, Int(base * 2)]):
         res = {}
         var idx = 0
         for i in range(base):
@@ -803,7 +845,7 @@ fn _radix_n_fft_kernel[
 
     @parameter
     fn _base_phasor[i: UInt, j: UInt](out res: Co):
-        alias base_twf = _get_twiddle_factors[base, out_dtype, inverse]()
+        comptime base_twf = _get_twiddle_factors[base, out_dtype, inverse]()
         res = {1, 0}
 
         @parameter
@@ -871,7 +913,7 @@ fn _radix_n_fft_kernel[
             else:
                 return x.load[2](Int(copy_from), 0).cast[out_dtype]()
         else:
-            alias step = Sc(i * offset)
+            comptime step = Sc(i * offset)
             return output.load[2](Int(n + step), 0)
 
     var x_0 = _get_x[0]()
@@ -885,25 +927,25 @@ fn _radix_n_fft_kernel[
 
             @parameter
             for i in range(base):
-                alias base_phasor = _base_phasor[i, j]()
+                comptime base_phasor = _base_phasor[i, j]()
                 var acc: CoV
 
                 @parameter
                 if j == 1:
                     acc = x_0
                 else:
-                    acc = x_out.load[2](i, 0)
-                x_out.store(i, 0, _twf_fma[base_phasor, j == 1](x_j, acc))
+                    acc = x_out.load[2](Int(i), 0)
+                x_out.store(Int(i), 0, _twf_fma[base_phasor, j == 1](x_j, acc))
             continue
 
         var i0_j_twf_vec = twiddle_factors.load[2](
-            twf_offset + local_i * (base - 1) + (j - 1), 0
+            Int(twf_offset + local_i * (base - 1) + (j - 1)), 0
         )
         var i0_j_twf = to_Co(i0_j_twf_vec)
 
         @parameter
         for i in range(base):
-            alias base_phasor = _base_phasor[i, j]()
+            comptime base_phasor = _base_phasor[i, j]()
             var twf: Co
 
             @parameter
@@ -924,33 +966,33 @@ fn _radix_n_fft_kernel[
             if j == 1:
                 acc = x_0
             else:
-                acc = x_out.load[2](i, 0)
+                acc = x_out.load[2](Int(i), 0)
 
-            x_out.store(i, 0, to_CoV(twf.fma(to_Co(x_j), to_Co(acc))))
+            x_out.store(Int(i), 0, to_CoV(twf.fma(to_Co(x_j), to_Co(acc))))
 
     @parameter
     if inverse and processed * base == length:  # last ifft stage
-        alias factor = (Float64(1) / Float64(length)).cast[out_dtype]()
+        comptime factor = (Float64(1) / Float64(length)).cast[out_dtype]()
 
         @parameter
         if base.is_power_of_two():
-            x_out.ptr.store(x_out.load[base * 2](0, 0) * factor)
+            x_out.ptr.store(x_out.load[Int(base * 2)](0, 0) * factor)
         else:
 
             @parameter
             for i in range(base):
-                x_out.store(i, 0, x_out.load[2](i, 0) * factor)
+                x_out.store(Int(i), 0, x_out.load[2](Int(i), 0) * factor)
 
     @parameter
     if base.is_power_of_two() and processed == 1:
-        output.store(Int(n), 0, x_out.load[base * 2](0, 0))
+        output.store(Int(n), 0, x_out.load[Int(base * 2)](0, 0))
     elif base.is_power_of_two() and out_address_space is AddressSpace.GENERIC:
-        alias offsets = _scatter_offsets()
-        var v = x_out.load[base * 2](0, 0)
+        comptime offsets = _scatter_offsets()
+        var v = x_out.load[Int(base * 2)](0, 0)
         output.ptr.offset(n * 2).scatter(offsets, v)
     else:
 
         @parameter
         for i in range(base):
-            alias step = Sc(i * offset)
-            output.store(Int(n + step), 0, x_out.load[2](i, 0))
+            comptime step = Sc(i * offset)
+            output.store(Int(n + step), 0, x_out.load[2](Int(i), 0))

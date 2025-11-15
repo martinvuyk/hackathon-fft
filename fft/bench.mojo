@@ -25,18 +25,18 @@ def _bench_sequential_intra_block_fft_launch_radix_n[
     ctx: DeviceContext,
     mut b: Bencher,
 ):
-    alias length = in_layout.shape[1].value()
-    alias bases_processed = _get_ordered_bases_processed_list[
+    comptime length = UInt(in_layout.shape[1].value())
+    comptime bases_processed = _get_ordered_bases_processed_list[
         length, bases, "gpu"
     ]()
-    alias ordered_bases = bases_processed[0]
-    alias processed_list = bases_processed[1]
+    comptime ordered_bases = bases_processed[0]
+    comptime processed_list = bases_processed[1]
 
     @parameter
-    fn _calc_total_offsets() -> (UInt, List[UInt]):
-        alias last_base = ordered_bases[len(ordered_bases) - 1]
+    fn _calc_total_offsets() -> Tuple[UInt, List[UInt]]:
+        comptime last_base = ordered_bases[len(ordered_bases) - 1]
         var bases = materialize[ordered_bases]()
-        var c = (length // last_base) * (last_base - 1) * len(bases)
+        var c = Int((length // last_base) * (last_base - 1)) * len(bases)
         var offsets = List[UInt](capacity=c)
         var val = UInt(0)
         for base in bases:
@@ -44,10 +44,10 @@ def _bench_sequential_intra_block_fft_launch_radix_n[
             val += (length // base) * (base - 1)
         return val, offsets^
 
-    alias total_offsets = _calc_total_offsets()
-    alias total_twfs = total_offsets[0]
-    alias twf_offsets = total_offsets[1]
-    alias num_threads = length // ordered_bases[len(ordered_bases) - 1]
+    comptime total_offsets = _calc_total_offsets()
+    comptime total_twfs = total_offsets[0]
+    comptime twf_offsets = total_offsets[1]
+    comptime num_threads = length // ordered_bases[len(ordered_bases) - 1]
 
     @parameter
     fn call_fn[
@@ -55,12 +55,14 @@ def _bench_sequential_intra_block_fft_launch_radix_n[
         out_dtype: DType,
         in_layout: Layout,
         out_layout: Layout,
+        in_origin: ImmutOrigin,
+        out_origin: MutOrigin,
         *,
         ordered_bases: List[UInt],
         processed_list: List[UInt],
     ](
-        output: LayoutTensor[mut=True, out_dtype, out_layout],
-        x: LayoutTensor[mut=False, in_dtype, in_layout],
+        output: LayoutTensor[out_dtype, out_layout, out_origin],
+        x: LayoutTensor[in_dtype, in_layout, in_origin],
     ):
         for _ in range(10_000):
             _intra_block_fft_kernel_radix_n[
@@ -75,43 +77,44 @@ def _bench_sequential_intra_block_fft_launch_radix_n[
                 inverse=False,
                 total_twfs=total_twfs,
                 twf_offsets=twf_offsets,
-                warp_exec = 32 >= num_threads,
+                warp_exec = UInt(32) >= num_threads,
             ](output, x)
 
-    ctx.enqueue_function[
-        call_fn[
-            in_dtype,
-            out_dtype,
-            in_layout,
-            out_layout,
-            ordered_bases=ordered_bases,
-            processed_list=processed_list,
-        ]
-    ](output, x, grid_dim=1, block_dim=num_threads)
+    comptime func = call_fn[
+        in_dtype,
+        out_dtype,
+        in_layout,
+        out_layout,
+        x.origin,
+        output.origin,
+        ordered_bases=ordered_bases,
+        processed_list=processed_list,
+    ]
+    ctx.enqueue_function_checked[func, func](
+        output, x, grid_dim=1, block_dim=Int(num_threads)
+    )
     ctx.synchronize()
     _ = processed_list  # origin bug
 
 
 @parameter
-fn bench_intra_block_radix_n_rfft[
+fn bench_sequential_intra_block_radix_n_rfft[
     dtype: DType, bases: List[UInt], test_values: _TestValues[dtype]
 ](mut b: Bencher) raises:
-    alias values = test_values[len(test_values) - 1]
-    alias SIZE = len(values[0])
-    alias in_dtype = dtype
-    alias out_dtype = dtype
-    alias in_layout = Layout.row_major(1, SIZE, 1)
-    alias out_layout = Layout.row_major(1, SIZE, 2)
-    alias calc_dtype = dtype
-    alias Complex = ComplexSIMD[calc_dtype, 1]
+    comptime values = test_values[len(test_values) - 1]
+    comptime SIZE = len(values[0])
+    comptime in_dtype = dtype
+    comptime out_dtype = dtype
+    comptime in_layout = Layout.row_major(1, SIZE, 1)
+    comptime out_layout = Layout.row_major(1, SIZE, 2)
+    comptime calc_dtype = dtype
+    comptime Complex = ComplexSIMD[calc_dtype, 1]
 
     with DeviceContext() as ctx:
-        var out = ctx.enqueue_create_buffer[out_dtype](
-            out_layout.size()
-        ).enqueue_fill(0)
-        var x = ctx.enqueue_create_buffer[in_dtype](
-            in_layout.size()
-        ).enqueue_fill(0)
+        var out = ctx.enqueue_create_buffer[out_dtype](out_layout.size())
+        out.enqueue_fill(0)
+        var x = ctx.enqueue_create_buffer[in_dtype](in_layout.size())
+        x.enqueue_fill(0)
         ref series = values[0]
         with x.map_to_host() as x_host:
             for i in range(SIZE):
@@ -146,15 +149,15 @@ fn bench_cpu_radix_n_rfft[
     *,
     cpu_workers: Optional[UInt] = None,
 ](mut b: Bencher) raises:
-    alias values = test_values[len(test_values) - 1]
-    alias SIZE = len(values[0])
-    alias BATCHES = batches
-    alias in_dtype = dtype
-    alias out_dtype = dtype
-    alias in_layout = Layout.row_major(BATCHES, SIZE, 1)
-    alias out_layout = Layout.row_major(BATCHES, SIZE, 2)
-    alias calc_dtype = dtype
-    alias Complex = ComplexSIMD[calc_dtype, 1]
+    comptime values = test_values[len(test_values) - 1]
+    comptime SIZE = len(values[0])
+    comptime BATCHES = batches
+    comptime in_dtype = dtype
+    comptime out_dtype = dtype
+    comptime in_layout = Layout.row_major(Int(BATCHES), Int(SIZE), 1)
+    comptime out_layout = Layout.row_major(Int(BATCHES), Int(SIZE), 2)
+    comptime calc_dtype = dtype
+    comptime Complex = ComplexSIMD[calc_dtype, 1]
 
     var out = List[Scalar[out_dtype]](capacity=out_layout.size())
     var x = List[Scalar[in_dtype]](capacity=in_layout.size())
@@ -186,7 +189,7 @@ fn bench_cpu_radix_n_rfft[
 def main():
     seed()
     var m = Bench(BenchConfig(num_repetitions=1))
-    alias bases_list: List[List[UInt]] = [
+    comptime bases_list: List[List[UInt]] = [
         # [64, 2],  # long compile times, but important to bench
         # [32, 4],  # long compile times, but important to bench
         # [16, 8],  # long compile times, but important to bench
@@ -200,18 +203,20 @@ def main():
         [4, 2, 2, 2, 2, 2],
         [2],
     ]
-    alias test_values_fp32 = _get_test_values_128[DType.float32]()
-    alias test_values_fp64 = _get_test_values_128[DType.float64]()
+    comptime test_values_fp32 = _get_test_values_128[DType.float32]()
+    comptime test_values_fp64 = _get_test_values_128[DType.float64]()
 
     @parameter
     for bases in bases_list:
-        alias b = bases.__str__().replace("UInt(", "").replace(")", "")
-        m.bench_function[
-            bench_intra_block_radix_n_rfft[
-                DType.float32, bases, test_values_fp32
-            ]
-        ](BenchId(String("bench_intra_block_radix_n_rfft[", b, ", 128]")))
-        alias cpu_bench = "bench_cpu_radix_n_rfft["
+        comptime b = bases.__str__().replace("UInt(", "").replace(")", "")
+        comptime name = String(
+            "bench_sequential_intra_block_radix_n_rfft[", b, ", 128]"
+        )
+        comptime gpu_func = bench_sequential_intra_block_radix_n_rfft
+        m.bench_function[gpu_func[DType.float32, bases, test_values_fp32]](
+            BenchId(name)
+        )
+        comptime cpu_bench = "bench_cpu_radix_n_rfft["
         m.bench_function[
             bench_cpu_radix_n_rfft[
                 DType.float64,
@@ -241,7 +246,7 @@ def main():
             ]
         ](BenchId(String(cpu_bench, b, ", 1_000_000, 128, workers=n]")))
 
-    results = Dict[String, (Float64, Int)]()
+    results = Dict[String, Tuple[Float64, Int]]()
     for info in m.info_vec:
         n = info.name
         time = info.result.mean("ms")
