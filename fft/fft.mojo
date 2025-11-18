@@ -86,6 +86,88 @@ fn fft[
     out_layout: Layout,
     *,
     inverse: Bool = False,
+    bases: List[UInt] = _estimate_best_bases[in_layout, out_layout, "cpu"](),
+](
+    output: LayoutTensor[mut=True, out_dtype, out_layout],
+    x: LayoutTensor[mut=False, in_dtype, in_layout],
+    *,
+    cpu_workers: Optional[UInt] = None,
+) raises:
+    """Calculate the Fast Fourier Transform.
+
+    Parameters:
+        in_dtype: The `DType` of the input tensor.
+        out_dtype: The `DType` of the output tensor.
+        in_layout: The `Layout` of the input tensor.
+        out_layout: The `Layout` of the output tensor.
+        inverse: Whether to run the inverse fourier transform.
+        bases: The list of bases for which to build the mixed-radix algorithm.
+
+    Args:
+        output: The output tensor.
+        x: The input tensor.
+        cpu_workers: The amount of workers to use when running on CPU.
+
+    Constraints:
+        The layout should match one of: `{(batches, sequence_length, 1),
+        (batches, sequence_length, 2)}`
+
+    Notes:
+        - This function automatically runs the rfft if the input is real-valued.
+        - If the given bases list does not multiply together to equal the
+        length, the builtin algorithm duplicates the biggest (CPU) values that
+        can still divide the length until reaching it.
+        - The amount of threads that will be launched is equal to the
+        `sequence_length // smallest_base`.
+    """
+    _check_layout_conditions[in_layout, out_layout]()
+    comptime batches = UInt(in_layout.shape[0].value())
+    comptime sequence_length = UInt(in_layout.shape[1].value())
+    comptime do_rfft = in_layout.shape[2].value() == 1
+    constrained[
+        out_dtype.is_floating_point(), "out_dtype must be floating point"
+    ]()
+
+    comptime bases_processed = _get_ordered_bases_processed_list[
+        sequence_length, bases, "cpu"
+    ]()
+    comptime ordered_bases = bases_processed[0]
+    comptime processed_list = bases_processed[1]
+
+    @parameter
+    fn _calc_total_offsets() -> Tuple[UInt, List[UInt]]:
+        comptime last_base = ordered_bases[len(ordered_bases) - 1]
+        var bases = materialize[ordered_bases]()
+        var c = Int((sequence_length // last_base) * (last_base - 1))
+        var offsets = List[UInt](capacity=c * len(bases))
+        var val = UInt(0)
+        for base in bases:
+            offsets.append(val)
+            val += (sequence_length // base) * (base - 1)
+        return val, offsets^
+
+    comptime total_offsets = _calc_total_offsets()
+    comptime total_twfs = total_offsets[0]
+    comptime twf_offsets = total_offsets[1]
+
+    _cpu_fft_kernel_radix_n[
+        length=sequence_length,
+        ordered_bases=ordered_bases,
+        processed_list=processed_list,
+        do_rfft=do_rfft,
+        inverse=inverse,
+        total_twfs=total_twfs,
+        twf_offsets=twf_offsets,
+    ](output, x, cpu_workers=cpu_workers)
+
+
+fn fft[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+    *,
+    inverse: Bool = False,
     target: StaticString = _DEFAULT_DEVICE,
     bases: List[UInt] = _estimate_best_bases[in_layout, out_layout, target](),
     # TODO: we'd need to know the cudaOccupancyMaxPotentialClusterSize for
