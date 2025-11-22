@@ -77,7 +77,7 @@ fn _run_intra_something_nd_fft[
     ):
         comptime length = UInt(x.layout.shape[0].value())
         comptime bases_processed = _get_ordered_bases_processed_list[
-            length, bases[dim_idx], target
+            length, bases[dim_idx]
         ]()
         comptime ordered_bases = bases_processed[0]
         comptime processed_list = bases_processed[1]
@@ -179,15 +179,17 @@ fn _run_intra_something_nd_fft[
                     ordered_bases=ordered_bases,
                 ]
 
-                @parameter
-                fn _run[width: Int](local_i: Int):
+                fn _run[
+                    width: Int
+                ](local_i: Int) unified {
+                    mut local_out, read local_x, read twfs, mut x_out
+                }:
                     func(local_out, local_x, UInt(local_i), twfs, x_out)
 
-                comptime width = UInt(simd_width_of[out_dtype]())
-                comptime unroll_factor = Int(base) if base <= width else 1
-                vectorize[
-                    _run, 1, size = Int(base), unroll_factor=unroll_factor
-                ]()
+                comptime width = simd_width_of[out_dtype]()
+                comptime size = Int(length // base)
+                comptime factor = size if size <= width else 1
+                vectorize[1, size=size, unroll_factor=factor](_run)
 
         parallelize[func=_inner_cpu_kernel](
             prod // dims[dim_idx].value(),
@@ -244,9 +246,7 @@ fn _run_intra_something_nd_fft[
                 _run_1d_fft[0](dim_batch_out, dim_batch_x, dim_batch_x_out)
 
 
-# NOTE: We aren't really using this because of difficulty properly scheduling
-# block clusters in a generic and portable manner. We need some better GPU info.
-fn _intra_multiprocessor_fft_kernel_radix_n_multi_dim[
+fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
     in_dtype: DType,
     out_dtype: DType,
     in_layout: Layout,
@@ -259,6 +259,9 @@ fn _intra_multiprocessor_fft_kernel_radix_n_multi_dim[
     max_base: UInt,
     last_base: UInt,
     total_threads: UInt,
+    shared_address_space: AddressSpace,
+    stage_sync_fn: fn (),
+    index_fn: fn () -> UInt,
 ](
     batch_output: LayoutTensor[out_dtype, out_layout, out_origin],
     batch_x: LayoutTensor[in_dtype, in_layout, in_origin],
@@ -267,65 +270,7 @@ fn _intra_multiprocessor_fft_kernel_radix_n_multi_dim[
     max_threads_per_multiprocessor` and that `x_dim * y_dim [* z_dim]` out_dtype
     items fit in a block's shared memory."""
 
-    var local_i = thread_idx.x
-    var block_num = block_dim.y * block_idx.y
-
-    comptime rank = out_layout.rank()
-    comptime dims = out_layout.shape[1 : rank - 1]
-    comptime prod = dims.product_flatten().value()
-
-    comptime x_layout = Layout.row_major(in_layout.shape[1:rank])
-    var x = LayoutTensor[in_dtype, x_layout, batch_x.origin](
-        batch_x.ptr + batch_x.stride[0]() * Int(block_num)
-    )
-    comptime block_out_layout = Layout.row_major(out_layout.shape[1:rank])
-    var output = LayoutTensor[out_dtype, block_out_layout, batch_output.origin](
-        batch_output.ptr + batch_output.stride[0]() * Int(block_num)
-    )
-    comptime x_out_layout = Layout.row_major(Int(max_base), 2)
-    var x_out = LayoutTensor[
-        out_dtype, x_out_layout, MutOrigin.external
-    ].stack_allocation()
-
-    fn stage_sync_fn():
-        cluster_arrive_relaxed()
-        cluster_wait()
-
-    # TODO: this should use distributed shared memory for the intermediate output
-    _run_intra_something_nd_fft[
-        inverse=inverse,
-        bases=bases,
-        total_threads=total_threads,
-        stage_sync_fn=stage_sync_fn,
-        target="gpu",
-    ](output, x, x_out, local_i=local_i)
-
-    stage_sync_fn()
-
-
-fn _intra_block_fft_kernel_radix_n_multi_dim[
-    in_dtype: DType,
-    out_dtype: DType,
-    in_layout: Layout,
-    out_layout: Layout,
-    in_origin: ImmutOrigin,
-    out_origin: MutOrigin,
-    *,
-    inverse: Bool,
-    warp_exec: Bool,
-    bases: List[List[UInt]],
-    max_base: UInt,
-    last_base: UInt,
-    total_threads: UInt,
-](
-    batch_output: LayoutTensor[out_dtype, out_layout, out_origin],
-    batch_x: LayoutTensor[in_dtype, in_layout, in_origin],
-):
-    """An FFT that assumes `biggest_dimension // smallest_base <=
-    max_threads_per_block` and that `x_dim * y_dim [* z_dim]` out_dtype items
-    fit in a block's shared memory."""
-
-    var local_i = thread_idx.x
+    var local_i = index_fn()
     var block_num = block_dim.y * block_idx.y
 
     comptime rank = out_layout.rank()
@@ -341,17 +286,15 @@ fn _intra_block_fft_kernel_radix_n_multi_dim[
         batch_output.ptr + batch_output.stride[0]() * Int(block_num)
     )
     var shared_f = LayoutTensor[
-        out_dtype, block_out_layout, MutOrigin.external
+        out_dtype,
+        block_out_layout,
+        MutOrigin.external,
+        address_space=shared_address_space,
     ].stack_allocation()
     comptime x_out_layout = Layout.row_major(Int(max_base), 2)
     var x_out = LayoutTensor[
         out_dtype, x_out_layout, MutOrigin.external
     ].stack_allocation()
-
-    fn stage_sync_fn():
-        @parameter
-        if not warp_exec:
-            barrier()
 
     _run_intra_something_nd_fft[
         inverse=inverse,
@@ -364,8 +307,8 @@ fn _intra_block_fft_kernel_radix_n_multi_dim[
     @parameter
     for i in range(last_base):
         comptime offset = i * total_threads
-        var res = shared_f.load[width=2](Int(local_i + offset), 0)
-        output.store(Int(local_i + offset), 0, res)
+        var idx = Int(local_i + offset)
+        output.store(idx, 0, shared_f.load[width=2](idx, 0))
 
     stage_sync_fn()
 
@@ -523,15 +466,23 @@ fn _run_gpu_nd_fft[
         output_size
     ) <= shared_mem_per_block
 
+    comptime is_sm_90_or_newer = (
+        gpu_info.vendor == Vendor.NVIDIA_GPU and gpu_info.compute >= 9.0
+    )
+    comptime run_in_block_cluster = num_blocks <= max_cluster_size and (
+        output_size <= shared_mem_per_block
+    ) and is_sm_90_or_newer
+
     @parameter
-    if not run_in_block:
-        # NOTE: Here is where we would try to schedule the code to run in a
-        # block cluster / intra-multiprocessor if we had some better generics
+    if not (run_in_block or run_in_block_cluster):
         return _generic_gpu_multi_dim_fallback[
             max_cluster_size=max_cluster_size, inverse=inverse, bases=bases
         ](output, x, ctx=ctx)
 
     comptime batch_size = max_threads_available // num_threads
+    comptime block_dim_inter_multiprocessor = UInt(
+        ceil(num_threads / num_blocks).cast[DType.uint]()
+    )
 
     @parameter
     fn _launch_fn[batch_size: Int, offset: Int]() raises:
@@ -545,7 +496,27 @@ fn _run_gpu_nd_fft[
         var x_batch = LayoutTensor[in_dtype, x_batch_layout, x.origin](
             x.ptr + x.stride[0]() * offset
         )
-        comptime block_func_batch = _intra_block_fft_kernel_radix_n_multi_dim[
+
+        fn index_fn() -> UInt:
+            return block_dim.x * block_idx.x + thread_idx.x
+
+        fn cluster_stage_sync_fn():
+            cluster_arrive_relaxed()
+            cluster_wait()
+
+        fn block_stage_sync_fn():
+            @parameter
+            if UInt(gpu_info.warp_size) >= UInt(batch_size) * num_threads:
+                barrier()
+
+        comptime stage_sync_fn = block_stage_sync_fn if (
+            run_in_block
+        ) else cluster_stage_sync_fn
+        comptime address_space = AddressSpace.SHARED if (
+            run_in_block
+        ) else AddressSpace.SHARED_CLUSTER
+
+        comptime block_func_batch = _intra_something_gpu_fft_kernel_radix_n_multi_dim[
             in_dtype,
             out_dtype,
             out_batch_layout,
@@ -554,18 +525,20 @@ fn _run_gpu_nd_fft[
             output.origin,
             inverse=inverse,
             bases=bases,
-            warp_exec = UInt(gpu_info.warp_size)
-            >= UInt(batch_size) * num_threads,
             max_base = _max(bases),
             last_base=last_base,
             total_threads=num_threads,
+            stage_sync_fn=stage_sync_fn,
+            index_fn=index_fn,
+            shared_address_space=address_space,
         ]
+        comptime block_dim = num_threads if run_in_block else (
+            block_dim_inter_multiprocessor
+        )
+        comptime grid_dim = (Int(num_blocks), batch_size)
 
         ctx.enqueue_function_checked[block_func_batch, block_func_batch](
-            out_batch,
-            x_batch,
-            grid_dim=(1, batch_size),
-            block_dim=Int(num_threads),
+            out_batch, x_batch, grid_dim=grid_dim, block_dim=block_dim
         )
 
     @parameter

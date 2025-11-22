@@ -176,21 +176,6 @@ fn test_fft[
 
         @parameter
         if run_in_block and (test_num == 0 or test_num == 1):
-            #     print(
-            #         "offset:",
-            #         offset,
-            #         "batch_size:",
-            #         batch_size,
-            #         "num_threads:",
-            #         num_threads,
-            #     )
-            #     print(
-            #         "output.layout:",
-            #         output.layout,
-            #         "out_batch_layout:",
-            #         out_batch_layout,
-            #     )
-            #     print("x.layout:", x.layout, "x_batch_layout:", x_batch_layout)
             ctx.enqueue_function_checked[block_func_batch, block_func_batch](
                 out_batch,
                 x_batch,
@@ -221,17 +206,6 @@ fn test_fft[
     @parameter
     if remainder > 0:
         _launch_fn[Int(remainder), Int((batches - remainder) * batch_size)]()
-
-    print(
-        "batches:",
-        batches,
-        "batches // batch_size:",
-        batches // batch_size,
-        "remainder:",
-        remainder,
-        "remainder offset:",
-        Int((batches - remainder) * batch_size),
-    )
 
 
 def test_fft_radix_n[
@@ -319,7 +293,7 @@ def test_fft_radix_n[
                     print(complex_out[i].im, end="")
                 print("]")
             for i in range(SIZE):
-                break
+                # break
                 assert_almost_equal(
                     result[i, 0],
                     complex_out[i].re.cast[out_dtype](),
@@ -440,16 +414,15 @@ def _test_fft[
 ]():
     comptime L = List[UInt]
 
-    # comptime values_2 = _get_test_values_2[dtype]()
-    # func[[2], values_2]()
+    comptime values_2 = _get_test_values_2[dtype]()
+    func[[2], values_2]()
 
-    # comptime values_3 = _get_test_values_3[dtype]()
-    # func[[3], values_3]()
+    comptime values_3 = _get_test_values_3[dtype]()
+    func[[3], values_3]()
 
     comptime values_4 = _get_test_values_4[dtype]()
-    # func[[4], values_4]()
+    func[[4], values_4]()
     func[[2], values_4]()
-    return
 
     comptime values_5 = _get_test_values_5[dtype]()
     func[[5], values_5]()
@@ -552,14 +525,14 @@ comptime _test[
 def test_fft():
     comptime dtype = DType.float64
     # _test[dtype, False, "cpu", 0, debug=False]()
-    _test[dtype, False, "gpu", 0, debug=True]()
-    # _test[dtype, False, "gpu", 1, debug=False]()
+    # _test[dtype, False, "gpu", 0, debug=False]()
+    _test[dtype, False, "gpu", 1, debug=False]()
     # _test[dtype, False, "gpu", 2, debug=False]()
     # _test[dtype, False, "gpu", 3, debug=False]()
 
 
 def test_ifft():
-    comptime dtype = DType.float32
+    comptime dtype = DType.float64
     # _test[dtype, True, "cpu", 0, debug=False]()
     # _test[dtype, True, "gpu", 0, debug=False]()
     # _test[dtype, True, "gpu", 1, debug=False]()

@@ -304,7 +304,10 @@ fn _intra_block_fft_kernel_radix_n[
         batch_output.ptr + batch_output.stride[0]() * Int(block_num)
     )
     var shared_f = LayoutTensor[
-        out_dtype, block_out_layout, MutOrigin.external
+        out_dtype,
+        block_out_layout,
+        MutOrigin.external,
+        address_space = AddressSpace.SHARED,
     ].stack_allocation()
     comptime twfs_array = _get_flat_twfs[
         out_dtype, length, total_twfs, ordered_bases, processed_list, inverse
@@ -349,8 +352,8 @@ fn _intra_block_fft_kernel_radix_n[
     @parameter
     for i in range(last_base):
         comptime offset = i * total_threads
-        var res = shared_f.load[width=2](Int(local_i + offset), 0)
-        output.store(Int(local_i + offset), 0, res)
+        var idx = Int(local_i + offset)
+        output.store(idx, 0, shared_f.load[width=2](idx, 0))
 
     @parameter
     if not warp_exec:
@@ -396,21 +399,21 @@ fn _cpu_fft_kernel_radix_n[
         var block_num = UInt(global_i)
         comptime block_out_layout = Layout.row_major(Int(length), 2)
         var output = LayoutTensor[
-            mut=True, out_dtype, block_out_layout, batch_output.origin
+            out_dtype, block_out_layout, batch_output.origin
         ](batch_output.ptr + batch_output.stride[0]() * Int(block_num))
         comptime x_layout = Layout.row_major(
             Int(length), in_layout.shape[2].value()
         )
-        var x = LayoutTensor[mut=False, in_dtype, x_layout, batch_x.origin](
+        var x = LayoutTensor[in_dtype, x_layout, batch_x.origin](
             batch_x.ptr + batch_x.stride[0]() * Int(block_num)
         )
         comptime max_base = Int(ordered_bases[0])
         var x_out_array = InlineArray[Scalar[out_dtype], max_base * 2](
             uninitialized=True
         )
-        var x_out = LayoutTensor[
-            mut=True, out_dtype, Layout.row_major(max_base, 2)
-        ](x_out_array.unsafe_ptr())
+        var x_out = LayoutTensor[out_dtype, Layout.row_major(max_base, 2)](
+            x_out_array.unsafe_ptr()
+        )
 
         @parameter
         for b in range(len(ordered_bases)):
@@ -426,13 +429,15 @@ fn _cpu_fft_kernel_radix_n[
                 ordered_bases=ordered_bases,
             ]
 
-            @parameter
-            fn _run[width: Int](local_i: Int):
+            fn _run[
+                width: Int
+            ](local_i: Int) unified {mut output, read x, read twfs, mut x_out}:
                 func(output, x, UInt(local_i), twfs, x_out)
 
-            comptime width = UInt(simd_width_of[out_dtype]())
-            comptime unroll_factor = Int(base) if base <= width else 1
-            vectorize[_run, 1, size = Int(base), unroll_factor=unroll_factor]()
+            comptime width = simd_width_of[out_dtype]()
+            comptime size = Int(length // base)
+            comptime factor = size if size <= width else 1
+            vectorize[1, size=size, unroll_factor=factor](_run)
 
     parallelize[func=_inner_cpu_kernel](
         amnt_threads,
@@ -449,16 +454,17 @@ fn _cpu_fft_kernel_radix_n[
 fn _radix_n_fft_kernel[
     in_dtype: DType,
     out_dtype: DType,
-    out_layout: Layout,
     in_layout: Layout,
+    out_layout: Layout,
     in_origin: ImmutOrigin,
-    in_address_space: AddressSpace,
     out_origin: MutOrigin,
+    in_address_space: AddressSpace,
     out_address_space: AddressSpace,
     twf_layout: Layout,
     twf_origin: ImmutOrigin,
     twf_address_space: AddressSpace,
     x_out_layout: Layout,
+    x_out_address_space: AddressSpace,
     *,
     length: UInt,
     do_rfft: Bool,
@@ -478,7 +484,9 @@ fn _radix_n_fft_kernel[
     twiddle_factors: LayoutTensor[
         out_dtype, twf_layout, twf_origin, address_space=twf_address_space
     ],
-    x_out: LayoutTensor[mut=True, out_dtype, x_out_layout],
+    x_out: LayoutTensor[
+        mut=True, out_dtype, x_out_layout, address_space=x_out_address_space
+    ],
 ):
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
     optimizations."""

@@ -78,7 +78,7 @@ fn _estimate_best_bases[
             if length % r == 0:
                 potential_bases.append(UInt(r))
 
-        bases = _build_ordered_bases[UInt(length)](potential_bases)
+        bases = _build_ordered_bases[UInt(length)](potential_bases^)
         if _reduce_mul(bases) == UInt(length):
             return
 

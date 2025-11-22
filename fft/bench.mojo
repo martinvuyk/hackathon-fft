@@ -27,7 +27,7 @@ def _bench_sequential_intra_block_fft_launch_radix_n[
 ):
     comptime length = UInt(in_layout.shape[1].value())
     comptime bases_processed = _get_ordered_bases_processed_list[
-        length, bases, "gpu"
+        length, bases
     ]()
     comptime ordered_bases = bases_processed[0]
     comptime processed_list = bases_processed[1]
@@ -193,13 +193,13 @@ def main():
         # [32, 4],  # long compile times, but important to bench
         # [16, 8],  # long compile times, but important to bench
         # [16, 4, 2],  # long compile times, but important to bench
-        [8, 8, 2],
-        [8, 4, 4],
-        [8, 4, 2, 2],
-        [8, 2, 2, 2, 2],
-        [4, 4, 4, 2],
-        [4, 4, 2, 2, 2],
-        [4, 2, 2, 2, 2, 2],
+        # [8, 8, 2],
+        # [8, 4, 4],
+        # [8, 4, 2, 2],
+        # [8, 2, 2, 2, 2],
+        # [4, 4, 4, 2],
+        # [4, 4, 2, 2, 2],
+        # [4, 2, 2, 2, 2, 2],
         [2],
     ]
     comptime test_values_fp32 = _get_test_values_128[DType.float32]()
