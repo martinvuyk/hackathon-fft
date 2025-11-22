@@ -3,6 +3,7 @@ from complex import ComplexScalar
 from math import exp, pi, ceil, sin, cos
 from bit import count_trailing_zeros
 from gpu.host.info import is_cpu
+from layout import IntTuple
 
 
 fn _get_dtype[length: UInt]() -> DType:
@@ -159,68 +160,62 @@ fn _log_mod(x: UInt, base: UInt) -> Tuple[UInt, UInt]:
     )
 
 
-fn _get_ordered_bases_processed_list[
-    length: UInt, bases: List[UInt], target: StaticString
-]() -> Tuple[List[UInt], List[UInt]]:
-    @parameter
-    fn _reduce_mul[b: List[UInt]](out res: UInt):
-        res = UInt(1)
-        for base in materialize[b]():
-            res *= base
+@parameter
+fn _reduce_mul(b: List[UInt], out res: UInt):
+    res = UInt(1)
+    for base in b:
+        res *= base
 
-    @parameter
-    fn _is_all_two(existing_bases: List[UInt]) -> Bool:
+
+@parameter
+fn _is_all_two(existing_bases: List[UInt]) -> Bool:
+    for base in existing_bases:
+        if base != 2:
+            return False
+    return True
+
+
+@parameter
+fn _build_ordered_bases[
+    length: UInt
+](bases: List[UInt], out new_bases: List[UInt]):
+    if _reduce_mul(bases) == length:
+        new_bases = bases.copy()
+        sort(new_bases)  # FIXME: this should just be ascending=False
+        new_bases.reverse()
+    else:
+        var existing_bases = bases.copy()
+        sort(existing_bases)
+        new_bases = List[UInt](capacity=len(existing_bases))
+
+        var processed = UInt(1)
         for base in existing_bases:
-            if base != 2:
-                return False
-        return True
+            var amnt_divisible: UInt
 
-    @parameter
-    fn _build_ordered_bases(out new_bases: List[UInt]):
-        @parameter
-        if _reduce_mul[bases]() == length:
-            new_bases = materialize[bases]()
-            sort(new_bases)  # FIXME: this should just be ascending=False
-            new_bases.reverse()
-        else:
-            var existing_bases = materialize[bases]()
-            sort(existing_bases)
-
-            @parameter
-            if is_cpu[target]():
-                existing_bases.reverse()  # FIXME: this should just be ascending=False
-            new_bases = List[UInt](capacity=len(existing_bases))
-
-            var processed = UInt(1)
-            for base in existing_bases:
-                var amnt_divisible: UInt
-
-                if (
-                    _is_all_two(existing_bases)
-                    and length.is_power_of_two()
-                    and base == 2
-                ):
-                    # FIXME(#5003): this should just be Scalar[DType.index]
-                    @parameter
-                    if is_64bit():
-                        amnt_divisible = UInt(
-                            count_trailing_zeros(UInt64(length))
-                        )
-                    else:
-                        amnt_divisible = UInt(
-                            count_trailing_zeros(UInt32(length))
-                        )
+            if (
+                _is_all_two(existing_bases)
+                and length.is_power_of_two()
+                and base == 2
+            ):
+                # FIXME(#5003): this should just be Scalar[DType.index]
+                @parameter
+                if is_64bit():
+                    amnt_divisible = UInt(count_trailing_zeros(UInt64(length)))
                 else:
-                    amnt_divisible = _log_mod(length // processed, base)[0]
-                for _ in range(amnt_divisible):
-                    new_bases.append(base)
-                    processed *= base
+                    amnt_divisible = UInt(count_trailing_zeros(UInt32(length)))
+            else:
+                amnt_divisible = _log_mod(length // processed, base)[0]
+            for _ in range(amnt_divisible):
+                new_bases.append(base)
+                processed *= base
 
-            @parameter
-            if not is_cpu[target]():
-                new_bases.reverse()
+        new_bases.reverse()
 
-    comptime ordered_bases = _build_ordered_bases()
+
+fn _get_ordered_bases_processed_list[
+    length: UInt, bases: List[UInt]
+]() -> Tuple[List[UInt], List[UInt]]:
+    comptime ordered_bases = _build_ordered_bases[length](materialize[bases]())
 
     @parameter
     fn _build_processed_list() -> List[UInt]:
@@ -243,3 +238,34 @@ fn _get_ordered_bases_processed_list[
     ]()
     constrained[1 not in ordered_bases, "Cannot do an fft with base 1."]()
     return materialize[ordered_bases](), materialize[processed_list]()
+
+
+fn _min(elems: List[UInt], out smallest: UInt):
+    smallest = elems[0]
+    for elem in elems[1:]:
+        smallest = min(elem, smallest)
+
+
+fn _min(elems: IntTuple, out smallest: Int):
+    smallest = elems[0].value()
+    for elem in elems[1:]:
+        smallest = min(elem.value(), smallest)
+
+
+fn _max(elems: List[UInt], out biggest: UInt):
+    biggest = elems[0]
+    for elem in elems[1:]:
+        biggest = max(elem, biggest)
+
+
+fn _max(elems: List[List[UInt]], out biggest: UInt):
+    biggest = 0
+    for bases in elems:
+        for elem in bases:
+            biggest = max(elem, biggest)
+
+
+fn _max(elems: IntTuple, out biggest: Int):
+    biggest = elems[0].value()
+    for elem in elems[1:]:
+        biggest = max(elem.value(), biggest)
