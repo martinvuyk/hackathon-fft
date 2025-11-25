@@ -5,8 +5,8 @@ from gpu.host import DeviceContext
 from random import seed
 
 from fft._test_values import _get_test_values_128, _TestValues
-from fft.fft import (
-    fft,
+from fft.fft import fft
+from fft._fft import (
     _intra_block_fft_kernel_radix_n,
     _get_ordered_bases_processed_list,
 )
@@ -176,9 +176,7 @@ fn bench_cpu_radix_n_rfft[
     @always_inline
     @parameter
     fn call_fn() raises:
-        fft[bases= [bases], target="cpu"](
-            out_tensor, x_tensor, DeviceContext(), cpu_workers=cpu_workers
-        )
+        fft[bases= [bases]](out_tensor, x_tensor, cpu_workers=cpu_workers)
 
     b.iter[call_fn]()
 
@@ -193,13 +191,13 @@ def main():
         # [32, 4],  # long compile times, but important to bench
         # [16, 8],  # long compile times, but important to bench
         # [16, 4, 2],  # long compile times, but important to bench
-        # [8, 8, 2],
-        # [8, 4, 4],
-        # [8, 4, 2, 2],
-        # [8, 2, 2, 2, 2],
-        # [4, 4, 4, 2],
-        # [4, 4, 2, 2, 2],
-        # [4, 2, 2, 2, 2, 2],
+        [8, 8, 2],
+        [8, 4, 4],
+        [8, 4, 2, 2],
+        [8, 2, 2, 2, 2],
+        [4, 4, 4, 2],
+        [4, 4, 2, 2, 2],
+        [4, 2, 2, 2, 2, 2],
         [2],
     ]
     comptime test_values_fp32 = _get_test_values_128[DType.float32]()

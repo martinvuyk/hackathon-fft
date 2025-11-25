@@ -8,7 +8,8 @@ from utils.numerics import nan
 
 from testing import assert_almost_equal
 
-from fft.fft import (
+from fft.fft import fft
+from fft._fft import (
     _cpu_fft_kernel_radix_n,
     _intra_block_fft_kernel_radix_n,
     _launch_inter_or_intra_multiprocessor_fft,
@@ -354,7 +355,7 @@ def test_fft_radix_n[
                 _eval(output, test[0], test[1])
         else:
             var x_data = ctx.enqueue_create_buffer[in_dtype](in_layout.size())
-            x_data.enqueue_fill(nan[in_dtype]())
+            x_data.enqueue_fill(Scalar[in_dtype].MAX)
             var out_data = ctx.enqueue_create_buffer[out_dtype](
                 out_layout.size()
             )
@@ -524,22 +525,140 @@ comptime _test[
 
 def test_fft():
     comptime dtype = DType.float64
-    # _test[dtype, False, "cpu", 0, debug=False]()
-    # _test[dtype, False, "gpu", 0, debug=False]()
+    _test[dtype, False, "cpu", 0, debug=False]()
+    _test[dtype, False, "gpu", 0, debug=False]()
     _test[dtype, False, "gpu", 1, debug=False]()
-    # _test[dtype, False, "gpu", 2, debug=False]()
-    # _test[dtype, False, "gpu", 3, debug=False]()
+    _test[dtype, False, "gpu", 2, debug=False]()
+    _test[dtype, False, "gpu", 3, debug=False]()
 
 
 def test_ifft():
     comptime dtype = DType.float64
-    # _test[dtype, True, "cpu", 0, debug=False]()
-    # _test[dtype, True, "gpu", 0, debug=False]()
-    # _test[dtype, True, "gpu", 1, debug=False]()
-    # _test[dtype, True, "gpu", 2, debug=False]()
-    # _test[dtype, True, "gpu", 3, debug=False]()
+    _test[dtype, True, "cpu", 0, debug=False]()
+    _test[dtype, True, "gpu", 0, debug=False]()
+    _test[dtype, True, "gpu", 1, debug=False]()
+    _test[dtype, True, "gpu", 2, debug=False]()
+    _test[dtype, True, "gpu", 3, debug=False]()
+
+
+comptime Co = ComplexScalar[DType.float64]
+
+comptime input_2d: InlineArray[InlineArray[UInt8, 4], 6] = [
+    [1, 0, 7, 4],
+    [1, 7, 2, 1],
+    [8, 1, 0, 9],
+    [6, 4, 8, 0],
+    [2, 1, 1, 4],
+    [7, 5, 3, 7],
+]
+
+comptime expected_2d: InlineArray[InlineArray[Co, 4], 6] = [
+    [Co(89.0, 0.0), Co(4.0, 7.0), Co(3.0, 0.0), Co(4.0, -7.0)],
+    [
+        Co(-2.5, 0.866025404),
+        Co(-9.59807621, -1.23205081),
+        Co(-7.5, 2.59807621),
+        Co(-4.40192379, -2.23205081),
+    ],
+    [
+        Co(0.5, 18.1865335),
+        Co(-25.25833025, 6.89230485),
+        Co(19.5, 2.59807621),
+        Co(-2.74166975, 13.89230485),
+    ],
+    [Co(-13.0, 0.0), Co(2.0, 23.0), Co(-3.0, 0.0), Co(2.0, -23.0)],
+    [
+        Co(0.5, -18.1865335),
+        Co(-2.74166975, -13.89230485),
+        Co(19.5, -2.59807621),
+        Co(-25.25833025, -6.89230485),
+    ],
+    [
+        Co(-2.5, -0.866025404),
+        Co(-4.40192379, 2.23205081),
+        Co(-7.5, -2.59807621),
+        Co(-9.59807621, 1.23205081),
+    ],
+]
+
+
+def test_2d_cpu():
+    comptime ROWS = 6
+    comptime COLS = 4
+
+    comptime x_layout = Layout.row_major(1, ROWS, COLS, 1)
+    var x_buf = materialize[input_2d]()
+    var x = LayoutTensor[mut=False, DType.uint8, x_layout](
+        x_buf.unsafe_ptr().bitcast[UInt8]()
+    )
+
+    comptime out_layout = Layout.row_major(1, ROWS, COLS, 2)
+    var out_buf = InlineArray[Co, ROWS * COLS](
+        fill=Co(nan[DType.float64](), nan[DType.float64]())
+    )
+    var out = LayoutTensor[mut=True, DType.float64, out_layout](
+        out_buf.unsafe_ptr().bitcast[Float64]()
+    )
+
+    fft(out, x)
+
+    for i in range(ROWS):
+        for j in range(COLS):
+            assert_almost_equal(out[0, i, j, 0], expected_2d[i][j].re)
+            assert_almost_equal(out[0, i, j, 1], expected_2d[i][j].im)
+
+
+def test_2d_gpu():
+    comptime ROWS = 6
+    comptime COLS = 4
+    comptime in_dtype = DType.uint8
+    comptime out_dtype = DType.float64
+    comptime in_layout = Layout.row_major(1, ROWS, COLS, 1)
+    comptime out_layout = Layout.row_major(1, ROWS, COLS, 2)
+
+    with DeviceContext() as ctx:
+        var x_data = ctx.enqueue_create_buffer[in_dtype](in_layout.size())
+        x_data.enqueue_fill(Scalar[in_dtype].MAX)
+        var out_data = ctx.enqueue_create_buffer[out_dtype](out_layout.size())
+        out_data.enqueue_fill(nan[out_dtype]())
+
+        var out = LayoutTensor[mut=True, out_dtype, out_layout](
+            out_data.unsafe_ptr()
+        )
+        var x = LayoutTensor[mut=False, in_dtype, in_layout](
+            x_data.unsafe_ptr()
+        )
+
+        with x_data.map_to_host() as x_host:
+            comptime test_data = materialize[input_2d]()
+            var x_view = type_of(x)(x_host.unsafe_ptr())
+
+            for i in range(ROWS):
+                for j in range(COLS):
+                    x_view[0, i, j, 0] = Scalar[in_dtype](test_data[i][j])
+
+        ctx.synchronize()
+
+        fft[target="gpu"](out, x, ctx)
+
+        ctx.synchronize()
+
+        with out_data.map_to_host() as out_host:
+            comptime expected_data = materialize[expected_2d]()
+            var out_view = type_of(out)(out_host.unsafe_ptr())
+
+            for i in range(ROWS):
+                for j in range(COLS):
+                    assert_almost_equal(
+                        out_view[0, i, j, 0], expected_data[i][j].re
+                    )
+                    assert_almost_equal(
+                        out_view[0, i, j, 1], expected_data[i][j].im
+                    )
 
 
 def main():
-    test_fft()
-    test_ifft()
+    # test_fft()
+    # test_ifft()
+    test_2d_cpu()
+    # test_2d_gpu()
