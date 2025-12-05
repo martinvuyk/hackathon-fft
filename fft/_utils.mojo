@@ -23,7 +23,7 @@ fn _get_dtype[length: UInt]() -> DType:
 
 
 fn _mixed_radix_digit_reverse[
-    length: UInt, ordered_bases: List[UInt]
+    length: UInt, ordered_bases: List[UInt], reverse: Bool = False
 ](idx: Scalar) -> type_of(idx):
     """Performs mixed-radix digit reversal for an index `idx` based on a
     sequence of `ordered_bases`.
@@ -39,15 +39,57 @@ fn _mixed_radix_digit_reverse[
     """
     var reversed_idx = type_of(idx)(0)
     var current_val = idx
-    var base_offset = length
+    var base_offset: UInt
+
+    @parameter
+    if reverse:
+        base_offset = 1
+    else:
+        base_offset = length
 
     @parameter
     for i in range(len(ordered_bases)):
-        comptime base = ordered_bases[i]
-        base_offset //= base
+        comptime base = ordered_bases[
+            i if not reverse else (len(ordered_bases) - 1 - i)
+        ]
+
+        @parameter
+        if not reverse:
+            base_offset //= base
         reversed_idx += (current_val % base) * base_offset
         current_val //= base
+
+        @parameter
+        if reverse:
+            base_offset *= base
     return reversed_idx
+
+
+fn _get_twiddle_factor[
+    dtype: DType, *, inverse: Bool = False
+](n: UInt, N: UInt) -> ComplexScalar[dtype]:
+    """Returns `exp((-j * 2 * pi * n) / N)`."""
+    var factor = (2 * n) / N
+
+    var num: ComplexScalar[dtype]
+
+    if factor == 0:
+        num = {1, 0}
+    elif factor == 0.5:
+        num = {0, -1}
+    elif factor == 1:
+        num = {-1, 0}
+    elif factor == 1.5:
+        num = {0, 1}
+    else:
+        var theta = Float64(-factor * pi)
+        num = {cos(theta).cast[dtype](), sin(theta).cast[dtype]()}
+
+    @parameter
+    if not inverse:
+        return num
+    else:
+        return {num.re, -num.im}
 
 
 fn _get_twiddle_factors[
@@ -61,29 +103,8 @@ fn _get_twiddle_factors[
     """
     res = type_of(res)(uninitialized=True)
     comptime N = length
-    for n in range(1, N):
-        # exp((-j * 2 * pi * n) / N)
-        var factor = 2 * n / Int(N)
-
-        var num: ComplexScalar[dtype]
-
-        if factor == 0:
-            num = {1, 0}
-        elif factor == 0.5:
-            num = {0, -1}
-        elif factor == 1:
-            num = {-1, 0}
-        elif factor == 1.5:
-            num = {0, 1}
-        else:
-            var theta = Float64(-factor * pi)
-            num = {cos(theta).cast[dtype](), sin(theta).cast[dtype]()}
-
-        @parameter
-        if not inverse:
-            res[n - 1] = num
-        else:
-            res[n - 1] = {num.re, -num.im}
+    for n in range(UInt(1), N):
+        res[n - 1] = _get_twiddle_factor[dtype, inverse=inverse](n, N)
 
 
 fn _prep_twiddle_factors[
@@ -128,7 +149,6 @@ fn _get_flat_twfs[
     for b in range(len(ordered_bases)):
         comptime base = ordered_bases[b]
         comptime processed = processed_list[b]
-        comptime amnt_threads = length // base
         var base_twfs = _prep_twiddle_factors[
             length, base, processed, dtype, inverse
         ]()

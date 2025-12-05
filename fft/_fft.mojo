@@ -361,91 +361,6 @@ fn _intra_block_fft_kernel_radix_n[
 
 
 # ===-----------------------------------------------------------------------===#
-# _cpu_fft_kernel_radix_n
-# ===-----------------------------------------------------------------------===#
-
-
-fn _cpu_fft_kernel_radix_n[
-    in_dtype: DType,
-    out_dtype: DType,
-    in_layout: Layout,
-    out_layout: Layout,
-    *,
-    length: UInt,
-    ordered_bases: List[UInt],
-    processed_list: List[UInt],
-    do_rfft: Bool,
-    inverse: Bool,
-    total_twfs: UInt,
-    twf_offsets: List[UInt],
-](
-    batch_output: LayoutTensor[mut=True, out_dtype, out_layout],
-    batch_x: LayoutTensor[mut=False, in_dtype, in_layout],
-    cpu_workers: Optional[UInt] = None,
-):
-    """An FFT that runs on the CPU."""
-
-    comptime twfs_array = _get_flat_twfs[
-        out_dtype, length, total_twfs, ordered_bases, processed_list, inverse
-    ]()
-    comptime twfs_layout = Layout.row_major(Int(total_twfs), 2)
-    var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
-        twfs_array.unsafe_ptr()
-    )
-    comptime amnt_threads = in_layout.shape[0].value()
-
-    @parameter
-    fn _inner_cpu_kernel(global_i: Int):
-        var block_num = UInt(global_i)
-        comptime block_out_layout = Layout.row_major(Int(length), 2)
-        var output = LayoutTensor[
-            out_dtype, block_out_layout, batch_output.origin
-        ](batch_output.ptr + batch_output.stride[0]() * Int(block_num))
-        comptime x_layout = Layout.row_major(
-            Int(length), in_layout.shape[2].value()
-        )
-        var x = LayoutTensor[in_dtype, x_layout, batch_x.origin](
-            batch_x.ptr + batch_x.stride[0]() * Int(block_num)
-        )
-        comptime max_base = Int(ordered_bases[0])
-        var x_out_array = InlineArray[Scalar[out_dtype], max_base * 2](
-            uninitialized=True
-        )
-        var x_out = LayoutTensor[out_dtype, Layout.row_major(max_base, 2)](
-            x_out_array.unsafe_ptr()
-        )
-
-        @parameter
-        for b in range(len(ordered_bases)):
-            comptime base = ordered_bases[b]
-            comptime processed = processed_list[b]
-            comptime func = _radix_n_fft_kernel[
-                do_rfft=do_rfft,
-                base=base,
-                length=length,
-                processed=processed,
-                inverse=inverse,
-                twf_offset = twf_offsets[b],
-                ordered_bases=ordered_bases,
-            ]
-
-            fn _run[
-                width: Int
-            ](local_i: Int) unified {mut output, read x, read twfs, mut x_out}:
-                func(output, x, UInt(local_i), twfs, x_out)
-
-            comptime width = simd_width_of[out_dtype]()
-            comptime size = Int(length // base)
-            comptime factor = size if size <= width else 1
-            vectorize[1, size=size, unroll_factor=factor](_run)
-
-    parallelize[func=_inner_cpu_kernel](
-        amnt_threads,
-        Int(cpu_workers.or_else(UInt(parallelism_level()))),
-    )
-
-
-# ===-----------------------------------------------------------------------===#
 # radix implementation
 # ===-----------------------------------------------------------------------===#
 
@@ -475,10 +390,10 @@ fn _radix_n_fft_kernel[
     ordered_bases: List[UInt],
 ](
     output: LayoutTensor[
-        out_dtype, out_layout, out_origin, address_space=out_address_space
+        out_dtype, out_layout, out_origin, address_space=out_address_space, **_
     ],
     x: LayoutTensor[
-        in_dtype, in_layout, in_origin, address_space=in_address_space
+        in_dtype, in_layout, in_origin, address_space=in_address_space, **_
     ],
     local_i: UInt,
     twiddle_factors: LayoutTensor[
@@ -487,6 +402,8 @@ fn _radix_n_fft_kernel[
     x_out: LayoutTensor[
         mut=True, out_dtype, x_out_layout, address_space=x_out_address_space
     ],
+    enable_debug: Bool = False,
+    i_to_debug: UInt = 0,
 ):
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
     optimizations."""
@@ -528,9 +445,7 @@ fn _radix_n_fft_kernel[
 
     @parameter
     @always_inline
-    fn _twf_fma[twf: Co, is_j1: Bool](x_j_v: CoV, acc_v: CoV) -> CoV:
-        var x_j = to_Co(x_j_v)
-        var acc = to_Co(acc_v)
+    fn _twf_fma[twf: Co, is_j1: Bool](x_j: Co, acc: Co) -> CoV:
         var x_i: Co
 
         @parameter
@@ -565,17 +480,17 @@ fn _radix_n_fft_kernel[
         return to_CoV(x_i)
 
     @parameter
-    fn _get_x[i: UInt]() -> SIMD[out_dtype, 2]:
+    fn _get_x[i: UInt]() -> Co:
         @parameter
         if processed == 1:
-            # reorder input x(local_i) items to match F(current_item) layout
+            # Reorder input x(local_i) items to match F(current_item) layout.
             var idx = Sc(local_i) * Sc(base) + Sc(i)
 
             var copy_from: Sc
 
             @parameter
-            if base == length:  # do a DFT on the inputs
-                copy_from = idx
+            if base == length:
+                copy_from = idx  # do a DFT on the inputs
             else:
                 copy_from = _mixed_radix_digit_reverse[length, ordered_bases](
                     idx
@@ -585,10 +500,10 @@ fn _radix_n_fft_kernel[
             if do_rfft:
                 return {x.load[1](Int(copy_from), 0).cast[out_dtype](), 0}
             else:
-                return x.load[2](Int(copy_from), 0).cast[out_dtype]()
+                return to_Co(x.load[2](Int(copy_from), 0).cast[out_dtype]())
         else:
-            comptime step = Sc(i * offset)
-            return output.load[2](Int(n + step), 0)
+            comptime step = Sc(i) * offset
+            return to_Co(output.load[2](Int(n + step), 0))
 
     var x_0 = _get_x[0]()
 
@@ -602,19 +517,21 @@ fn _radix_n_fft_kernel[
             @parameter
             for i in range(base):
                 comptime base_phasor = _base_phasor[i, j]()
-                var acc: CoV
+                var acc: Co
 
                 @parameter
                 if j == 1:
                     acc = x_0
                 else:
-                    acc = x_out.load[2](Int(i), 0)
-                x_out.store(Int(i), 0, _twf_fma[base_phasor, j == 1](x_j, acc))
+                    acc = to_Co(x_out.load[2](Int(i), 0))
+
+                # x_out.store(Int(i), 0, _twf_fma[base_phasor, j == 1](x_j, acc))
+                x_out.store(Int(i), 0, to_CoV(base_phasor.fma(x_j, acc)))
             continue
 
-        var i0_j_twf_vec = twiddle_factors.load[2](
-            Int(twf_offset + local_i * (base - 1) + (j - 1)), 0
-        )
+        var twf_index = Int(twf_offset + local_i * (base - 1) + (j - 1))
+
+        var i0_j_twf_vec = twiddle_factors.load[2](twf_index, 0)
         var i0_j_twf = to_Co(i0_j_twf_vec)
 
         @parameter
@@ -634,15 +551,15 @@ fn _radix_n_fft_kernel[
             else:
                 twf = i0_j_twf * base_phasor
 
-            var acc: CoV
+            var acc: Co
 
             @parameter
             if j == 1:
                 acc = x_0
             else:
-                acc = x_out.load[2](Int(i), 0)
+                acc = to_Co(x_out.load[2](Int(i), 0))
 
-            x_out.store(Int(i), 0, to_CoV(twf.fma(to_Co(x_j), to_Co(acc))))
+            x_out.store(Int(i), 0, to_CoV(twf.fma(x_j, acc)))
 
     @parameter
     if inverse and processed * base == length:  # last ifft stage
@@ -658,15 +575,28 @@ fn _radix_n_fft_kernel[
                 x_out.store(Int(i), 0, x_out.load[2](Int(i), 0) * factor)
 
     @parameter
-    if base.is_power_of_two() and processed == 1:
-        output.store(Int(n), 0, x_out.load[Int(base * 2)](0, 0))
-    elif base.is_power_of_two() and out_address_space is AddressSpace.GENERIC:
-        comptime offsets = _scatter_offsets()
-        var v = x_out.load[Int(base * 2)](0, 0)
-        output.ptr.offset(n * 2).scatter(offsets, v)
+    if False:
+        ...
+    # if base.is_power_of_two() and processed == 1:
+    #     output.store(Int(n), 0, x_out.load[Int(base * 2)](0, 0))
+    # elif base.is_power_of_two() and out_address_space is AddressSpace.GENERIC:
+    #     comptime offsets = _scatter_offsets()
+    #     var v = x_out.load[Int(base * 2)](0, 0)
+    #     output.ptr.offset(n * 2).scatter(offsets, v)
     else:
 
         @parameter
         for i in range(base):
             comptime step = Sc(i * offset)
+            # if enable_debug and i == i_to_debug:
+            # print(
+            #     "RADIX KERNEL",
+            #     "local_i:",
+            #     local_i,
+            #     "i:",
+            #     i,
+            #     "x_out[i]:",
+            #     x_out.load[2](Int(i), 0),
+            # )
+
             output.store(Int(n + step), 0, x_out.load[2](Int(i), 0))

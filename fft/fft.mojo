@@ -6,7 +6,8 @@ from sys.info import has_accelerator, size_of
 
 
 from ._utils import _build_ordered_bases, _reduce_mul
-from ._ndim_fft import _run_cpu_nd_fft, _run_gpu_nd_fft
+from ._ndim_fft_cpu import _run_cpu_nd_fft
+from ._ndim_fft_gpu import _run_gpu_nd_fft
 
 comptime _DEFAULT_DEVICE = "cpu" if not has_accelerator() else "gpu"
 
@@ -108,8 +109,8 @@ fn fft[
         in_layout, out_layout, "cpu"
     ](),
 ](
-    output: LayoutTensor[out_dtype, out_layout, out_origin],
-    x: LayoutTensor[in_dtype, in_layout, in_origin],
+    output: LayoutTensor[out_dtype, out_layout, out_origin, **_],
+    x: LayoutTensor[in_dtype, in_layout, in_origin, **_],
     *,
     cpu_workers: Optional[UInt] = None,
 ) raises:
@@ -174,8 +175,8 @@ fn fft[
     # https://docs.nvidia.com/cuda/cuda-c-programming-guide/#thread-block-clusters
     max_cluster_size: UInt = 8,
 ](
-    output: LayoutTensor[out_dtype, out_layout, out_origin],
-    x: LayoutTensor[in_dtype, in_layout, in_origin],
+    output: LayoutTensor[out_dtype, out_layout, out_origin, **_],
+    x: LayoutTensor[in_dtype, in_layout, in_origin, **_],
     ctx: DeviceContext,
     *,
     cpu_workers: Optional[UInt] = None,

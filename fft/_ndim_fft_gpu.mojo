@@ -5,6 +5,7 @@ from gpu.cluster import cluster_arrive_relaxed, cluster_wait
 from gpu.host import DeviceContext, DeviceBuffer
 from gpu.host.info import Vendor, is_cpu
 from layout import Layout, LayoutTensor, IntTuple
+from utils.index import IndexList
 from layout.int_tuple import IntArray
 from runtime.asyncrt import parallelism_level
 from sys.info import has_accelerator, size_of, simd_width_of
@@ -27,37 +28,6 @@ from ._fft import (
 )
 
 
-fn _run_cpu_nd_fft[
-    in_dtype: DType,
-    out_dtype: DType,
-    in_layout: Layout,
-    out_layout: Layout,
-    in_origin: ImmutOrigin,
-    out_origin: MutOrigin,
-    *,
-    inverse: Bool,
-    bases: List[List[UInt]],
-](
-    output: LayoutTensor[out_dtype, out_layout, out_origin],
-    x: LayoutTensor[in_dtype, in_layout, in_origin],
-    *,
-    cpu_workers: Optional[UInt] = None,
-):
-    fn _no_fn():
-        ...
-
-    var x_out = LayoutTensor[out_dtype, Layout(0), MutOrigin.external](
-        UnsafePointer[Scalar[out_dtype], MutOrigin.external]()
-    )
-    _run_intra_something_nd_fft[
-        inverse=inverse,
-        bases=bases,
-        total_threads=0,
-        stage_sync_fn=_no_fn,
-        target="cpu",
-    ](output, x, x_out, local_i=0, cpu_workers=cpu_workers)
-
-
 fn _fft_gpu_device_wide[
     in_dtype: DType,
     out_dtype: DType,
@@ -72,14 +42,15 @@ fn _fft_gpu_device_wide[
     grid_dim: Tuple[Int, Int],
     block_threads: UInt,
 ](
-    output: LayoutTensor[out_dtype, out_layout, out_origin],
-    x: LayoutTensor[in_dtype, in_layout, in_origin],
+    output: LayoutTensor[out_dtype, out_layout, out_origin, **_],
+    x: LayoutTensor[in_dtype, in_layout, in_origin, **_],
     ctx: DeviceContext,
 ) raises:
     comptime rank = out_layout.rank()
     comptime dims = out_layout.shape[1 : rank - 1]
     comptime amnt_dims = len(bases)
     comptime prod = dims.product_flatten().value()
+    comptime batches = out_layout.shape[0].value()
     comptime x_complex_in = in_layout.shape[rank - 1].value()
 
     @parameter
@@ -167,8 +138,12 @@ fn _fft_gpu_device_wide[
         batch_x_origin: ImmutOrigin, //,
         dim_idx: Int,
     ](
-        batch_output: LayoutTensor[out_dtype, batch_out_layout, output.origin],
-        batch_x: LayoutTensor[batch_x_dtype, batch_x_layout, batch_x_origin],
+        batch_output: LayoutTensor[
+            out_dtype, batch_out_layout, output.origin, **_
+        ],
+        batch_x: LayoutTensor[
+            batch_x_dtype, batch_x_layout, batch_x_origin, **_
+        ],
     ) raises:
         comptime length = UInt(batch_x.layout.shape[0].value())
         comptime bases_processed = _get_ordered_bases_processed_list[
@@ -237,9 +212,12 @@ fn _fft_gpu_device_wide[
                     Layout.row_major(batch_prod, dim, x_complex_in)
                 ]()
                 comptime x_layout = Layout.row_major(dim, x_complex_in)
-                var dim_batch_x = LayoutTensor[in_dtype, x_layout, x.origin](
-                    reshaped_x.ptr + reshaped_x.stride[0]() * j
-                )
+                var dim_batch_x = LayoutTensor[
+                    in_dtype,
+                    x_layout,
+                    x.origin,
+                    address_space = x.address_space,
+                ](reshaped_x.ptr + reshaped_x.stride[0]() * j)
                 _run_1d_fft[0](dim_batch_out, dim_batch_x)
 
 
@@ -543,8 +521,8 @@ fn _run_gpu_nd_fft[
     bases: List[List[UInt]],
     max_cluster_size: UInt,
 ](
-    output: LayoutTensor[mut=True, out_dtype, out_layout],
-    x: LayoutTensor[mut=False, in_dtype, in_layout],
+    output: LayoutTensor[mut=True, out_dtype, out_layout, **_],
+    x: LayoutTensor[mut=False, in_dtype, in_layout, **_],
     ctx: DeviceContext,
 ) raises:
     constrained[
@@ -621,13 +599,16 @@ fn _run_gpu_nd_fft[
         comptime out_tuple = IntTuple(batch_size, dims, 2)
         comptime out_batch_layout = Layout.row_major(out_tuple.flatten())
         var out_batch = LayoutTensor[
-            out_dtype, out_batch_layout, output.origin
+            out_dtype,
+            out_batch_layout,
+            output.origin,
+            address_space = output.address_space,
         ](output.ptr + output.stride[0]() * offset)
         comptime x_tuple = IntTuple(batch_size, dims, in_complex)
         comptime x_batch_layout = Layout.row_major(x_tuple.flatten())
-        var x_batch = LayoutTensor[in_dtype, x_batch_layout, x.origin](
-            x.ptr + x.stride[0]() * offset
-        )
+        var x_batch = LayoutTensor[
+            in_dtype, x_batch_layout, x.origin, address_space = x.address_space
+        ](x.ptr + x.stride[0]() * offset)
 
         fn index_fn() -> UInt:
             return block_dim.x * block_idx.x + thread_idx.x

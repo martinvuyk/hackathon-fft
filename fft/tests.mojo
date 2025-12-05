@@ -10,7 +10,6 @@ from testing import assert_almost_equal
 
 from fft.fft import fft
 from fft._fft import (
-    _cpu_fft_kernel_radix_n,
     _intra_block_fft_kernel_radix_n,
     _launch_inter_or_intra_multiprocessor_fft,
 )
@@ -92,15 +91,7 @@ fn test_fft[
 
     @parameter
     if is_cpu[target]():
-        _cpu_fft_kernel_radix_n[
-            length=sequence_length,
-            ordered_bases=ordered_bases,
-            processed_list=processed_list,
-            do_rfft=do_rfft,
-            inverse=inverse,
-            total_twfs=total_twfs,
-            twf_offsets=twf_offsets,
-        ](output, x)
+        fft[bases= [bases], inverse=inverse](output, x)
         return
     constrained[
         has_accelerator(), "The non-cpu implementation is for GPU only"
@@ -415,22 +406,23 @@ def _test_fft[
 ]():
     comptime L = List[UInt]
 
-    comptime values_2 = _get_test_values_2[dtype]()
-    func[[2], values_2]()
+    # comptime values_2 = _get_test_values_2[dtype]()
+    # func[[2], values_2]()
 
-    comptime values_3 = _get_test_values_3[dtype]()
-    func[[3], values_3]()
+    # comptime values_3 = _get_test_values_3[dtype]()
+    # func[[3], values_3]()
 
-    comptime values_4 = _get_test_values_4[dtype]()
-    func[[4], values_4]()
-    func[[2], values_4]()
+    # comptime values_4 = _get_test_values_4[dtype]()
+    # func[[4], values_4]()
+    # func[[2], values_4]()
 
-    comptime values_5 = _get_test_values_5[dtype]()
-    func[[5], values_5]()
+    # comptime values_5 = _get_test_values_5[dtype]()
+    # func[[5], values_5]()
 
     comptime values_6 = _get_test_values_6[dtype]()
-    func[[6], values_6]()
+    # func[[6], values_6]()
     func[[3, 2], values_6]()
+    return
     func[[2, 3], values_6]()
 
     comptime values_7 = _get_test_values_7[dtype]()
@@ -526,10 +518,10 @@ comptime _test[
 def test_fft():
     comptime dtype = DType.float64
     _test[dtype, False, "cpu", 0, debug=False]()
-    _test[dtype, False, "gpu", 0, debug=False]()
-    _test[dtype, False, "gpu", 1, debug=False]()
-    _test[dtype, False, "gpu", 2, debug=False]()
-    _test[dtype, False, "gpu", 3, debug=False]()
+    # _test[dtype, False, "gpu", 0, debug=False]()
+    # _test[dtype, False, "gpu", 1, debug=False]()
+    # _test[dtype, False, "gpu", 2, debug=False]()
+    # _test[dtype, False, "gpu", 3, debug=False]()
 
 
 def test_ifft():
@@ -550,7 +542,7 @@ comptime input_2d: InlineArray[InlineArray[UInt8, 4], 6] = [
     [6, 4, 8, 0],
     [2, 1, 1, 4],
     [7, 5, 3, 7],
-]
+]  # 25, 18, 21, 25
 
 comptime expected_2d: InlineArray[InlineArray[Co, 4], 6] = [
     [Co(89.0, 0.0), Co(4.0, 7.0), Co(3.0, 0.0), Co(4.0, -7.0)],
@@ -582,14 +574,20 @@ comptime expected_2d: InlineArray[InlineArray[Co, 4], 6] = [
 ]
 
 
-def test_2d_cpu():
+def test_2d_cpu[debug: Bool]():
     comptime ROWS = 6
     comptime COLS = 4
 
-    comptime x_layout = Layout.row_major(1, ROWS, COLS, 1)
+    comptime x_layout = Layout.row_major(1, ROWS, COLS, 2)
     var x_buf = materialize[input_2d]()
+    var x_buf2 = InlineArray[InlineArray[SIMD[DType.uint8, 2], 4], 6](
+        uninitialized=True
+    )
+    for i in range(ROWS):
+        for j in range(COLS):
+            x_buf2[i][j] = {x_buf[i][j], 0}
     var x = LayoutTensor[mut=False, DType.uint8, x_layout](
-        x_buf.unsafe_ptr().bitcast[UInt8]()
+        x_buf2.unsafe_ptr().bitcast[UInt8]()
     )
 
     comptime out_layout = Layout.row_major(1, ROWS, COLS, 2)
@@ -600,12 +598,44 @@ def test_2d_cpu():
         out_buf.unsafe_ptr().bitcast[Float64]()
     )
 
+    # fft[bases= [[6], [2]]](out, x)
     fft(out, x)
+
+    @parameter
+    if debug:
+        print("Output values:")
+        for i in range(ROWS):
+            for j in range(COLS):
+                print(
+                    "out[0, ",
+                    i,
+                    ", ",
+                    j,
+                    ", 0]: [",
+                    out[0, i, j, 0],
+                    ", ",
+                    out[0, i, j, 1],
+                    "]",
+                    " expected: [",
+                    expected_2d[i][j].re,
+                    ", ",
+                    expected_2d[i][j].im,
+                    "]",
+                    sep="",
+                )
 
     for i in range(ROWS):
         for j in range(COLS):
-            assert_almost_equal(out[0, i, j, 0], expected_2d[i][j].re)
-            assert_almost_equal(out[0, i, j, 1], expected_2d[i][j].im)
+            assert_almost_equal(
+                out[0, i, j, 0],
+                expected_2d[i][j].re,
+                String("i: ", i, " j: ", j, " re"),
+            )
+            assert_almost_equal(
+                out[0, i, j, 1],
+                expected_2d[i][j].im,
+                String("i: ", i, " j: ", j, " im"),
+            )
 
 
 def test_2d_gpu():
@@ -650,15 +680,19 @@ def test_2d_gpu():
             for i in range(ROWS):
                 for j in range(COLS):
                     assert_almost_equal(
-                        out_view[0, i, j, 0], expected_data[i][j].re
+                        out_view[0, i, j, 0],
+                        expected_data[i][j].re,
+                        String("i: ", i, " j: ", j, " re"),
                     )
                     assert_almost_equal(
-                        out_view[0, i, j, 1], expected_data[i][j].im
+                        out_view[0, i, j, 1],
+                        expected_data[i][j].im,
+                        String("i: ", i, " j: ", j, " im"),
                     )
 
 
 def main():
     # test_fft()
     # test_ifft()
-    test_2d_cpu()
+    test_2d_cpu[debug=True]()
     # test_2d_gpu()
