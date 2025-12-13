@@ -1,7 +1,7 @@
-from complex import ComplexSIMD
+from complex import ComplexScalar
 
-alias _TestValues[complex_dtype: DType] = List[
-    Tuple[List[Int], List[ComplexSIMD[complex_dtype, 1]]]
+comptime _TestValues[complex_dtype: DType] = List[
+    Tuple[List[Int], List[ComplexScalar[complex_dtype]]]
 ]
 
 
@@ -13,14 +13,14 @@ fn _get_test_values_2[
     Notes:
         These values are only for testing against series with length 2.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     res = [
-        (List(0, 0), List(Complex(0), Complex(0))),
-        (List(1, 0), List(Complex(1), Complex(1))),
-        (List(1, -1), List(Complex(0), Complex(2))),
-        (List(18, 7), List(Complex(25, 0), Complex(11, 0))),
-        (List(4, 8), List(Complex(12, 0), Complex(-4, 0))),
-        (List(5, 4), List(Complex(9, 0), Complex(1, 0))),
+        {[0, 0], [Complex(0), Complex(0)]},
+        {[1, 0], [Complex(1), Complex(1)]},
+        {[1, -1], [Complex(0), Complex(2)]},
+        {[18, 7], [Complex(25, 0), Complex(11, 0)]},
+        {[4, 8], [Complex(12, 0), Complex(-4, 0)]},
+        {[5, 4], [Complex(9, 0), Complex(1, 0)]},
     ]
 
 
@@ -32,29 +32,29 @@ fn _get_test_values_3[
     Notes:
         These values are only for testing against series with length 3.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     res = [
-        (List(0, 0, 0), List(Complex(0), Complex(0), Complex(0))),
-        (
-            List(1, 0, 1),
-            List(Complex(2), Complex(0.5, 0.866), Complex(0.5, -0.866)),
-        ),
-        (
-            List(1, -1, 1),
-            List(Complex(1), Complex(1, 1.732), Complex(1, -1.732)),
-        ),
-        (
-            List(18, 7, 29),
-            List(Complex(54, 0), Complex(0, 19.053), Complex(0, -19.053)),
-        ),
-        (
-            List(4, 8, 15),
-            List(Complex(27, 0), Complex(-7.5, 6.062), Complex(-7.5, -6.062)),
-        ),
-        (
-            List(5, 4, 3),
-            List(Complex(12, 0), Complex(1.5, -0.866), Complex(1.5, 0.866)),
-        ),
+        {[0, 0, 0], [Complex(0), Complex(0), Complex(0)]},
+        {
+            [1, 0, 1],
+            [Complex(2), Complex(0.5, 0.866), Complex(0.5, -0.866)],
+        },
+        {
+            [1, -1, 1],
+            [Complex(1), Complex(1, 1.732), Complex(1, -1.732)],
+        },
+        {
+            [18, 7, 29],
+            [Complex(54, 0), Complex(0, 19.053), Complex(0, -19.053)],
+        },
+        {
+            [4, 8, 15],
+            [Complex(27, 0), Complex(-7.5, 6.062), Complex(-7.5, -6.062)],
+        },
+        {
+            [5, 4, 3],
+            [Complex(12, 0), Complex(1.5, -0.866), Complex(1.5, 0.866)],
+        },
     ]
 
 
@@ -66,40 +66,40 @@ fn _get_test_values_4[
     Notes:
         These values are only for testing against series with length 4.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(0, 0, 0, 0),
-            List(Complex(0), Complex(0), Complex(0), Complex(0)),
-        ),
-        (
-            List(1, 0, 1, 0),
-            List(Complex(2), Complex(0), Complex(2), Complex(0)),
-        ),
-        (
-            List(1, -1, 1, -1),
-            List(Complex(0), Complex(0), Complex(4), Complex(0)),
-        ),
-        (
-            List(18, 7, 29, 27),
-            List(
+        {
+            [0, 0, 0, 0],
+            [Complex(0), Complex(0), Complex(0), Complex(0)],
+        },
+        {
+            [1, 0, 1, 0],
+            [Complex(2), Complex(0), Complex(2), Complex(0)],
+        },
+        {
+            [1, -1, 1, -1],
+            [Complex(0), Complex(0), Complex(4), Complex(0)],
+        },
+        {
+            [18, 7, 29, 27],
+            [
                 Complex(81, 0), Complex(-11, 20), Complex(13, 0),
                 Complex(-11, -20),
-            ),
-        ),
-        (
-            List(4, 8, 15, 16),
-            List(
+            ],
+        },
+        {
+            [4, 8, 15, 16],
+            [
                 Complex(43, 0), Complex(-11, 8), Complex(-5, 0),
-                Complex(-11, -8),
-            ),
-        ),
-        (
-            List(5, 4, 3, 2),
-            List(Complex(14, 0), Complex(2, -2), Complex(2, 0), Complex(2, 2)),
-        ),
-    ]
+                Complex(-11, -8)
+            ],
+        },
+        {
+            [5, 4, 3, 2],
+            [Complex(14, 0), Complex(2, -2), Complex(2, 0), Complex(2, 2)],
+        },
+    ] 
     # fmt: on
 
 
@@ -111,44 +111,44 @@ fn _get_test_values_5[
     Notes:
         These values are only for testing against series with length 5.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(0, 0, 0, 0, 0),
-            List(
+        {
+            [0, 0, 0, 0, 0],
+            [
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(1, 0, 1, 0, 1),
-            List(
+            ],
+        },
+        {
+            [1, 0, 1, 0, 1],
+            [
                 Complex(3), Complex(0.5, 0.363), Complex(0.5, 1.539),
                 Complex(0.5, -1.539), Complex(0.5, -0.363),
-            ),
-        ),
-        (
-            List(18, 7, 29, 27, 42),
-            List(
+            ],
+        },
+        {
+            [18, 7, 29, 27, 42],
+            [
                 Complex(123, 0), Complex(-12.163, 32.111),
                 Complex(-4.337, 22.475), Complex(-4.337, -22.475),
                 Complex(-12.163, -32.111),
-            ),
-        ),
-        (
-            List(4, 8, 15, 16, 23),
-            List(
+            ],
+        },
+        {
+            [4, 8, 15, 16, 23],
+            [
                 Complex(66, 0), Complex(-11.5, 14.854), Complex(-11.5, 7.866),
                 Complex(-11.5, -7.866), Complex(-11.5, -14.854),
-            ),
-        ),
-        (
-            List(1, -1, 1, -1, 5),
-            List(
+            ],
+        },
+        {
+            [1, -1, 1, -1, 5],
+            [
                 Complex(5, 0), Complex(2.236, 4.531), Complex(-2.236, 5.429),
                 Complex(-2.236, -5.429), Complex(2.236, -4.531),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -161,44 +161,44 @@ fn _get_test_values_6[
     Notes:
         These values are only for testing against series with length 6.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(0, 0, 0, 0, 0, 0),
-            List(
+        {
+            [0, 0, 0, 0, 0, 0],
+            [
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0),
-            ),
-        ),
-        (
-            List(1, 0, 1, 0, 1, 0),
-            List(
+            ],
+        },
+        {
+            [1, 0, 1, 0, 1, 0],
+            [
                 Complex(3), Complex(0), Complex(0),
                 Complex(3), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(18, 7, 29, 27, 42, 34),
-            List(
+            ],
+        },
+        {
+            [18, 7, 29, 27, 42, 34],
+            [
                 Complex(157, 0), Complex(-24, 34.641), Complex(-11, 12.124),
                 Complex(21, 0), Complex(-11, -12.124), Complex(-24, -34.641),
-            ),
-        ),
-        (
-            List(4, 8, 15, 16, 23, 42),
-            List(
+            ],
+        },
+        {
+            [4, 8, 15, 16, 23, 42],
+            [
                 Complex(108, 0), Complex(-6, 36.373), Complex(-24, 22.517),
                 Complex(-24, 0), Complex(-24, -22.517), Complex(-6, -36.373),
-            ),
-        ),
-        (
-            List(1, -1, 1, -1, 5, 4),
-            List(
+            ],
+        },
+        {
+            [1, -1, 1, -1, 5, 4],
+            [
                 Complex(9, 0), Complex(0.5, 7.794), Complex(-4.5, 0.866),
                 Complex(5, 0), Complex(-4.5, -0.866), Complex(0.5, -7.794),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -211,50 +211,50 @@ fn _get_test_values_7[
     Notes:
         These values are only for testing against series with length 7.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(0, 0, 0, 0, 0, 0, 0),
-            List(
+        {
+            [0, 0, 0, 0, 0, 0, 0],
+            [
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(1, 0, 1, 0, 1, 0, 1),
-            List(
+            ],
+        },
+        {
+            [1, 0, 1, 0, 1, 0, 1],
+            [
                 Complex(4), Complex(0.5, 0.241), Complex(0.5, 0.627),
                 Complex(0.5, 2.191), Complex(0.5, -2.191), Complex(0.5, -0.627),
                 Complex(0.5, -0.241),
-            ),
-        ),
-        (
-            List(18, 7, 29, 27, 42, 34, 11),
-            List(
+            ],
+        },
+        {
+            [18, 7, 29, 27, 42, 34, 11],
+            [
                 Complex(168, 0), Complex(-46.963, 14.51),
                 Complex(0.254, -9.997), Complex(25.708, 12.45),
                 Complex(25.708, -12.45), Complex(0.254, 9.997),
                 Complex(-46.963, -14.51),
-            ),
-        ),
-        (
-            List(4, 8, 15, 16, 23, 42, 0),
-            List(
+            ],
+        },
+        {
+            [4, 8, 15, 16, 23, 42, 0],
+            [
                 Complex(108, 0), Complex(-38.834, 23.106),
                 Complex(-24.819, -24.987), Complex(23.653, -17.756),
                 Complex(23.653, 17.756), Complex(-24.819, 24.987),
                 Complex(-38.834, -23.106),
-            ),
-        ),
-        (
-            List(1, -1, 1, -1, 5, 4, 3),
-            List(
+            ],
+        },
+        {
+            [1, -1, 1, -1, 5, 4, 3],
+            [
                 Complex(12, 0), Complex(-2.47, 8.655), Complex(-1.456, -2.093),
                 Complex(1.425, 5.24), Complex(1.425, -5.24),
                 Complex(-1.456, 2.093), Complex(-2.47, -8.655),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -267,49 +267,49 @@ fn _get_test_values_8[
     Notes:
         These values are only for testing against series with length 8.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(0, 0, 0, 0, 0, 0, 0, 0),
-            List(
+        {
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            [
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0),
-            List(
+            ],
+        },
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0],
+            [
                 Complex(4), Complex(0), Complex(0), Complex(0),
                 Complex(4), Complex(0), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(18, 7, 29, 27, 42, 34, 11, 10),
-            List(
+            ],
+        },
+        {
+            [18, 7, 29, 27, 42, 34, 11, 10],
+            [
                 Complex(178, 0), Complex(-55.113, -10.929),
                 Complex(20, -4), Complex(7.113, 25.071), Complex(22, 0),
                 Complex(7.113, -25.071), Complex(20, 4),
                 Complex(-55.113, 10.929),
-            ),
-        ),
-        (
-            List(4, 8, 15, 16, 23, 42, 0, 0),
-            List(
+            ],
+        },
+        {
+            [4, 8, 15, 16, 23, 42, 0, 0],
+            [
                 Complex(108, 0), Complex(-54.355, -2.272), Complex(12, -34),
                 Complex(16.355, 27.728), Complex(-24, 0),
                 Complex(16.355, -27.728), Complex(12, 34),
                 Complex(-54.355, 2.272),
-            ),
-        ),
-        (
-            List(1, -1, 1, -1, 5, 4, 3, 2),
-            List(
+            ],
+        },
+        {
+            [1, -1, 1, -1, 5, 4, 3, 2],
+            [
                 Complex(14, 0), Complex(-5.414, 7.657), Complex(2, -2),
                 Complex(-2.586, 3.657), Complex(6, 0), Complex(-2.586, -3.657),
                 Complex(2, 2), Complex(-5.414, -7.657),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -322,53 +322,53 @@ fn _get_test_values_10[
     Notes:
         These values are only for testing against series with length 10.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-            List(
+        {
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0, 1, 0),
-            List(
+            ],
+        },
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+            [
                 Complex(5), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(5), Complex(0), Complex(0), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(18, 7, 29, 27, 42, 34, 11, 10, 21, 17),
-            List(
+            ],
+        },
+        {
+            [18, 7, 29, 27, 42, 34, 11, 10, 21, 17],
+            [
                 Complex(216, 0), Complex(-35.444, -36.12),
                 Complex(5.41, 44.283), Complex(-17.556, -5.278),
                 Complex(16.59, 15.54), Complex(26, 0),
                 Complex(16.59, -15.54), Complex(-17.556, 5.278),
                 Complex(5.41, -44.283), Complex(-35.444, 36.12),
-            ),
-        ),
-        (
-            List(4, 8, 15, 16, 23, 42, 0, 0, 0, 0),
-            List(
+            ],
+        },
+        {
+            [4, 8, 15, 16, 23, 42, 0, 0, 0, 0],
+            [
                 Complex(108, 0), Complex(-50.444, -47.704),
                 Complex(30.5, 14.854), Complex(-32.556, -11.261),
                 Complex(30.5, 7.866), Complex(-24, 0),
                 Complex(30.5, -7.866), Complex(-32.556, 11.261),
                 Complex(30.5, -14.854), Complex(-50.444, 47.704),
-            ),
-        ),
-        (
-            List(1, -1, 1, -1, 5, 4, 3, 2, 1, 1),
-            List(
+            ],
+        },
+        {
+            [1, -1, 1, -1, 5, 4, 3, 2, 1, 1],
+            [
                 Complex(16, 0), Complex(-9.163, 2.853), Complex(5.045, 2.041),
                 Complex(-1.337, -1.763), Complex(-0.545, 5.204),
                 Complex(6, 0), Complex(-0.545, -5.204),
                 Complex(-1.337, 1.763), Complex(5.045, -2.041),
                 Complex(-9.163, -2.853),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -381,21 +381,21 @@ fn _get_test_values_16[
     Notes:
         These values are only for testing against series with length 16.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0),
-            List(
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+            [
                 Complex(8), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0),
                 Complex(8), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(18, 7, 29, 27, 42, 34, 11, 10, 12, 15, 13, 22, 26, 31, 19, 21),
-            List(
+            ],
+        },
+        {
+            [18, 7, 29, 27, 42, 34, 11, 10, 12, 15, 13, 22, 26, 31, 19, 21],
+            [
                 Complex(337, 0), Complex(26.508, -21.777),
                 Complex(-81.134, 5.678), Complex(-11.67, 30.958),
                 Complex(26, -7), Complex(-10.271, 10.272),
@@ -404,8 +404,8 @@ fn _get_test_values_16[
                 Complex(-10.271, -10.272), Complex(26, 7),
                 Complex(-11.67, -30.958), Complex(-81.134, -5.678),
                 Complex(26.508, 21.777),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -418,23 +418,23 @@ fn _get_test_values_20[
     Notes:
         These values are only for testing against series with length 20.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
-            1, 0, 1, 0),
-            List(
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+            1, 0, 1, 0],
+            [
                 Complex(10), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(10), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
-            1, 22, 48, 15),
-            List(
+            ],
+        },
+        {
+            [13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
+            1, 22, 48, 15],
+            [
                 Complex(811, 0), Complex(-62.611, 52.731),
                 Complex(-187.325, -170.06), Complex(173.006, 63.944),
                 Complex(-87.728, -10.045), Complex(-152, 9),
@@ -445,8 +445,8 @@ fn _get_test_values_20[
                 Complex(-10.675, -45.958), Complex(-152, -9),
                 Complex(-87.728, 10.045), Complex(173.006, -63.944),
                 Complex(-187.325, 170.06), Complex(-62.611, -52.731),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -459,13 +459,13 @@ fn _get_test_values_32[
     Notes:
         These values are only for testing against series with length 32.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 
-            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0),
-            List(
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 
+            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+            [
                 Complex(16), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
@@ -474,12 +474,12 @@ fn _get_test_values_32[
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0),
-            ),
-        ),
-        (
-            List(18, 7, 29, 27, 42, 34, 11, 10, 12, 15, 13, 22, 26, 31, 19, 21,
-            25, 50, 64, 71, 45, 88, 91, 38, 27, 31, 90, 41, 99, 112, 76, 51),
-            List(
+            ],
+        },
+        {
+            [18, 7, 29, 27, 42, 34, 11, 10, 12, 15, 13, 22, 26, 31, 19, 21,
+            25, 50, 64, 71, 45, 88, 91, 38, 27, 31, 90, 41, 99, 112, 76, 51],
+            [
                 Complex(1336, 0), Complex(57.903, 436.536),
                 Complex(45.745, 32.162), Complex(-22.34, 204.468),
                 Complex(-273.543, 86.56), Complex(-128.005, 24.107),
@@ -496,8 +496,8 @@ fn _get_test_values_32[
                 Complex(-22.323, 18.511), Complex(-128.005, -24.107),
                 Complex(-273.543, -86.56), Complex(-22.34, -204.468),
                 Complex(45.745, -32.162), Complex(57.903, -436.536),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -510,13 +510,13 @@ fn _get_test_values_21[
     Notes:
         These values are only for testing against series with length 21.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
-            1, 0, 1, 0, 1),
-            List(
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+            1, 0, 1, 0, 1],
+            [
                 Complex(11, 0), Complex(0.5, 0.075), Complex(0.5, 0.154),
                 Complex(0.5, 0.241), Complex(0.5, 0.341), Complex(0.5, 0.464),
                 Complex(0.5, 0.627), Complex(0.5, 0.866), Complex(0.5, 1.274),
@@ -526,12 +526,12 @@ fn _get_test_values_21[
                 Complex(0.5, -0.464), Complex(0.5, -0.341),
                 Complex(0.5, -0.241), Complex(0.5, -0.154),
                 Complex(0.5, -0.075),
-            ),
-        ),
-        (
-            List(13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
-            1, 22, 48, 15, 63),
-            List(
+            ],
+        },
+        {
+            [13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
+            1, 22, 48, 15, 63],
+            [
                 Complex(874, 0), Complex(-50.819, 45.598),
                 Complex(-92.208, -190.546), Complex(142.842, 183.809),
                 Complex(-88.629, -41.252), Complex(-98.965, -32.472),
@@ -543,8 +543,8 @@ fn _get_test_values_21[
                 Complex(-98.965, 32.472), Complex(-88.629, 41.252),
                 Complex(142.842, -183.809), Complex(-92.208, 190.546),
                 Complex(-50.819, -45.598),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -557,25 +557,25 @@ fn _get_test_values_30[
     Notes:
         These values are only for testing against series with length 30.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
-            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0),
-            List(
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+            [
                 Complex(15, 0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(15, 0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
-            1, 22, 48, 15, 63, 49, 71, 16, 74, 61, 91, 79, 12, 100),
-            List(
+            ],
+        },
+        {
+            [13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
+            1, 22, 48, 15, 63, 49, 71, 16, 74, 61, 91, 79, 12, 100],
+            [
                 Complex(1427, 0), Complex(39.788, 109.878),
                 Complex(52.927, 137.741), Complex(-201.977, -126.286),
                 Complex(-50.673, 274.824), Complex(57.5, -172.339),
@@ -591,8 +591,8 @@ fn _get_test_values_30[
                 Complex(-10.702, 49.419), Complex(57.5, 172.339),
                 Complex(-50.673, -274.824), Complex(-201.977, 126.286),
                 Complex(52.927, -137.741), Complex(39.788, -109.878),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -605,14 +605,14 @@ fn _get_test_values_35[
     Notes:
         These values are only for testing against series with length 35.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
-            1, 0, 1),
-            List(
+            1, 0, 1],
+            [
                 Complex(18, 0), Complex(0.5, 0.045), Complex(0.5, 0.091),
                 Complex(0.5, 0.138), Complex(0.5, 0.188), Complex(0.5, 0.241),
                 Complex(0.5, 0.299), Complex(0.5, 0.363), Complex(0.5, 0.437),
@@ -627,13 +627,13 @@ fn _get_test_values_35[
                 Complex(0.5, -0.299), Complex(0.5, -0.241),
                 Complex(0.5, -0.188), Complex(0.5, -0.138),
                 Complex(0.5, -0.091), Complex(0.5, -0.045),
-            ),
-        ),
-        (
-            List(13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
+            ],
+        },
+        {
+            [13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
             1, 22, 48, 15, 63, 49, 71, 16, 74, 61, 91, 79, 12, 100, 92, 6,
-            21, 72, 45),
-            List(
+            21, 72, 45],
+            [
                 Complex(1663, 0), Complex(-46.097, 158.832),
                 Complex(-123.731, 71.088), Complex(26.612, -225.737),
                 Complex(-234.899, 20.137), Complex(181.511, 201.552),
@@ -652,8 +652,8 @@ fn _get_test_values_35[
                 Complex(181.511, -201.552), Complex(-234.899, -20.137),
                 Complex(26.612, 225.737), Complex(-123.731, -71.088),
                 Complex(-46.097, -158.832),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -666,14 +666,14 @@ fn _get_test_values_48[
     Notes:
         These values are only for testing against series with length 48.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
-            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0),
-            List(
+            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+            [
                 Complex(24, 0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
@@ -684,13 +684,13 @@ fn _get_test_values_48[
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
+            ],
+        },
+        {
+            [13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
             1, 22, 48, 15, 63, 49, 71, 16, 74, 61, 91, 79, 12, 100, 92, 6,
-            21, 72, 45, 30, 62, 97, 23, 60, 8, 9, 86, 53, 75, 70, 25, 50),
-            List(
+            21, 72, 45, 30, 62, 97, 23, 60, 8, 9, 86, 53, 75, 70, 25, 50],
+            [
                 Complex(2311, 0), Complex(-155.238, 103.773),
                 Complex(55.286, -12.729), Complex(-25.88, 168.922),
                 Complex(100.861, -141.055), Complex(-264.564, 35.071),
@@ -715,8 +715,8 @@ fn _get_test_values_48[
                 Complex(-370.685, -214.484), Complex(-264.564, -35.071),
                 Complex(100.861, 141.055), Complex(-25.88, -168.922),
                 Complex(55.286, 12.729), Complex(-155.238, -103.773),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -729,15 +729,15 @@ fn _get_test_values_60[
     Notes:
         These values are only for testing against series with length 60.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
-            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0),
-            List(
+            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+            [
                 Complex(30, 0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
@@ -750,14 +750,14 @@ fn _get_test_values_60[
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
+            ],
+        },
+        {
+            [13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
             1, 22, 48, 15, 63, 49, 71, 16, 74, 61, 91, 79, 12, 100, 92, 6,
             21, 72, 45, 30, 62, 97, 23, 60, 8, 9, 86, 53, 75, 70, 25, 50,
-            20, 96, 27, 83, 88, 76, 82, 42, 89, 69, 94, 38),
-            List(
+            20, 96, 27, 83, 88, 76, 82, 42, 89, 69, 94, 38],
+            [
                 Complex(3115, 0), Complex(-6.356, 162.764),
                 Complex(90.985, 302.903), Complex(-132.771, 100.985),
                 Complex(-19.789, 219.018), Complex(24.717, -142.165),
@@ -788,8 +788,8 @@ fn _get_test_values_60[
                 Complex(-312.819, 126.037), Complex(24.717, 142.165),
                 Complex(-19.789, -219.018), Complex(-132.771, -100.985),
                 Complex(90.985, -302.903), Complex(-6.356, -162.764),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -802,15 +802,15 @@ fn _get_test_values_64[
     Notes:
         These values are only for testing against series with length 64.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
-            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0),
-            List(
+            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+            [
                 Complex(32, 0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
@@ -825,14 +825,14 @@ fn _get_test_values_64[
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
+            ],
+        },
+        {
+            [13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
             1, 22, 48, 15, 63, 49, 71, 16, 74, 61, 91, 79, 12, 100, 92, 6,
             21, 72, 45, 30, 62, 97, 23, 60, 8, 9, 86, 53, 75, 70, 25, 50,
-            20, 96, 27, 83, 88, 76, 82, 42, 89, 69, 94, 38, 33, 35, 17, 14),
-            List(
+            20, 96, 27, 83, 88, 76, 82, 42, 89, 69, 94, 38, 33, 35, 17, 14],
+            [
                 Complex(3214, 0), Complex(-152.807, 180.606),
                 Complex(-160.637, 287.126), Complex(-267.159, -80.776),
                 Complex(-187.611, 14.835), Complex(97.545, -225.69),
@@ -865,8 +865,8 @@ fn _get_test_values_64[
                 Complex(-124.89, 349.256), Complex(97.545, 225.69),
                 Complex(-187.611, -14.835), Complex(-267.159, 80.776),
                 Complex(-160.637, -287.126), Complex(-152.807, -180.606),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -879,18 +879,18 @@ fn _get_test_values_100[
     Notes:
         These values are only for testing against series with length 100.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
-            1, 0, 1, 0),
-            List(
+            1, 0, 1, 0],
+            [
                 Complex(50, 0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
@@ -911,17 +911,17 @@ fn _get_test_values_100[
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
+            ],
+        },
+        {
+            [13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
             1, 22, 48, 15, 63, 49, 71, 16, 74, 61, 91, 79, 12, 100, 92, 6,
             21, 72, 45, 30, 62, 97, 23, 60, 8, 9, 86, 53, 75, 70, 25, 50,
             20, 96, 27, 83, 88, 76, 82, 42, 89, 69, 94, 38, 33, 35, 17, 14,
             26, 67, 99, 32, 95, 44, 64, 36, 66, 57, 37, 93, 19, 81, 54, 7,
             59, 3, 58, 34, 46, 77, 80, 47, 18, 85, 68, 84, 65, 5, 39, 4,
-            52, 56, 55, 24),
-            List(
+            52, 56, 55, 24],
+            [
                 Complex(5050.0, 0.0), Complex(-342.554, 42.072),
                 Complex(-89.905, 24.461), Complex(-190.032, 206.142),
                 Complex(138.232, -37.501), Complex(-401.25, 38.945),
@@ -972,8 +972,8 @@ fn _get_test_values_100[
                 Complex(-65.928, 286.365), Complex(-401.25, -38.945),
                 Complex(138.232, 37.501), Complex(-190.032, -206.142),
                 Complex(-89.905, -24.461), Complex(-342.554, -42.072),
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on
 
@@ -986,19 +986,19 @@ fn _get_test_values_128[
     Notes:
         These values are only for testing against series with length 128.
     """
-    alias Complex = ComplexSIMD[complex_dtype, 1]
+    comptime Complex = ComplexScalar[complex_dtype]
     # fmt: off
     res = [
-        (
-            List(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+        {
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
             1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
-            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0),
-            List(
+            1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+            [
                 Complex(64, 0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
@@ -1025,18 +1025,18 @@ fn _get_test_values_128[
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0), Complex(0),
                 Complex(0), Complex(0), Complex(0), Complex(0),
-            ),
-        ),
-        (
-            List(13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
+            ],
+        },
+        {
+            [13, 31, 51, 43, 41, 28, 98, 40, 10, 2, 29, 11, 87, 90, 78, 73,
             1, 22, 48, 15, 63, 49, 71, 16, 74, 61, 91, 79, 12, 100, 92, 6,
             21, 72, 45, 30, 62, 97, 23, 60, 8, 9, 86, 53, 75, 70, 25, 50,
             20, 96, 27, 83, 88, 76, 82, 42, 89, 69, 94, 38, 33, 35, 17, 14,
             26, 67, 99, 32, 95, 44, 64, 36, 66, 57, 37, 93, 19, 81, 54, 7,
             59, 3, 58, 34, 46, 77, 80, 47, 18, 85, 68, 84, 65, 5, 39, 4,
             52, 56, 55, 24, 80, 100, 91, 31, 79, 56, 41, 1, 87, 68, 81, 83,
-            55, 98, 69, 82, 25, 43, 66, 86, 8, 84, 2, 34, 65, 73, 57, 29),
-            List(
+            55, 98, 69, 82, 25, 43, 66, 86, 8, 84, 2, 34, 65, 73, 57, 29],
+            [
                 Complex(6724.0, 0.0), Complex(-156.29818818, 100.55380564),
                 Complex(-154.46186294, 358.35832448), Complex(-316.70533589, 68.87259552),
                 Complex(-235.36501962, 168.72629575), Complex(153.36419219, -92.41119721),
@@ -1101,7 +1101,7 @@ fn _get_test_values_128[
                 Complex(-167.97031692, 297.19454317), Complex(153.36419219, 92.41119721),
                 Complex(-235.36501962, -168.72629575), Complex(-316.70533589, -68.87259552),
                 Complex(-154.46186294, -358.35832448), Complex(-156.29818818, -100.55380564)
-            ),
-        ),
+            ],
+        },
     ]
     # fmt: on

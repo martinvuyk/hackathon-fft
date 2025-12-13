@@ -19,6 +19,8 @@ from ._utils import (
     _get_ordered_bases_processed_list,
     _max,
     _min,
+    _product_of_dims,
+    _get_cascade_idxes,
 )
 from ._fft import (
     _radix_n_fft_kernel,
@@ -48,8 +50,10 @@ fn _fft_gpu_device_wide[
 ) raises:
     comptime rank = out_layout.rank()
     comptime dims = out_layout.shape[1 : rank - 1]
+    comptime prod = _product_of_dims(dims)
+    comptime last_dim_idx = len(dims) - 1
+
     comptime amnt_dims = len(bases)
-    comptime prod = dims.product_flatten().value()
     comptime batches = out_layout.shape[0].value()
     comptime x_complex_in = in_layout.shape[rank - 1].value()
 
@@ -166,7 +170,7 @@ fn _fft_gpu_device_wide[
             base = ordered_bases[b],
             ordered_bases=ordered_bases,
             processed = processed_list[b],
-            do_rfft = dim_idx == 0 and x_complex_in == 1,
+            do_rfft = dim_idx == last_dim_idx and x_complex_in == 1,
             inverse=inverse,
             twf_offset = absolute_offsets[dim_idx][b],
         ]
@@ -181,47 +185,74 @@ fn _fft_gpu_device_wide[
                 block_dim=block_threads,
             )
 
+    # When running ffts on multiple dimensions, we need to copy the output of
+    # each dimension into an intermediate buffer for reordering
+    var inter_layer_buf: DeviceBuffer[out_dtype]
+    comptime batch_t = LayoutTensor[
+        out_dtype, Layout.row_major(output.layout.shape[1:]), address_space=_
+    ]
+
     @parameter
-    for idx, dim_tuple in enumerate(dims):
-        comptime dim = dim_tuple.value()
+    if len(dims) == 1:
+        inter_layer_buf = {handle = {}, device_ptr = {}}
+    else:
+        inter_layer_buf = ctx.enqueue_create_buffer[out_dtype](
+            batch_t.layout.size()
+        )
+
+    @parameter
+    fn _run_batch(block_num: Int) raises:
+        var block_offset = output.stride[0]() * block_num
+        var base_out = batch_t(output.ptr + block_offset)
+        var base_inter_out = batch_t(
+            inter_layer_buf.unsafe_ptr() + block_offset
+        )
+        var base_x = LayoutTensor[
+            in_dtype,
+            Layout.row_major(x.layout.shape[1:]),
+            address_space=_,
+        ](x.ptr + x.stride[0]() * block_num)
 
         @parameter
-        if dim == 1:
-            continue
-
-        comptime batch_prod = prod // dim
-
-        @parameter
-        for j in range(batch_prod):
-            var reshaped_out = output.reshape[
-                Layout.row_major(batch_prod, dim, 2)
-            ]()
-            comptime dim_batch_out_layout = Layout.row_major(dim, 2)
-            var dim_batch_out = LayoutTensor[
-                out_dtype,
-                dim_batch_out_layout,
-                output.origin,
-                address_space = output.address_space,
-            ](reshaped_out.ptr + reshaped_out.stride[0]() * j)
+        for idx in reversed(range(len(dims))):
+            comptime dim_tuple = dims[idx]
+            comptime dim = dim_tuple.value()
+            comptime batch_prod = prod // dim
+            __comptime_assert dim != 1, "no inner dimension should be of size 1"
 
             @parameter
-            if idx != 0:
-                _run_1d_fft[idx](dim_batch_out, dim_batch_out.get_immutable())
-            else:
-                var reshaped_x = x.reshape[
-                    Layout.row_major(batch_prod, dim, x_complex_in)
-                ]()
-                comptime x_layout = Layout.row_major(dim, x_complex_in)
-                var dim_batch_x = LayoutTensor[
-                    in_dtype,
-                    x_layout,
-                    x.origin,
-                    address_space = x.address_space,
-                ](reshaped_x.ptr + reshaped_x.stride[0]() * j)
-                _run_1d_fft[0](dim_batch_out, dim_batch_x)
+            if idx != last_dim_idx:
+                base_inter_out.copy_from(base_out)
+
+            @parameter
+            for inner_batch_n in range(batch_prod):
+                comptime idxes = _get_cascade_idxes[
+                    output.layout.shape[1:], (idx, rank - 2)
+                ](inner_batch_n)
+                var dim_batch_out = base_out.slice[
+                    Slice(0, dim), Slice(0, 2), (idx, rank - 2)
+                ](idxes)
+
+                # We are running the ffts from right to left in the layout
+                @parameter
+                if idx == last_dim_idx:
+                    var dim_batch_x = base_x.slice[
+                        Slice(0, dim),
+                        Slice(0, x_complex_in),
+                        (idx, rank - 2),
+                    ](idxes)
+                    _run_1d_fft[idx](dim_batch_out, dim_batch_x)
+                else:
+                    var dim_batch_inter_out = base_inter_out.slice[
+                        Slice(0, dim), Slice(0, 2), (idx, rank - 2)
+                    ](idxes).get_immutable()
+                    _run_1d_fft[idx](dim_batch_out, dim_batch_inter_out)
+
+    for i in range(batches):
+        _run_batch(i)
 
 
-fn _run_intra_something_nd_fft[
+fn _run_intra_gpu_nd_fft[
     in_dtype: DType,
     out_dtype: DType,
     in_layout: Layout,
@@ -230,48 +261,53 @@ fn _run_intra_something_nd_fft[
     in_origin: ImmutOrigin,
     out_origin: MutOrigin,
     x_out_origin: MutOrigin,
+    shared_f_origin: MutOrigin,
     out_address_space: AddressSpace,
+    sharef_f_address_space: AddressSpace,
     *,
     inverse: Bool,
     bases: List[List[UInt]],
-    total_threads: UInt,  # not required for CPU
-    stage_sync_fn: fn (),  # not required for CPU
-    target: StaticString,
+    total_threads: UInt,
+    stage_sync_fn: fn (),
+    last_base: UInt,
 ](
     output: LayoutTensor[
         out_dtype, out_layout, out_origin, address_space=out_address_space
     ],
+    shared_f: LayoutTensor[
+        out_dtype,
+        out_layout,
+        shared_f_origin,
+        address_space=sharef_f_address_space,
+    ],
     x: LayoutTensor[in_dtype, in_layout, in_origin],
-    x_out: LayoutTensor[
-        out_dtype, x_out_layout, x_out_origin
-    ],  # not required for CPU
-    *,
-    local_i: UInt,  # not required for CPU
-    cpu_workers: Optional[UInt] = None,
+    x_out: LayoutTensor[out_dtype, x_out_layout, x_out_origin],
+    local_i: UInt,
 ):
     comptime rank = out_layout.rank()
     comptime dims = out_layout.shape[1 : rank - 1]
-    comptime prod = dims.product_flatten().value()
+    comptime prod = _product_of_dims(dims)
+    comptime last_dim_idx = len(dims) - 1
+
     comptime x_complex_in = in_layout.shape[rank - 1].value()
 
     @parameter
     fn _run_1d_fft[
-        out_dtype: DType,
         dtype_in: DType,
         layout_out: Layout,
+        out_origin: MutOrigin,
+        out_as: AddressSpace,
         layout_in: Layout,
-        layout_x_out: Layout,
         x_in_origin: ImmutOrigin,
-        x_in_address_space: AddressSpace, //,
+        x_in_as: AddressSpace, //,
         dim_idx: Int,
     ](
         shared_f: LayoutTensor[
-            out_dtype, layout_out, out_origin, address_space=out_address_space
+            out_dtype, layout_out, out_origin, address_space=out_as, **_
         ],
         x: LayoutTensor[
-            dtype_in, layout_in, x_in_origin, address_space=x_in_address_space
+            dtype_in, layout_in, x_in_origin, address_space=x_in_as, **_
         ],
-        x_out: LayoutTensor[out_dtype, layout_x_out, x_out.origin],
     ):
         comptime length = UInt(layout_in.shape[0].value())
         comptime bases_processed = _get_ordered_bases_processed_list[
@@ -309,139 +345,68 @@ fn _run_intra_something_nd_fft[
         )
 
         @parameter
-        if not is_cpu[target]():
+        for b in range(len(ordered_bases)):
+            comptime base = ordered_bases[b]
+            comptime processed = processed_list[b]
+            comptime amnt_threads = length // base
+            comptime func = _radix_n_fft_kernel[
+                do_rfft = dim_idx == last_dim_idx and x_complex_in == 1,
+                base=base,
+                length=length,
+                processed=processed,
+                inverse=inverse,
+                twf_offset = twf_offsets[b],
+                ordered_bases=ordered_bases,
+            ]
 
             @parameter
-            for b in range(len(ordered_bases)):
-                comptime base = ordered_bases[b]
-                comptime processed = processed_list[b]
-                comptime amnt_threads = length // base
-                comptime func = _radix_n_fft_kernel[
-                    do_rfft = dim_idx == 0 and x_complex_in == 1,
-                    base=base,
-                    length=length,
-                    processed=processed,
-                    inverse=inverse,
-                    twf_offset = twf_offsets[b],
-                    ordered_bases=ordered_bases,
-                ]
-
-                @parameter
-                if amnt_threads == total_threads:
+            if amnt_threads == total_threads:
+                func(shared_f, x, local_i, twfs, x_out)
+            else:
+                if local_i < amnt_threads:  # is execution thread
                     func(shared_f, x, local_i, twfs, x_out)
-                else:
-                    if local_i < amnt_threads:  # is execution thread
-                        func(shared_f, x, local_i, twfs, x_out)
 
-                stage_sync_fn()
-            return
-
-        @parameter
-        fn _inner_cpu_kernel(global_i: Int):
-            var block_num = UInt(global_i)
-            comptime block_out_layout = Layout.row_major(Int(length), 2)
-            var local_out = LayoutTensor[
-                mut=True,
-                out_dtype,
-                block_out_layout,
-                output.origin,
-                address_space = shared_f.address_space,
-            ](shared_f.ptr + shared_f.stride[0]() * Int(block_num))
-            comptime x_layout = Layout.row_major(Int(length), x_complex_in)
-            var local_x = LayoutTensor[
-                mut=False,
-                dtype_in,
-                x_layout,
-                x.origin,
-                address_space = x.address_space,
-            ](x.ptr + x.stride[0]() * Int(block_num))
-            comptime max_base = Int(ordered_bases[0])
-            var x_out_array = InlineArray[Scalar[out_dtype], max_base * 2](
-                uninitialized=True
-            )
-            var x_out = LayoutTensor[
-                mut=True, out_dtype, Layout.row_major(max_base, 2)
-            ](x_out_array.unsafe_ptr())
-
-            @parameter
-            for b in range(len(ordered_bases)):
-                comptime base = ordered_bases[b]
-                comptime processed = processed_list[b]
-                comptime func = _radix_n_fft_kernel[
-                    do_rfft = dim_idx == 0 and x_complex_in == 1,
-                    base=base,
-                    length=length,
-                    processed=processed,
-                    inverse=inverse,
-                    twf_offset = twf_offsets[b],
-                    ordered_bases=ordered_bases,
-                ]
-
-                fn _run[
-                    width: Int
-                ](local_i: Int) unified {
-                    mut local_out, read local_x, read twfs, mut x_out
-                }:
-                    func(local_out, local_x, UInt(local_i), twfs, x_out)
-
-                comptime width = simd_width_of[out_dtype]()
-                comptime size = Int(length // base)
-                comptime factor = size if size <= width else 1
-                vectorize[1, size=size, unroll_factor=factor](_run)
-
-        parallelize[func=_inner_cpu_kernel](
-            prod // dims[dim_idx].value(),
-            Int(cpu_workers.or_else(UInt(parallelism_level()))),
-        )
+            stage_sync_fn()
 
     @parameter
-    for idx, dim_tuple in enumerate(dims):
+    for idx in reversed(range(len(dims))):
+        comptime dim_tuple = dims[idx]
         comptime dim = dim_tuple.value()
-
-        @parameter
-        if dim == 1:
-            continue
-
         comptime batch_prod = prod // dim
+        __comptime_assert dim != 1, "no inner dimension should be of size 1"
 
         @parameter
-        for j in range(batch_prod):
-            var reshaped_out = output.reshape[
-                Layout.row_major(batch_prod, dim, 2)
-            ]()
-            comptime dim_batch_out_layout = Layout.row_major(dim, 2)
-            var dim_batch_out = LayoutTensor[
-                out_dtype,
-                dim_batch_out_layout,
-                output.origin,
-                address_space = output.address_space,
-            ](reshaped_out.ptr + reshaped_out.stride[0]() * j)
-            var reshaped_x_out = x_out.reshape[
-                Layout.row_major(batch_prod, dim, 2)
-            ]()
-            var dim_batch_x_out = LayoutTensor[
-                out_dtype,
-                dim_batch_out_layout,
-                x_out.origin,
-                address_space = x_out.address_space,
-            ](reshaped_x_out.ptr + reshaped_x_out.stride[0]() * j)
+        if idx != last_dim_idx:
 
             @parameter
-            if idx != 0:
-                _run_1d_fft[idx](
-                    dim_batch_out,
-                    dim_batch_out.get_immutable(),
-                    dim_batch_x_out,
-                )
+            for i in range(last_base):
+                comptime offset = i * total_threads
+                var idx = Int(local_i + offset)
+                output.store(idx, 0, shared_f.load[width=2](idx, 0))
+
+            stage_sync_fn()
+
+        @parameter
+        for inner_batch_n in range(batch_prod):
+            comptime idxes = _get_cascade_idxes[
+                output.layout.shape, (idx, rank - 2)
+            ](inner_batch_n)
+            var dim_batch_out = shared_f.slice[
+                Slice(0, dim), Slice(0, 2), (idx, rank - 2)
+            ](idxes)
+
+            # We are running the ffts from right to left in the layout
+            @parameter
+            if idx == last_dim_idx:
+                var dim_batch_x = x.slice[
+                    Slice(0, dim), Slice(0, x_complex_in), (idx, rank - 2)
+                ](idxes)
+                _run_1d_fft[idx](dim_batch_out, dim_batch_x)
             else:
-                var reshaped_x = x.reshape[
-                    Layout.row_major(batch_prod, dim, x_complex_in)
-                ]()
-                comptime x_layout = Layout.row_major(dim, x_complex_in)
-                var dim_batch_x = LayoutTensor[in_dtype, x_layout, x.origin](
-                    reshaped_x.ptr + reshaped_x.stride[0]() * j
-                )
-                _run_1d_fft[0](dim_batch_out, dim_batch_x, dim_batch_x_out)
+                var dim_batch_inter_out = output.slice[
+                    Slice(0, dim), Slice(0, 2), (idx, rank - 2)
+                ](idxes).get_immutable()
+                _run_1d_fft[idx](dim_batch_out, dim_batch_inter_out)
 
 
 fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
@@ -494,13 +459,13 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
         out_dtype, x_out_layout, MutOrigin.external
     ].stack_allocation()
 
-    _run_intra_something_nd_fft[
+    _run_intra_gpu_nd_fft[
         inverse=inverse,
         bases=bases,
         total_threads=total_threads,
         stage_sync_fn=stage_sync_fn,
-        target="gpu",
-    ](shared_f, x, x_out, local_i=local_i)
+        last_base=last_base,
+    ](output, shared_f, x, x_out, local_i)
 
     @parameter
     for i in range(last_base):
@@ -525,12 +490,12 @@ fn _run_gpu_nd_fft[
     x: LayoutTensor[mut=False, in_dtype, in_layout, **_],
     ctx: DeviceContext,
 ) raises:
-    constrained[
-        out_dtype.is_floating_point(), "out_dtype must be floating point"
-    ]()
-    constrained[
-        has_accelerator(), "The non-cpu implementation is for GPU only"
-    ]()
+    __comptime_assert (
+        out_dtype.is_floating_point()
+    ), "out_dtype must be floating point"
+    __comptime_assert (
+        has_accelerator()
+    ), "The non-cpu implementation is for GPU only"
     comptime rank = out_layout.rank()
     comptime dims = out_layout.shape[1 : rank - 1]
 

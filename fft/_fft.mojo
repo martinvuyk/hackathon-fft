@@ -407,7 +407,7 @@ fn _radix_n_fft_kernel[
 ):
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
     optimizations."""
-    constrained[length >= base, "length must be >= base"]()
+    __comptime_assert length >= base, "length must be >= base"
     comptime Sc = Scalar[_get_dtype[length]()]
     comptime offset = Sc(processed)
     var n = Sc(local_i) % offset + (Sc(local_i) // offset) * (offset * Sc(base))
@@ -439,7 +439,6 @@ fn _radix_n_fft_kernel[
         comptime base_twf = _get_twiddle_factors[base, out_dtype, inverse]()
         res = {1, 0}
 
-        @parameter
         for _ in range(i):
             res *= base_twf[j - 1]
 
@@ -525,8 +524,7 @@ fn _radix_n_fft_kernel[
                 else:
                     acc = to_Co(x_out.load[2](Int(i), 0))
 
-                # x_out.store(Int(i), 0, _twf_fma[base_phasor, j == 1](x_j, acc))
-                x_out.store(Int(i), 0, to_CoV(base_phasor.fma(x_j, acc)))
+                x_out.store(Int(i), 0, _twf_fma[base_phasor, j == 1](x_j, acc))
             continue
 
         var twf_index = Int(twf_offset + local_i * (base - 1) + (j - 1))
@@ -575,28 +573,6 @@ fn _radix_n_fft_kernel[
                 x_out.store(Int(i), 0, x_out.load[2](Int(i), 0) * factor)
 
     @parameter
-    if False:
-        ...
-    # if base.is_power_of_two() and processed == 1:
-    #     output.store(Int(n), 0, x_out.load[Int(base * 2)](0, 0))
-    # elif base.is_power_of_two() and out_address_space is AddressSpace.GENERIC:
-    #     comptime offsets = _scatter_offsets()
-    #     var v = x_out.load[Int(base * 2)](0, 0)
-    #     output.ptr.offset(n * 2).scatter(offsets, v)
-    else:
-
-        @parameter
-        for i in range(base):
-            comptime step = Sc(i * offset)
-            # if enable_debug and i == i_to_debug:
-            # print(
-            #     "RADIX KERNEL",
-            #     "local_i:",
-            #     local_i,
-            #     "i:",
-            #     i,
-            #     "x_out[i]:",
-            #     x_out.load[2](Int(i), 0),
-            # )
-
-            output.store(Int(n + step), 0, x_out.load[2](Int(i), 0))
+    for i in range(base):
+        comptime step = Sc(i * offset)
+        output.store(Int(n + step), 0, x_out.load[2](Int(i), 0))

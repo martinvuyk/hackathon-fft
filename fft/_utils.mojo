@@ -4,6 +4,7 @@ from math import exp, pi, ceil, sin, cos
 from bit import count_trailing_zeros
 from gpu.host.info import is_cpu
 from layout import IntTuple
+from utils.index import IndexList
 
 
 fn _get_dtype[length: UInt]() -> DType:
@@ -260,24 +261,14 @@ fn _get_ordered_bases_processed_list[
     return materialize[ordered_bases](), materialize[processed_list]()
 
 
+@always_inline
 fn _min(elems: List[UInt], out smallest: UInt):
     smallest = elems[0]
     for elem in elems[1:]:
         smallest = min(elem, smallest)
 
 
-fn _min(elems: IntTuple, out smallest: Int):
-    smallest = elems[0].value()
-    for elem in elems[1:]:
-        smallest = min(elem.value(), smallest)
-
-
-fn _max(elems: List[UInt], out biggest: UInt):
-    biggest = elems[0]
-    for elem in elems[1:]:
-        biggest = max(elem, biggest)
-
-
+@always_inline
 fn _max(elems: List[List[UInt]], out biggest: UInt):
     biggest = 0
     for bases in elems:
@@ -285,7 +276,44 @@ fn _max(elems: List[List[UInt]], out biggest: UInt):
             biggest = max(elem, biggest)
 
 
-fn _max(elems: IntTuple, out biggest: Int):
-    biggest = elems[0].value()
-    for elem in elems[1:]:
-        biggest = max(elem.value(), biggest)
+@always_inline
+fn _product_of_dims(dims: IntTuple) -> Int:
+    """Calculates the product of a tuple of dimensions."""
+    var prod = 1
+    for i in range(len(dims)):
+        prod *= dims[i].value()
+    return prod
+
+
+fn _get_cascade_idxes[
+    shape: IntTuple, excluded: Tuple
+](var flat_idx: Int, out idxes: IndexList[len(shape) - len(excluded)],):
+    idxes = 0
+    var j_idxes = 0
+    for j in range(len(shape)):
+        if j in excluded:
+            continue
+        while flat_idx > 0 and idxes[j_idxes] < shape[j].value() - 1:
+            var i_idxes = j_idxes + 1
+            for i in range((j + 1), len(shape)):
+                if i in excluded:
+                    continue
+                var max_dim_idx = shape[i].value() - 1
+                if idxes[i_idxes] + flat_idx <= max_dim_idx:
+                    idxes[i_idxes] += flat_idx
+                    flat_idx = 0
+                    break
+                idxes[i_idxes] = max_dim_idx
+                flat_idx -= max_dim_idx
+                i_idxes += 1
+
+            if flat_idx > 0:
+                idxes[j_idxes] += 1
+                i_idxes = j_idxes + 1
+                for i in range((j + 1), len(shape)):
+                    if i in excluded:
+                        continue
+                    idxes[i_idxes] = 0
+                    i_idxes += 1
+                flat_idx -= 1
+        j_idxes += 1
