@@ -1,11 +1,16 @@
 from gpu.host import DeviceContext
 from gpu.host.info import is_cpu
 from layout import Layout, LayoutTensor
-from math import ceil
-from sys.info import has_accelerator, size_of
+from math import ceil, log2
+from sys.info import has_accelerator, size_of, is_64bit
+from bit import count_trailing_zeros
 
-
-from ._utils import _build_ordered_bases, _reduce_mul
+from ._utils import (
+    _build_ordered_bases,
+    _reduce_mul,
+    _product_of_dims,
+    _times_divisible_by,
+)
 from ._ndim_fft_cpu import _run_cpu_nd_fft
 from ._ndim_fft_gpu import _run_gpu_nd_fft
 
@@ -14,35 +19,38 @@ comptime _DEFAULT_DEVICE = "cpu" if not has_accelerator() else "gpu"
 
 fn _check_layout_conditions_nd[in_layout: Layout, out_layout: Layout]():
     comptime rank = out_layout.rank()
-    constrained[
-        rank > 2,
-        "The rank should be bigger than 2. The first",
-        " dimension represents the amount of batches, and the last the complex",
-        " dimension.",
-    ]()
-    constrained[
-        in_layout.rank() == rank,
-        "in_layout and out_layout must have equal rank",
-    ]()
-    constrained[
-        1 <= in_layout.shape[rank - 1].value() <= 2,
-        "The last dimension of in_layout should be 1 or 2",
-    ]()
-    constrained[
-        out_layout.shape[rank - 1].value() == 2,
-        "out_layout must have the last dimension equal to 2",
-    ]()
-    constrained[
-        out_layout.shape[: rank - 2] == in_layout.shape[: rank - 2],
-        "out_layout and in_layout should have the same shape before",
-        " the last dimension",
-    ]()
+    __comptime_assert rank > 2, (
+        "The rank should be bigger than 2. The first"
+        " dimension represents the amount of batches, and the last the complex"
+        " dimension."
+    )
+    __comptime_assert (
+        in_layout.rank() == rank
+    ), "in_layout and out_layout must have equal rank"
+    __comptime_assert (
+        1 <= in_layout.shape[rank - 1].value() <= 2
+    ), "The last dimension of in_layout should be 1 or 2"
+    __comptime_assert (
+        out_layout.shape[rank - 1].value() == 2
+    ), "out_layout must have the last dimension equal to 2"
+    __comptime_assert (
+        out_layout.shape[: rank - 2] == in_layout.shape[: rank - 2]
+    ), (
+        "out_layout and in_layout should have the same shape before"
+        " the last dimension"
+    )
+
+    @parameter
+    for i in range(rank - 2):
+        __comptime_assert (
+            out_layout.shape[i + 1] != 1
+        ), "no inner dimension should be of size 1"
 
 
 fn _estimate_best_bases[
     out_layout: Layout, target: StaticString
 ](out bases: List[UInt]):
-    constrained[out_layout.rank() > 1, "output rank must be > 1"]()
+    __comptime_assert out_layout.rank() > 1, "output rank must be > 1"
     comptime length = out_layout.shape[1].value()
     comptime max_radix_number = 32
 
@@ -56,44 +64,59 @@ fn _estimate_best_bases[
         not is_cpu[target]()
         and length // max_radix_number <= common_thread_block_size
     ):
-        var radixes = range(min_radix_for_block, max_radix_number)
-        # TODO: replace this with inline for generators once they properly
-        # preallocate the sequence length (`[i for i in range(...)]`)
+        var radixes = range(max(min_radix_for_block, 2), max_radix_number + 1)
         var potential_bases = List[UInt](capacity=len(radixes))
+        var processed = 1
         for r in radixes:
-            if length % r == 0:
-                potential_bases.append(UInt(r))
+            var amnt_divisible = _times_divisible_by(
+                UInt(length // processed), UInt(r)
+            )
 
-        bases = _build_ordered_bases[UInt(length)](potential_bases^)
-        if _reduce_mul(bases) == UInt(length):
-            return
+            potential_bases.reserve(Int(amnt_divisible))
+            for _ in range(amnt_divisible):
+                potential_bases.append(UInt(r))
+                processed *= r
+
+            if processed == length:
+                potential_bases.reverse()
+                return potential_bases^
 
     comptime lower_primes = InlineArray[UInt, 11](
         31, 29, 23, 19, 17, 13, 11, 7, 5, 3, 2
     )
     comptime amnt_primes = len(lower_primes)
     bases = {capacity = amnt_primes}
-
+    var processed = 1
     for i in range(amnt_primes):
         var prime = lower_primes[i]
-        if UInt(length) % prime == 0:
-            bases.append(UInt(prime))
+        var amnt_divisible = _times_divisible_by(
+            UInt(length // processed), prime
+        )
+
+        bases.reserve(Int(amnt_divisible))
+        for _ in range(amnt_divisible):
+            bases.append(prime)
+            processed *= Int(prime)
+
+        if processed == length:
+            bases.reverse()
+            return
 
 
 fn _estimate_best_bases_nd[
     in_layout: Layout, out_layout: Layout, target: StaticString
 ](out bases: List[List[UInt]]):
     _check_layout_conditions_nd[in_layout, out_layout]()
-    comptime rank = out_layout.rank()
-    comptime prod = out_layout.shape[: rank - 1].product_flatten().value()
-    comptime dims = out_layout.shape[1 : rank - 1]
+    comptime dims = out_layout.shape[1 : out_layout.rank() - 1]
     comptime amnt_dims = len(dims)
     bases = {capacity = amnt_dims}
 
     @parameter
     for i in range(amnt_dims):
         comptime dim = dims[i].value()
-        bases.append(_estimate_best_bases[{{prod // dim, dim, 2}}, target]())
+        bases.append(
+            _estimate_best_bases[Layout.row_major(1, dim, 2), target]()
+        )
 
 
 fn fft[
@@ -144,13 +167,11 @@ fn fft[
         `sequence_length // smallest_base`.
     """
     _check_layout_conditions_nd[in_layout, out_layout]()
-    constrained[
-        len(bases) == out_layout.rank() - 2,
-        "The bases list should have the same outer size as the amount of",
-        " internal dimensions. e.g. (batches, dim_0, dim_1, dim_2, 2) ->",
-        " len(bases) == 3",
-        "   asdads: ",
-    ]()
+    __comptime_assert len(bases) == out_layout.rank() - 2, (
+        "The bases list should have the same outer size as the amount of"
+        " internal dimensions. e.g. (batches, dim_0, dim_1, dim_2, 2) ->"
+        " len(bases) == 3"
+    )
 
     _run_cpu_nd_fft[inverse=inverse, bases=bases](
         output, x, cpu_workers=cpu_workers
@@ -217,12 +238,11 @@ fn fft[
         launched is equal to the `sequence_length // smallest_base`.
     """
     _check_layout_conditions_nd[in_layout, out_layout]()
-    constrained[
-        len(bases) == out_layout.rank() - 2,
-        "The bases list should have the same outer size as the amount of",
-        " internal dimensions. e.g. (batches, dim_0, dim_1, dim_2, 2) ->",
-        " len(bases) == 3",
-    ]()
+    __comptime_assert len(bases) == out_layout.rank() - 2, (
+        "The bases list should have the same outer size as the amount of"
+        " internal dimensions. e.g. (batches, dim_0, dim_1, dim_2, 2) ->"
+        " len(bases) == 3"
+    )
 
     @parameter
     if is_cpu[target]():

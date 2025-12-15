@@ -21,13 +21,9 @@ from ._utils import (
     _mixed_radix_digit_reverse,
     _product_of_dims,
     _get_cascade_idxes,
+    _get_flat_twfs_total_offsets,
 )
-from ._fft import (
-    _radix_n_fft_kernel,
-    _launch_inter_or_intra_multiprocessor_fft,
-    _intra_block_fft_kernel_radix_n,
-    _inter_multiprocessor_fft_kernel_radix_n,
-)
+from ._fft import _radix_n_fft_kernel
 
 
 fn _run_cpu_nd_fft[
@@ -49,7 +45,8 @@ fn _run_cpu_nd_fft[
     comptime rank = out_layout.rank()
     comptime dims = out_layout.shape[1 : rank - 1]
     comptime prod = _product_of_dims(dims)
-    comptime last_dim_idx = len(dims) - 1
+    comptime start_dim_idx = len(dims) - 1
+    """We are running the ffts from right to left in the layout."""
 
     comptime batches = out_layout.shape[0].value()
     comptime x_complex_in = in_layout.shape[rank - 1].value()
@@ -74,20 +71,9 @@ fn _run_cpu_nd_fft[
         ]()
         comptime ordered_bases = bases_processed[0]
         comptime processed_list = bases_processed[1]
-
-        @parameter
-        fn _calc_total_offsets() -> Tuple[UInt, List[UInt]]:
-            comptime last_base = ordered_bases[len(ordered_bases) - 1]
-            var mat_bases = materialize[ordered_bases]()
-            var c = Int((length // last_base) * (last_base - 1))
-            var offsets = List[UInt](capacity=c * len(mat_bases))
-            var val = UInt(0)
-            for base in mat_bases:
-                offsets.append(val)
-                val += (length // base) * (base - 1)
-            return val, offsets^
-
-        comptime total_offsets = _calc_total_offsets()
+        comptime total_offsets = _get_flat_twfs_total_offsets(
+            ordered_bases, length
+        )
         comptime total_twfs = total_offsets[0]
         comptime twf_offsets = total_offsets[1]
         comptime twfs_array = _get_flat_twfs[
@@ -102,15 +88,13 @@ fn _run_cpu_nd_fft[
         var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
             twfs_array.unsafe_ptr()
         )
-        comptime is_last_dim = dim_idx == last_dim_idx
-        """We are running the ffts from right to left in the layout."""
 
         @parameter
         for b in range(len(ordered_bases)):
             comptime base = ordered_bases[b]
             comptime processed = processed_list[b]
             comptime func = _radix_n_fft_kernel[
-                do_rfft = is_last_dim and x_complex_in == 1,
+                do_rfft = dim_idx == start_dim_idx and x_complex_in == 1,
                 base=base,
                 length=length,
                 processed=processed,
@@ -131,13 +115,9 @@ fn _run_cpu_nd_fft[
 
     # When running ffts on multiple dimensions, we need to copy the output of
     # each dimension into an intermediate buffer for reordering
-    var inter_layer_buf: List[Scalar[out_dtype]]
-
-    @parameter
-    if len(dims) == 1:
-        inter_layer_buf = {}
-    else:
-        inter_layer_buf = {unsafe_uninit_length = output.size()}
+    var inter_layer_buf = List[Scalar[out_dtype]](
+        unsafe_uninit_length=output.size() * Int(len(dims) > 1)
+    )
 
     @parameter
     fn _run_batch(block_num: Int):
@@ -159,43 +139,51 @@ fn _run_cpu_nd_fft[
         ](x.ptr + x.stride[0]() * block_num)
 
         @parameter
-        for idx in reversed(range(len(dims))):
-            comptime dim_tuple = dims[idx]
-            comptime dim = dim_tuple.value()
-            comptime batch_prod = prod // dim
-            __comptime_assert dim != 1, "no inner dimension should be of size 1"
+        if len(dims) == 1:  # FIXME( #5655): remove after merge
+            _run_1d_fft[start_dim_idx](base_out, base_x)
+        else:
 
             @parameter
-            if idx != last_dim_idx:
-                memcpy(
-                    dest=base_inter_out.ptr,
-                    src=base_out.ptr.address_space_cast[AddressSpace.GENERIC](),
-                    count=prod * 2,
-                )
+            for idx in reversed(range(len(dims))):
+                comptime dim_tuple = dims[idx]
+                comptime dim = dim_tuple.value()
+                comptime batch_prod = prod // dim
 
-            @parameter
-            for inner_batch_n in range(batch_prod):
-                comptime idxes = _get_cascade_idxes[
-                    output.layout.shape[1:], (idx, rank - 2)
-                ](inner_batch_n)
-                var dim_batch_out = base_out.slice[
-                    Slice(0, dim), Slice(0, 2), (idx, rank - 2)
-                ](idxes)
-
-                # We are running the ffts from right to left in the layout
                 @parameter
-                if idx == last_dim_idx:
-                    var dim_batch_x = base_x.slice[
-                        Slice(0, dim),
-                        Slice(0, x_complex_in),
-                        (idx, rank - 2),
-                    ](idxes)
-                    _run_1d_fft[idx](dim_batch_out, dim_batch_x)
-                else:
-                    var dim_batch_inter_out = base_inter_out.slice[
-                        Slice(0, dim), Slice(0, 2), (idx, rank - 2)
-                    ](idxes).get_immutable()
-                    _run_1d_fft[idx](dim_batch_out, dim_batch_inter_out)
+                if idx != start_dim_idx:
+                    memcpy(
+                        dest=base_inter_out.ptr,
+                        src=base_out.ptr.address_space_cast[
+                            AddressSpace.GENERIC
+                        ](),
+                        count=prod * 2,
+                    )
+
+                @parameter
+                for flat_idx in range(batch_prod):
+                    comptime exclude = (idx, rank - 2)
+                    comptime dim_sl = Slice(0, dim)
+                    comptime o_comp = Slice(0, 2)
+                    comptime dims_comp = base_out.layout.shape
+                    comptime idxes = _get_cascade_idxes[dims_comp, exclude](
+                        flat_idx
+                    )
+                    var dim_batch_out = base_out.slice[dim_sl, o_comp, exclude](
+                        idxes
+                    )
+
+                    @parameter
+                    if idx == start_dim_idx:
+                        comptime x_comp = Slice(0, x_complex_in)
+                        var dim_batch_x = base_x.slice[dim_sl, x_comp, exclude](
+                            idxes
+                        )
+                        _run_1d_fft[idx](dim_batch_out, dim_batch_x)
+                    else:
+                        var dim_batch_inter_out = base_inter_out.slice[
+                            dim_sl, o_comp, exclude
+                        ](idxes).get_immutable()
+                        _run_1d_fft[idx](dim_batch_out, dim_batch_inter_out)
 
     parallelize[func=_run_batch](
         batches, Int(cpu_workers.or_else(UInt(parallelism_level())))

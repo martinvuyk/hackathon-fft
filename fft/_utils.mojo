@@ -1,6 +1,6 @@
 from sys.info import is_64bit
 from complex import ComplexScalar
-from math import exp, pi, ceil, sin, cos
+from math import exp, pi, ceil, sin, cos, log2
 from bit import count_trailing_zeros
 from gpu.host.info import is_cpu
 from layout import IntTuple
@@ -163,22 +163,49 @@ fn _get_flat_twfs[
                 idx += 1
 
 
-fn _log_mod(x: UInt, base: UInt) -> Tuple[UInt, UInt]:
-    """Get the maximum exponent of base that fully divides x and the
-    remainder.
-    """
-    var div = x // base
+@parameter
+fn _get_flat_twfs_total_offsets(
+    ordered_bases: List[UInt], length: UInt, base_offset: UInt = 0
+) -> Tuple[UInt, List[UInt]]:
+    var last_base = ordered_bases[len(ordered_bases) - 1]
+    var c = Int((length // last_base) * (last_base - 1))
+    var offsets = List[UInt](capacity=c * len(ordered_bases))
+    var val = UInt(0)
+    for base in ordered_bases:
+        offsets.append(base_offset + val)
+        val += (length // base) * (base - 1)
+    return val, offsets^
 
-    @parameter
-    fn _run() -> Tuple[UInt, UInt]:
-        ref res = _log_mod(div, base)
-        res[0] += 1
-        return res
 
+fn _div_by(x: UInt, base: UInt) -> UInt:
     # TODO: benchmark whether this performs better than doing branches
-    return (UInt(0), x) if x % base != 0 else (
-        (UInt(1), UInt(0)) if div == 1 else _run()
+    return 1 if base == x else (
+        0 if (base > x or x % base != 0) else (_div_by(x // base, base) + 1)
     )
+
+
+fn _times_divisible_by(length: UInt, base: UInt, out amnt_divisible: UInt):
+    if base.is_power_of_two():
+        # FIXME(#5003): this should work
+        # amnt_divisible = UInt(
+        #     count_trailing_zeros(Scalar[DType.uint](length))
+        #     // log2(Float64(base)).cast[DType.uint]()
+        # )
+
+        @parameter
+        if is_64bit():
+            amnt_divisible = UInt(
+                count_trailing_zeros(UInt64(length))
+                // log2(Float64(base)).cast[DType.uint64]()
+            )
+        else:
+            amnt_divisible = UInt(
+                count_trailing_zeros(UInt32(length))
+                // log2(Float64(base)).cast[DType.uint32]()
+            )
+    else:
+        debug_assert(base != 1, "The number 1 can infinitely divide any number")
+        amnt_divisible = _div_by(length, base)
 
 
 @parameter
@@ -186,14 +213,6 @@ fn _reduce_mul(b: List[UInt], out res: UInt):
     res = UInt(1)
     for base in b:
         res *= base
-
-
-@parameter
-fn _is_all_two(existing_bases: List[UInt]) -> Bool:
-    for base in existing_bases:
-        if base != 2:
-            return False
-    return True
 
 
 @parameter
@@ -210,27 +229,16 @@ fn _build_ordered_bases[
         new_bases = List[UInt](capacity=len(existing_bases))
 
         var processed = UInt(1)
-        for base in existing_bases:
-            var amnt_divisible: UInt
-
-            if (
-                _is_all_two(existing_bases)
-                and length.is_power_of_two()
-                and base == 2
-            ):
-                # FIXME(#5003): this should just be Scalar[DType.index]
-                @parameter
-                if is_64bit():
-                    amnt_divisible = UInt(count_trailing_zeros(UInt64(length)))
-                else:
-                    amnt_divisible = UInt(count_trailing_zeros(UInt32(length)))
-            else:
-                amnt_divisible = _log_mod(length // processed, base)[0]
+        for i in reversed(range(len(existing_bases))):
+            var base = existing_bases[i]
+            var amnt_divisible = _times_divisible_by(length, base)
+            new_bases.reserve(Int(amnt_divisible))
             for _ in range(amnt_divisible):
                 new_bases.append(base)
                 processed *= base
 
-        new_bases.reverse()
+            if processed == length:
+                return
 
 
 fn _get_ordered_bases_processed_list[
@@ -255,9 +263,11 @@ fn _get_ordered_bases_processed_list[
         == length,
         "powers of the bases must multiply together  to equal the sequence ",
         "length. The builtin algorithm was only able to produce: ",
-        ordered_bases.__str__(),
+        ordered_bases.__str__().replace("UInt(", "").replace(")", ""),
+        " for the length: ",
+        String(length),
     ]()
-    constrained[1 not in ordered_bases, "Cannot do an fft with base 1."]()
+    __comptime_assert 1 not in ordered_bases, "Cannot do an fft with base 1."
     return materialize[ordered_bases](), materialize[processed_list]()
 
 
@@ -287,7 +297,7 @@ fn _product_of_dims(dims: IntTuple) -> Int:
 
 fn _get_cascade_idxes[
     shape: IntTuple, excluded: Tuple
-](var flat_idx: Int, out idxes: IndexList[len(shape) - len(excluded)],):
+](var flat_idx: Int, out idxes: IndexList[len(shape) - len(excluded)]):
     idxes = 0
     var j_idxes = 0
     for j in range(len(shape)):

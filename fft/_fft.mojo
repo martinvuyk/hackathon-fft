@@ -24,103 +24,6 @@ from ._utils import (
 # ===-----------------------------------------------------------------------===#
 
 
-fn _launch_inter_or_intra_multiprocessor_fft[
-    in_dtype: DType,
-    out_dtype: DType,
-    in_layout: Layout,
-    out_layout: Layout,
-    in_origin: ImmutOrigin,
-    out_origin: MutOrigin,
-    *,
-    length: UInt,
-    processed_list: List[UInt],
-    ordered_bases: List[UInt],
-    do_rfft: Bool,
-    inverse: Bool,
-    num_blocks: UInt,
-    block_dim: UInt,
-    batches: UInt,
-    total_twfs: UInt,
-    twf_offsets: List[UInt],
-    max_cluster_size: UInt,
-](
-    output: LayoutTensor[out_dtype, out_layout, out_origin],
-    x: LayoutTensor[in_dtype, in_layout, in_origin],
-    ctx: DeviceContext,
-) raises:
-    comptime twf_layout = Layout.row_major(Int(total_twfs), 2)
-    comptime twfs_array = _get_flat_twfs[
-        out_dtype, length, total_twfs, ordered_bases, processed_list, inverse
-    ]()
-    var twfs = ctx.enqueue_create_buffer[out_dtype](twf_layout.size())
-    ctx.enqueue_copy(twfs, twfs_array.unsafe_ptr())
-    var twiddle_factors = LayoutTensor[mut=False, out_dtype, twf_layout](
-        twfs.unsafe_ptr()
-    )
-
-    comptime grid_dim = (Int(num_blocks), Int(batches))
-    comptime gpu_info = ctx.default_device_info
-    comptime is_sm_90_or_newer = (
-        gpu_info.vendor == Vendor.NVIDIA_GPU and gpu_info.compute >= 9.0
-    )
-
-    @parameter
-    if is_sm_90_or_newer and num_blocks <= max_cluster_size:
-        comptime func = _inter_block_fft_kernel_radix_n[
-            in_dtype,
-            out_dtype,
-            in_layout,
-            out_layout,
-            twiddle_factors.layout,
-            x.origin,
-            output.origin,
-            twiddle_factors.origin,
-            twiddle_factors.address_space,
-            length=length,
-            ordered_bases=ordered_bases,
-            processed_list=processed_list,
-            do_rfft=do_rfft,
-            inverse=inverse,
-            twf_offsets=twf_offsets,
-        ]
-        ctx.enqueue_function_checked[func, func](
-            output,
-            x,
-            twiddle_factors,
-            grid_dim=grid_dim,
-            block_dim=Int(block_dim),
-        )
-    else:
-        comptime func[b: Int] = _inter_multiprocessor_fft_kernel_radix_n[
-            in_dtype,
-            out_dtype,
-            in_layout,
-            out_layout,
-            twiddle_factors.layout,
-            x.origin,
-            output.origin,
-            twiddle_factors.origin,
-            twiddle_factors.address_space,
-            length=length,
-            base = ordered_bases[b],
-            ordered_bases=ordered_bases,
-            processed = processed_list[b],
-            do_rfft=do_rfft,
-            inverse=inverse,
-            twf_offset = twf_offsets[b],
-        ]
-
-        @parameter
-        for b in range(len(ordered_bases)):
-            ctx.enqueue_function_checked[func[b], func[b]](
-                output,
-                x,
-                twiddle_factors,
-                grid_dim=grid_dim,
-                block_dim=Int(block_dim),
-            )
-
-
 fn _inter_multiprocessor_fft_kernel_radix_n[
     in_dtype: DType,
     out_dtype: DType,
@@ -140,34 +43,24 @@ fn _inter_multiprocessor_fft_kernel_radix_n[
     inverse: Bool,
     twf_offset: UInt,
 ](
-    batch_output: LayoutTensor[out_dtype, out_layout, out_origin],
-    batch_x: LayoutTensor[in_dtype, in_layout, in_origin],
+    output: LayoutTensor[out_dtype, out_layout, out_origin],
+    x: LayoutTensor[in_dtype, in_layout, in_origin],
     twiddle_factors: LayoutTensor[
         out_dtype, twf_layout, twf_origin, address_space=twf_address_space
     ],
 ):
     """A kernel that assumes `sequence_length // smallest_base <=
     max_threads_available`."""
-    comptime amnt_threads = length // base
     var global_i = block_dim.x * block_idx.x + thread_idx.x
     var block_num = block_dim.y * block_idx.y
-    comptime x_layout = Layout.row_major(
-        Int(length), in_layout.shape[2].value()
-    )
-    var x = LayoutTensor[mut=False, in_dtype, x_layout, batch_x.origin](
-        batch_x.ptr + batch_x.stride[0]() * Int(block_num)
-    )
-    comptime block_out_layout = Layout.row_major(Int(length), 2)
-    var output = LayoutTensor[
-        mut=True, out_dtype, block_out_layout, batch_output.origin
-    ](batch_output.ptr + batch_output.stride[0]() * Int(block_num))
+
+    comptime amnt_threads = length // base
     comptime x_out_layout = Layout.row_major(Int(base), 2)
     var x_out = LayoutTensor[
         out_dtype, x_out_layout, MutOrigin.external
     ].stack_allocation()
 
     comptime last_base = ordered_bases[len(ordered_bases) - 1]
-    comptime total_threads = length // last_base
     comptime func = _radix_n_fft_kernel[
         do_rfft=do_rfft,
         base=base,
@@ -178,12 +71,8 @@ fn _inter_multiprocessor_fft_kernel_radix_n[
         ordered_bases=ordered_bases,
     ]
 
-    @parameter
-    if amnt_threads == total_threads:
+    if global_i < amnt_threads:  # is execution thread
         func(output, x, global_i, twiddle_factors, x_out)
-    else:
-        if global_i < amnt_threads:  # is execution thread
-            func(output, x, global_i, twiddle_factors, x_out)
 
 
 # ===-----------------------------------------------------------------------===#
