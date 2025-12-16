@@ -14,9 +14,6 @@ from ._utils import (
     _get_twiddle_factors,
     _get_flat_twfs,
     _mixed_radix_digit_reverse,
-    _get_ordered_bases_processed_list,
-    _max,
-    _min,
 )
 
 # ===-----------------------------------------------------------------------===#

@@ -48,7 +48,7 @@ fn _run_cpu_nd_fft[
     comptime start_dim_idx = len(dims) - 1
     """We are running the ffts from right to left in the layout."""
 
-    comptime batches = out_layout.shape[0].value()
+    comptime batches = UInt(out_layout.shape[0].value())
     comptime x_complex_in = in_layout.shape[rank - 1].value()
 
     @no_inline
@@ -118,28 +118,21 @@ fn _run_cpu_nd_fft[
     var inter_layer_buf = List[Scalar[out_dtype]](
         unsafe_uninit_length=output.size() * Int(len(dims) > 1)
     )
+    comptime o_layout = Layout.row_major(output.layout.shape[1:])
+    comptime out_t = LayoutTensor[out_dtype, o_layout, address_space=_]
 
     @parameter
     fn _run_batch(block_num: Int):
         var block_offset = output.stride[0]() * block_num
-        var base_out = LayoutTensor[
-            out_dtype,
-            Layout.row_major(output.layout.shape[1:]),
-            address_space=_,
-        ](output.ptr + block_offset)
-        var base_inter_out = LayoutTensor[
-            out_dtype,
-            Layout.row_major(output.layout.shape[1:]),
-            address_space=_,
-        ](inter_layer_buf.unsafe_ptr() + block_offset)
-        var base_x = LayoutTensor[
-            in_dtype,
-            Layout.row_major(x.layout.shape[1:]),
-            address_space=_,
-        ](x.ptr + x.stride[0]() * block_num)
+        var base_out = out_t(output.ptr + block_offset)
+        var base_inter_out = out_t(inter_layer_buf.unsafe_ptr() + block_offset)
+        comptime x_out_layout = Layout.row_major(x.layout.shape[1:])
+        var base_x = LayoutTensor[in_dtype, x_out_layout, address_space=_](
+            x.ptr + x.stride[0]() * block_num
+        )
 
         @parameter
-        if len(dims) == 1:  # FIXME( #5655): remove after merge
+        if len(dims) == 1:
             _run_1d_fft[start_dim_idx](base_out, base_x)
         else:
 
@@ -185,6 +178,13 @@ fn _run_cpu_nd_fft[
                         ](idxes).get_immutable()
                         _run_1d_fft[idx](dim_batch_out, dim_batch_inter_out)
 
-    parallelize[func=_run_batch](
-        batches, Int(cpu_workers.or_else(UInt(parallelism_level())))
-    )
+    var max_num_workers = cpu_workers.or_else(UInt(parallelism_level()))
+    var num_workers = min(max_num_workers, batches)
+    var batches_per_worker = Int(batches // num_workers)
+
+    @parameter
+    fn _run_batches(batch_i: Int):
+        for batch in range(batches_per_worker):
+            _run_batch(batch + batch_i)
+
+    parallelize[func=_run_batches](batches_per_worker, Int(num_workers))

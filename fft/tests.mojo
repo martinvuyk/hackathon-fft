@@ -525,10 +525,10 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
 
 
 def test_2d_gpu[debug: Bool]():
-    # _test_2d_gpu[debug, False, _GPUTest.BLOCK]()
-    # _test_2d_gpu[debug, False, _GPUTest.WARP]()
+    _test_2d_gpu[debug, False, _GPUTest.BLOCK]()
+    _test_2d_gpu[debug, False, _GPUTest.WARP]()
     _test_2d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
-    # _test_2d_gpu[debug, False, _GPUTest.CLUSTER]()
+    _test_2d_gpu[debug, False, _GPUTest.CLUSTER]()
 
 
 comptime input_3d: InlineArray[InlineArray[InlineArray[UInt8, 8], 4], 6] = [
@@ -973,15 +973,15 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
 
 def test_3d_gpu[debug: Bool]():
     _test_3d_gpu[debug, False, _GPUTest.BLOCK]()
-    _test_3d_gpu[debug, False, _GPUTest.WARP]()
-    _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
-    _test_3d_gpu[debug, False, _GPUTest.CLUSTER]()
+    # _test_3d_gpu[debug, False, _GPUTest.WARP]()
+    # _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
+    # _test_3d_gpu[debug, False, _GPUTest.CLUSTER]()
 
 
 def main():
     # test_fft()
     # test_ifft()
     # test_2d_cpu[debug=False]()
-    test_2d_gpu[debug=True]()
+    # test_2d_gpu[debug=False]()
     # test_3d_cpu[debug=False]()
-    # test_3d_gpu[debug=False]()
+    test_3d_gpu[debug=True]()

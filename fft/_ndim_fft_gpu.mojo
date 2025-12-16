@@ -116,8 +116,8 @@ fn _fft_gpu_device_wide[
         comptime absolute_offsets_idx_start = absolute_offsets[idx][0]
         var view = DeviceBuffer(
             ctx,
-            twfs.unsafe_ptr().offset(absolute_offsets_idx_start),
-            Int(dim_total_twfs_idx),
+            twfs.unsafe_ptr().offset(absolute_offsets_idx_start * 2),
+            Int(dim_total_twfs_idx) * 2,
             owning=False,
         )
         ctx.enqueue_copy(view, twfs_array.unsafe_ptr())
@@ -189,14 +189,13 @@ fn _fft_gpu_device_wide[
         var block_offset = output.stride[0]() * block_num
         var base_out = out_b_t(output.ptr + block_offset)
         var base_inter_out = out_b_t(inter_layer_buf)
-        var base_x = LayoutTensor[
-            in_dtype,
-            Layout.row_major(x.layout.shape[1:]),
-            address_space=_,
-        ](x.ptr + x.stride[0]() * block_num)
+        comptime base_x_layout = Layout.row_major(x.layout.shape[1:])
+        var base_x = LayoutTensor[in_dtype, base_x_layout, address_space=_](
+            x.ptr + x.stride[0]() * block_num
+        )
 
         @parameter
-        if len(dims) == 1:  # FIXME( #5655): remove after merge
+        if len(dims) == 1:
             _run_1d_fft[start_dim_idx](base_out, base_x)
         else:
 
@@ -208,11 +207,10 @@ fn _fft_gpu_device_wide[
 
                 @parameter
                 if idx != start_dim_idx:
-                    inter_layer_buf.enqueue_copy_from(
-                        DeviceBuffer(
-                            ctx, ptr=base_out.ptr, size=size, owning=False
-                        )
+                    var out_buf = DeviceBuffer(
+                        ctx, ptr=base_out.ptr, size=size, owning=False
                     )
+                    inter_layer_buf.enqueue_copy_from(out_buf)
                     ctx.synchronize()  # TODO: remove once everything works
 
                 @parameter
@@ -275,11 +273,10 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
     """We are running the ffts from right to left in the layout."""
     comptime x_complex_in = in_layout.shape[rank - 1].value()
 
-    var shared_f = LayoutTensor[
-        out_dtype,
-        Layout.row_major(out_layout.shape[1:rank]),
-        MutOrigin.external,
-        address_space=shared_address_space,
+    comptime o_layout = Layout.row_major(output.layout.shape[1:])
+    comptime out_t = LayoutTensor[out_dtype, o_layout, address_space=_]
+    var shared_f = out_t[
+        MutOrigin.external, address_space=shared_address_space
     ].stack_allocation()
     comptime x_out_layout = Layout.row_major(Int(max_base), 2)
     var x_out = LayoutTensor[
@@ -352,23 +349,30 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
 
             stage_sync_fn()
 
-    var block_offset = output.stride[0]() * Int(block_num)
-
-    comptime o_layout = Layout.row_major(output.layout.shape[1:])
-    comptime out_t = LayoutTensor[out_dtype, o_layout, address_space=_]
-    var base_out = out_t(shared_f.ptr + block_offset)
-    var base_inter_out = out_t(output.ptr + block_offset)
     comptime x_layout = Layout.row_major(x.layout.shape[1:])
     var base_x = LayoutTensor[in_dtype, x_layout, address_space=_](
         x.ptr + x.stride[0]() * Int(block_num)
     )
+    var base_out = out_t(output.ptr + output.stride[0]() * Int(block_num))
     comptime flat_t = LayoutTensor[
         out_dtype, Layout.row_major(prod, 2), address_space=_
     ]
 
     @parameter
-    if len(dims) == 1:  # FIXME( #5655): remove after merge
-        _run_1d_fft[start_dim_idx](base_out, base_x)
+    fn _copy_to_output():
+        @parameter
+        for i in range(UInt(prod) // total_threads):
+            comptime offset = i * total_threads
+            var l_idx = Int(local_i + offset)
+            flat_t(base_out.ptr).store(
+                l_idx, 0, flat_t(shared_f.ptr).load[width=2](l_idx, 0)
+            )
+
+        stage_sync_fn()
+
+    @parameter
+    if len(dims) == 1:
+        _run_1d_fft[start_dim_idx](shared_f, base_x)
     else:
 
         @parameter
@@ -379,27 +383,18 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
 
             @parameter
             if idx != start_dim_idx:
-
-                @parameter
-                for i in range(UInt(prod) // total_threads):
-                    comptime offset = i * total_threads
-                    var l_idx = Int(local_i + offset)
-                    flat_t(base_inter_out.ptr).store(
-                        l_idx, 0, flat_t(base_out.ptr).load[width=2](l_idx, 0)
-                    )
-
-                stage_sync_fn()
+                _copy_to_output()
 
             @parameter
             for flat_idx in range(batch_prod):
                 comptime exclude = (idx, rank - 2)
                 comptime dim_sl = Slice(0, dim)
                 comptime o_comp = Slice(0, 2)
-                comptime dims_comp = base_out.layout.shape
+                comptime dims_comp = shared_f.layout.shape
                 comptime idxes = _get_cascade_idxes[dims_comp, exclude](
                     flat_idx
                 )
-                var dim_batch_out = base_out.slice[dim_sl, o_comp, exclude](
+                var dim_batch_out = shared_f.slice[dim_sl, o_comp, exclude](
                     idxes
                 )
 
@@ -411,20 +406,12 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
                     )
                     _run_1d_fft[idx](dim_batch_out, dim_batch_x)
                 else:
-                    var dim_batch_inter_out = base_inter_out.slice[
+                    var dim_batch_inter_out = base_out.slice[
                         dim_sl, o_comp, exclude
                     ](idxes).get_immutable()
                     _run_1d_fft[idx](dim_batch_out, dim_batch_inter_out)
 
-        @parameter
-        for i in range(UInt(prod) // total_threads):
-            comptime offset = i * total_threads
-            var l_idx = Int(local_i + offset)
-            flat_t(base_inter_out.ptr).store(
-                l_idx, 0, flat_t(base_out.ptr).load[width=2](l_idx, 0)
-            )
-
-        stage_sync_fn()
+    _copy_to_output()
 
 
 @fieldwise_init
