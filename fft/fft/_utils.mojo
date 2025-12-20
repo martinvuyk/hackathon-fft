@@ -95,14 +95,14 @@ fn _get_twiddle_factor[
 
 fn _get_twiddle_factors[
     length: UInt, dtype: DType, inverse: Bool = False
-](out res: InlineArray[ComplexScalar[dtype], Int(length - 1)]):
+](out res: List[ComplexScalar[dtype]]):
     """Get the twiddle factors for the length.
 
     Examples:
         for a signal with 8 datapoints:
         the result is: [W_1_8, W_2_8, W_3_8, W_4_8, W_5_8, W_6_8, W_7_8]
     """
-    res = type_of(res)(uninitialized=True)
+    res = {unsafe_uninit_length = Int(length - 1)}
     comptime N = length
     for n in range(UInt(1), N):
         res[n - 1] = _get_twiddle_factor[dtype, inverse=inverse](n, N)
@@ -110,13 +110,9 @@ fn _get_twiddle_factors[
 
 fn _prep_twiddle_factors[
     length: UInt, base: UInt, processed: UInt, dtype: DType, inverse: Bool
-](
-    out res: InlineArray[
-        InlineArray[ComplexScalar[dtype], Int(base - 1)], Int(length // base)
-    ]
-):
-    comptime twiddle_factors = _get_twiddle_factors[length, dtype, inverse]()
-    res = {uninitialized = True}
+](out res: List[InlineArray[ComplexScalar[dtype], Int(base - 1)]]):
+    var twiddle_factors = _get_twiddle_factors[length, dtype, inverse]()
+    res = {unsafe_uninit_length = Int(length // base)}
     comptime Sc = Scalar[_get_dtype[length * base]()]
     comptime offset = Sc(processed)
 
@@ -129,13 +125,13 @@ fn _prep_twiddle_factors[
                 offset * Sc(base)
             )
             var twiddle_idx = ((Sc(j) * n) % next_offset) * ratio
-            res[local_i][j - 1] = twiddle_factors[
-                twiddle_idx - 1
-            ] if twiddle_idx != 0 else {1, 0}
+            res[local_i][j - 1] = twiddle_factors[twiddle_idx - 1] if (
+                twiddle_idx != 0
+            ) else {1, 0}
 
 
 @parameter
-fn _get_flat_twfs[
+fn _get_flat_twfs_inline[
     dtype: DType,
     length: UInt,
     total_twfs: UInt,
@@ -154,13 +150,38 @@ fn _get_flat_twfs[
             length, base, processed, dtype, inverse
         ]()
 
-        for i in range(base_twfs.size):
-            for j in range(base_twfs[0].size):
+        for i in range(len(base_twfs)):
+            for j in range(len(base_twfs[0])):
                 var t = base_twfs[i][j]
                 res[idx] = t.re
                 idx += 1
                 res[idx] = t.im
                 idx += 1
+
+
+fn _get_flat_twfs[
+    dtype: DType,
+    length: UInt,
+    total_twfs: UInt,
+    ordered_bases: List[UInt],
+    processed_list: List[UInt],
+    inverse: Bool,
+](out res: List[Scalar[dtype]]):
+    res = {capacity = Int(total_twfs * 2)}
+
+    @parameter
+    for b in range(len(ordered_bases)):
+        comptime base = ordered_bases[b]
+        comptime processed = processed_list[b]
+        var base_twfs = _prep_twiddle_factors[
+            length, base, processed, dtype, inverse
+        ]()
+
+        for i in range(len(base_twfs)):
+            for j in range(len(base_twfs[0])):
+                var t = base_twfs[i][j]
+                res.append(t.re)
+                res.append(t.im)
 
 
 @parameter
@@ -185,6 +206,7 @@ fn _div_by(x: UInt, base: UInt) -> UInt:
 
 
 fn _times_divisible_by(length: UInt, base: UInt, out amnt_divisible: UInt):
+    debug_assert(base != 1, "The number 1 can infinitely divide any number")
     if base.is_power_of_two():
         # FIXME(#5003): this should work
         # amnt_divisible = UInt(
@@ -204,7 +226,6 @@ fn _times_divisible_by(length: UInt, base: UInt, out amnt_divisible: UInt):
                 // log2(Float64(base)).cast[DType.uint32]()
             )
     else:
-        debug_assert(base != 1, "The number 1 can infinitely divide any number")
         amnt_divisible = _div_by(length, base)
 
 
@@ -296,34 +317,71 @@ fn _product_of_dims(dims: IntTuple) -> Int:
 
 
 fn _get_cascade_idxes[
-    shape: IntTuple, excluded: Tuple
+    shape: IntTuple, excluded: IntTuple
 ](var flat_idx: Int, out idxes: IndexList[len(shape) - len(excluded)]):
     idxes = 0
-    var j_idxes = 0
-    for j in range(len(shape)):
-        if j in excluded:
-            continue
-        while flat_idx > 0 and idxes[j_idxes] < shape[j].value() - 1:
-            var i_idxes = j_idxes + 1
-            for i in range((j + 1), len(shape)):
-                if i in excluded:
-                    continue
-                var max_dim_idx = shape[i].value() - 1
-                if idxes[i_idxes] + flat_idx <= max_dim_idx:
-                    idxes[i_idxes] += flat_idx
-                    flat_idx = 0
-                    break
-                idxes[i_idxes] = max_dim_idx
-                flat_idx -= max_dim_idx
-                i_idxes += 1
 
-            if flat_idx > 0:
-                idxes[j_idxes] += 1
-                i_idxes = j_idxes + 1
-                for i in range((j + 1), len(shape)):
-                    if i in excluded:
-                        continue
-                    idxes[i_idxes] = 0
-                    i_idxes += 1
-                flat_idx -= 1
-        j_idxes += 1
+    @parameter
+    fn _idxes_i(i: Int, out amnt: Int):
+        amnt = i
+
+        @parameter
+        for j in range(len(excluded)):
+            comptime val = excluded[j].value()
+            amnt -= Int(i > val)
+
+    @parameter
+    fn _is_excluded[i: Int]() -> Bool:
+        @parameter
+        for j in range(len(excluded)):
+
+            @parameter
+            if i == excluded[j].value():
+                return True
+        return False
+
+    @parameter
+    for i in range(len(shape)):
+
+        @parameter
+        if _is_excluded[i]():
+            continue
+        comptime curr_num = UInt(shape[i].value())
+        comptime idxes_i = _idxes_i(i)
+        idxes[idxes_i] = Int(UInt(flat_idx) % curr_num)
+        flat_idx = Int(UInt(flat_idx) // curr_num)
+
+    # var j_idxes = 0
+
+    # @parameter
+    # for j in range(len(shape)):
+    #     if _is_excluded[j]():
+    #         continue
+    #     while flat_idx > 0 and idxes[j_idxes] < shape[j].value() - 1:
+    #         var i_idxes = j_idxes + 1
+
+    #         @parameter
+    #         for i in range((j + 1), len(shape)):
+    #             if _is_excluded[i]():
+    #                 continue
+    #             var max_dim_idx = shape[i].value() - 1
+    #             if idxes[i_idxes] + flat_idx <= max_dim_idx:
+    #                 idxes[i_idxes] += flat_idx
+    #                 flat_idx = 0
+    #                 break
+    #             idxes[i_idxes] = max_dim_idx
+    #             flat_idx -= max_dim_idx
+    #             i_idxes += 1
+
+    #         if flat_idx > 0:
+    #             idxes[j_idxes] += 1
+    #             i_idxes = j_idxes + 1
+
+    #             @parameter
+    #             for i in range((j + 1), len(shape)):
+    #                 if _is_excluded[i]():
+    #                     continue
+    #                 idxes[i_idxes] = 0
+    #                 i_idxes += 1
+    #             flat_idx -= 1
+    #     j_idxes += 1

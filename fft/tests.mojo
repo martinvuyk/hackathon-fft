@@ -9,8 +9,8 @@ from utils.numerics import nan
 
 from testing import assert_almost_equal
 
-from fft.fft import fft, _estimate_best_bases_nd
-from fft._ndim_fft_gpu import _run_gpu_nd_fft, _GPUTest
+from fft.fft.fft import fft, _estimate_best_bases_nd
+from fft.fft._ndim_fft_gpu import _run_gpu_nd_fft, _GPUTest
 from fft._test_values import (
     _TestValues,
     _get_test_values_2,
@@ -34,7 +34,7 @@ from fft._test_values import (
 )
 
 
-def test_fft_radix_n[
+def _test_fft_radix_n[
     dtype: DType,
     bases: List[UInt],
     test_values: _TestValues[dtype],
@@ -334,28 +334,28 @@ comptime _test[
     gpu_test: Optional[_GPUTest] = None,
 ] = _test_fft[
     dtype,
-    test_fft_radix_n[
+    _test_fft_radix_n[
         dtype, inverse=inverse, target=target, gpu_test=gpu_test, debug=debug
     ],
 ]
 
 
-def test_fft():
+def test_fft[debug: Bool = False]():
     comptime dtype = DType.float64
-    _test[dtype, False, "cpu", debug=False]()
-    _test[dtype, False, "gpu", debug=False, gpu_test = _GPUTest.BLOCK]()
-    _test[dtype, False, "gpu", debug=False, gpu_test = _GPUTest.WARP]()
-    _test[dtype, False, "gpu", debug=False, gpu_test = _GPUTest.DEVICE_WIDE]()
-    _test[dtype, False, "gpu", debug=False, gpu_test = _GPUTest.CLUSTER]()
+    _test[dtype, False, "cpu", debug=debug]()
+    _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.BLOCK]()
+    _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.WARP]()
+    _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.DEVICE_WIDE]()
+    _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.CLUSTER]()
 
 
-def test_ifft():
+def test_ifft[debug: Bool = False]():
     comptime dtype = DType.float64
-    _test[dtype, True, "cpu", debug=False]()
-    _test[dtype, True, "gpu", debug=False, gpu_test = _GPUTest.BLOCK]()
-    _test[dtype, True, "gpu", debug=False, gpu_test = _GPUTest.WARP]()
-    _test[dtype, True, "gpu", debug=False, gpu_test = _GPUTest.DEVICE_WIDE]()
-    _test[dtype, True, "gpu", debug=False, gpu_test = _GPUTest.CLUSTER]()
+    _test[dtype, True, "cpu", debug=debug]()
+    _test[dtype, True, "gpu", debug=debug, gpu_test = _GPUTest.BLOCK]()
+    _test[dtype, True, "gpu", debug=debug, gpu_test = _GPUTest.WARP]()
+    _test[dtype, True, "gpu", debug=debug, gpu_test = _GPUTest.DEVICE_WIDE]()
+    _test[dtype, True, "gpu", debug=debug, gpu_test = _GPUTest.CLUSTER]()
 
 
 comptime Co = ComplexScalar[DType.float64]
@@ -399,20 +399,14 @@ comptime expected_2d: InlineArray[InlineArray[Co, 4], 6] = [
 ]
 
 
-def test_2d_cpu[debug: Bool]():
+def test_2d_cpu[debug: Bool = False]():
     comptime ROWS = 6
     comptime COLS = 4
 
-    comptime x_layout = Layout.row_major(1, ROWS, COLS, 2)
+    comptime x_layout = Layout.row_major(1, ROWS, COLS, 1)
     ref x_buf = global_constant[input_2d]()
-    var x_buf2 = InlineArray[InlineArray[SIMD[DType.uint8, 2], 4], 6](
-        uninitialized=True
-    )
-    for i in range(ROWS):
-        for j in range(COLS):
-            x_buf2[i][j] = {x_buf[i][j], 0}
     var x = LayoutTensor[mut=False, DType.uint8, x_layout](
-        x_buf2.unsafe_ptr().bitcast[UInt8]()
+        x_buf.unsafe_ptr().bitcast[UInt8]()
     )
 
     comptime out_layout = Layout.row_major(1, ROWS, COLS, 2)
@@ -460,7 +454,7 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
     comptime COLS = 4
     comptime in_dtype = DType.uint8
     comptime out_dtype = DType.float64
-    comptime in_layout = Layout.row_major(1, ROWS, COLS, 2)
+    comptime in_layout = Layout.row_major(1, ROWS, COLS, 1)
     comptime out_layout = Layout.row_major(1, ROWS, COLS, 2)
 
     with DeviceContext() as ctx:
@@ -482,7 +476,6 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
             for i in range(ROWS):
                 for j in range(COLS):
                     x_view[0, i, j, 0] = Scalar[in_dtype](input_2d_v[i][j])
-                    x_view[0, i, j, 1] = 0
 
         ctx.synchronize()
         comptime bases = _estimate_best_bases_nd[in_layout, out_layout, "gpu"]()
@@ -524,7 +517,7 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
                     assert_almost_equal(out_view[0, i, j, 1], expected[i][j].im)
 
 
-def test_2d_gpu[debug: Bool]():
+def test_2d_gpu[debug: Bool = False]():
     _test_2d_gpu[debug, False, _GPUTest.BLOCK]()
     _test_2d_gpu[debug, False, _GPUTest.WARP]()
     _test_2d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
@@ -826,30 +819,20 @@ comptime expected_3d: InlineArray[InlineArray[InlineArray[Co, 8], 4], 6] = [
 ]
 
 
-def test_3d_cpu[debug: Bool]():
+def test_3d_cpu[debug: Bool = False]():
     comptime D1 = 6
     comptime D2 = 4
     comptime D3 = 8
 
-    comptime x_layout = Layout.row_major(1, D1, D2, D3, 2)
+    comptime x_layout = Layout.row_major(1, D1, D2, D3, 1)
     ref x_buf = global_constant[input_3d]()
-
-    var x_buf2 = InlineArray[
-        InlineArray[InlineArray[SIMD[DType.uint8, 2], D3], D2], D1
-    ](uninitialized=True)
-    for k in range(D1):
-        for i in range(D2):
-            for j in range(D3):
-                x_buf2[k][i][j] = {x_buf[k][i][j], 0}
-
     var x = LayoutTensor[mut=False, DType.uint8, x_layout](
-        x_buf2.unsafe_ptr().bitcast[UInt8]()
+        x_buf.unsafe_ptr().bitcast[UInt8]()
     )
 
     comptime out_layout = Layout.row_major(1, D1, D2, D3, 2)
-    var out_buf = InlineArray[Co, D1 * D2 * D3](
-        fill=Co(nan[DType.float64](), nan[DType.float64]())
-    )
+    comptime n = nan[DType.float64]()
+    var out_buf = InlineArray[Co, D1 * D2 * D3](fill=Co(n, n))
     var out = LayoutTensor[mut=True, DType.float64, out_layout](
         out_buf.unsafe_ptr().bitcast[Float64]()
     )
@@ -896,7 +879,7 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
     comptime D3 = 8
     comptime in_dtype = DType.uint8
     comptime out_dtype = DType.float64
-    comptime in_layout = Layout.row_major(1, D1, D2, D3, 2)
+    comptime in_layout = Layout.row_major(1, D1, D2, D3, 1)
     comptime out_layout = Layout.row_major(1, D1, D2, D3, 2)
 
     with DeviceContext() as ctx:
@@ -971,17 +954,17 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
                         )
 
 
-def test_3d_gpu[debug: Bool]():
+def test_3d_gpu[debug: Bool = False]():
     _test_3d_gpu[debug, False, _GPUTest.BLOCK]()
-    # _test_3d_gpu[debug, False, _GPUTest.WARP]()
-    # _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
-    # _test_3d_gpu[debug, False, _GPUTest.CLUSTER]()
+    _test_3d_gpu[debug, False, _GPUTest.WARP]()
+    _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
+    _test_3d_gpu[debug, False, _GPUTest.CLUSTER]()
 
 
 def main():
     # test_fft()
     # test_ifft()
-    # test_2d_cpu[debug=False]()
-    # test_2d_gpu[debug=False]()
-    # test_3d_cpu[debug=False]()
-    test_3d_gpu[debug=True]()
+    # test_2d_cpu()
+    # test_2d_gpu()
+    # test_3d_cpu()
+    test_3d_gpu()

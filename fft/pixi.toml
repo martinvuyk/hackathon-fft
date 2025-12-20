@@ -7,6 +7,7 @@ version = "0.1.0"
 [tasks]
 tests = "mojo run -D ASSERT=warn tests.mojo"
 bench = "mkdir -p build && mojo build bench.mojo -o build/bench && ./build/bench"
+package = "mkdir -p build && mojo package fft -o build/fft.mojopkg"
 profile-nsys = """mojo build --debug-level=full -o build/profile profile.mojo && \
     nsys profile \
     --output=profile_results \
@@ -45,5 +46,5 @@ profile-ncu = """mojo build --debug-level=full -o build/profile profile.mojo && 
 """
 
 [dependencies]
-mojo = ">=0.26.1.0.dev2025121305,<0.27"
-modular = ">=26.1.0.dev2025121305,<27"
+mojo = ">=0.26.1.0.dev2025122017,<0.27"
+modular = ">=26.1.0.dev2025122017,<27"

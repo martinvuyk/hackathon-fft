@@ -1,4 +1,5 @@
 from algorithm import parallelize, vectorize
+from builtin.globals import global_constant
 from complex import ComplexScalar
 from gpu import thread_idx, block_idx, block_dim, barrier
 from gpu.cluster import cluster_arrive_relaxed, cluster_wait
@@ -199,8 +200,9 @@ fn _intra_block_fft_kernel_radix_n[
         out_dtype, length, total_twfs, ordered_bases, processed_list, inverse
     ]()
     comptime twfs_layout = Layout.row_major(Int(total_twfs), 2)
+    ref twfs_array_runtime = global_constant[twfs_array]()
     var twfs = LayoutTensor[out_dtype, twfs_layout](
-        twfs_array.unsafe_ptr().as_immutable()
+        twfs_array_runtime.unsafe_ptr().as_immutable()
     )
     comptime last_base = ordered_bases[len(ordered_bases) - 1]
     comptime total_threads = length // last_base
@@ -322,11 +324,12 @@ fn _radix_n_fft_kernel[
 
     @parameter
     fn _base_phasor[i: UInt, j: UInt](out res: Co):
-        comptime base_twf = _get_twiddle_factors[base, out_dtype, inverse]()
+        comptime base_twfs = _get_twiddle_factors[base, out_dtype, inverse]()
+        comptime base_twf = base_twfs[j - 1]
         res = {1, 0}
 
         for _ in range(i):
-            res *= base_twf[j - 1]
+            res *= base_twf
 
     @parameter
     @always_inline
