@@ -2,158 +2,142 @@
 #include <stdlib.h>
 #include <cuda_runtime.h>
 #include <cufft.h>
-#include <time.h>
-#include <math.h>
+#include <vector>
 #include <string>
+#include <numeric>
 #include <algorithm>
-#include <nvml.h>
+#include <chrono> 
 
-#define CHECK_CUDA_ERROR(call) \
-do { \
-    cudaError_t result = call; \
-    if (result != cudaSuccess) { \
-        fprintf(stderr, "%s:%d: CUDA error %d: %s\n", __FILE__, __LINE__, result, cudaGetErrorString(result)); \
-        exit(1); \
-    } \
-} while (0)
+#define CHECK_CUDA(call) { cudaError_t err = call; if(err != cudaSuccess) { printf("CUDA Error: %s at line %d\n", cudaGetErrorString(err), __LINE__); exit(1); }}
+#define CHECK_CUFFT(call) { cufftResult err = call; if(err != CUFFT_SUCCESS) { printf("cuFFT Error: %d at line %d\n", err, __LINE__); exit(1); }}
 
-#define CHECK_CUFFT_ERROR(call) \
-do { \
-    cufftResult result = call; \
-    if (result != CUFFT_SUCCESS) { \
-        fprintf(stderr, "%s:%d: cuFFT error %d\n", __FILE__, __LINE__, result); \
-        exit(1); \
-    } \
-} while (0)
+enum FFTType { R2C, C2C };
 
-int main(int argc, char **argv) {
+struct FFTShape {
+    std::string name;
+    int batches;
+    std::vector<long long> dims;
+};
 
-    long long num_iterations, num_inner_iterations;
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
-    fprintf(stderr,"CUDA version: %d.%d\n", CUDART_VERSION / 1000, (CUDART_VERSION % 100) / 10);
-    fprintf(stderr,"GPU: %s\n", prop.name);
-    fprintf(stderr,"Driver compute compatibility: %d.%d\n", prop.major, prop.minor);
-    // Initialize NVML library
-    nvmlReturn_t result = nvmlInit();
-    if (result != NVML_SUCCESS) {
-        fprintf(stderr,"Failed to initialize NVML library: %s\n", nvmlErrorString(result));
-        return 1;
+void run_benchmark(const FFTShape& shape, FFTType type) {
+    int rank = shape.dims.size();
+    long long n_elements_per_fft = 1;
+    for (auto d : shape.dims) n_elements_per_fft *= d;
+    
+    // Memory sizing
+    void *d_input, *d_output;
+    size_t in_bytes, out_bytes;
+    double data_movement_bytes;
+    cufftType_t cufft_kind;
+    std::string type_label;
+
+    if (type == R2C) {
+        type_label = "R2C";
+        long long last_dim_complex = (shape.dims.back() / 2) + 1;
+        long long n_complex_per_fft = 1;
+        for (int i = 0; i < rank - 1; i++) n_complex_per_fft *= shape.dims[i];
+        n_complex_per_fft *= last_dim_complex;
+
+        in_bytes = n_elements_per_fft * shape.batches * sizeof(float);
+        out_bytes = n_complex_per_fft * shape.batches * sizeof(cufftComplex);
+        
+        // Consistent with Mojo logic: Input_Bytes * 3
+        data_movement_bytes = (double)n_elements_per_fft * shape.batches * sizeof(float) * 3.0;
+        cufft_kind = CUFFT_R2C;
+    } else {
+        type_label = "C2C";
+        in_bytes = n_elements_per_fft * shape.batches * sizeof(cufftComplex);
+        out_bytes = n_elements_per_fft * shape.batches * sizeof(cufftComplex);
+        
+        // C2C moves 1 complex in, 1 complex out = 2 * sizeof(complex)
+        // Or to keep Mojo-style multiplier relative to 'elements': element * sizeof(complex) * 2
+        data_movement_bytes = (double)n_elements_per_fft * shape.batches * sizeof(cufftComplex) * 2.0;
+        cufft_kind = CUFFT_C2C;
     }
-    char version_str[NVML_DEVICE_PART_NUMBER_BUFFER_SIZE+1];
-    nvmlReturn_t retval = nvmlSystemGetDriverVersion(version_str, NVML_DEVICE_PART_NUMBER_BUFFER_SIZE);
-    if (retval != NVML_SUCCESS) {
-        fprintf(stderr, "%s\n",nvmlErrorString(retval));
-        return 1;
+
+    CHECK_CUDA(cudaMalloc(&d_input, in_bytes));
+    CHECK_CUDA(cudaMalloc(&d_output, out_bytes));
+
+    cufftHandle plan;
+    CHECK_CUFFT(cufftCreate(&plan));
+    size_t work_size;
+
+    // --- 1. Measure Planning Time ---
+    auto plan_start = std::chrono::steady_clock::now();
+    
+    if (type == R2C) {
+        long long last_dim_complex = (shape.dims.back() / 2) + 1;
+        long long n_complex_per_fft = (in_bytes / shape.batches / sizeof(float) / shape.dims.back()) * last_dim_complex;
+        CHECK_CUFFT(cufftMakePlanMany64(plan, rank, (long long*)shape.dims.data(), 
+                                       NULL, 1, n_elements_per_fft,    
+                                       NULL, 1, n_complex_per_fft, 
+                                       cufft_kind, shape.batches, &work_size));
+    } else {
+        CHECK_CUFFT(cufftMakePlanMany64(plan, rank, (long long*)shape.dims.data(), 
+                                       NULL, 1, n_elements_per_fft,    
+                                       NULL, 1, n_elements_per_fft, 
+                                       cufft_kind, shape.batches, &work_size));
     }
-    fprintf(stderr,"Driver version: %s\n", version_str);
 
-    num_iterations = 10;
-    num_inner_iterations = 10000;
-    int ntrials = 1;
-    long long nffts[ntrials] = {1L<<7};
-    std::string* description = new std::string[ntrials]{"2^7"};
+    auto plan_end = std::chrono::steady_clock::now();
+    std::chrono::duration<double, std::milli> plan_duration = plan_end - plan_start;
 
-    for (int i = 0; i < ntrials; i++){
-        long long n = nffts[i];
-        fprintf(stderr,"**************************************\n");
-        fprintf(stderr,"N-point FFT: %lld (%s)\n", nffts[i], description[i].c_str());
-        fprintf(stderr,"Number of iterations: %lld \n", num_iterations);
+    // --- 2. Warm-up ---
+    for(int i = 0; i < 3; ++i) {
+        if (type == R2C) cufftExecR2C(plan, (float*)d_input, (cufftComplex*)d_output);
+        else cufftExecC2C(plan, (cufftComplex*)d_input, (cufftComplex*)d_output, CUFFT_FORWARD);
+    }
+    cudaDeviceSynchronize();
 
+    // --- 3. Execution Timing ---
+    const int iterations = 100;
+    std::vector<double> samples;
+    for (int i = 0; i < iterations; i++) {
+        auto start = std::chrono::steady_clock::now();
 
-        int batch = 1;
-        int rank = 1;
-        long long nembed[1] = {n};
-        int istride = 1;
-        int ostride = 1;
-        long long idist = n;
-        long long odist = n;
-        long long inembed[1] = {n};
-        long long onembed[1] = {n};
-        cufftHandle forward_plan;
-        cudaEvent_t start, stop;
-        float elapsed_time, inner_elapsed_time;
-        float *input_data, *output_data;
-        cufftComplex *fft_data;
-        float *host_input_data;
-        float mean_time, median_time;
-        size_t work_size;
+        if (type == R2C) cufftExecR2C(plan, (float*)d_input, (cufftComplex*)d_output);
+        else cufftExecC2C(plan, (cufftComplex*)d_input, (cufftComplex*)d_output, CUFFT_FORWARD);
+        
+        CHECK_CUDA(cudaDeviceSynchronize());
 
-        float input_size_gb = n*4.0/1e9;
-        fprintf(stderr,"Input float array size: %lf GB \n", input_size_gb);
-        float output_size_gb = n*8.0/1e9;
-        fprintf(stderr,"Output complex array size: %lf GB \n", output_size_gb);
+        auto end = std::chrono::steady_clock::now();
+        samples.push_back(std::chrono::duration<double, std::milli>(end - start).count());
+    }
 
+    std::sort(samples.begin(), samples.end());
+    double median_ms = samples[iterations / 2];
+    double throughput = (data_movement_bytes / 1e9) / (median_ms / 1000.0);
 
-        // Allocate memory on host
-        host_input_data = (float*) malloc(n * batch * sizeof(float));
+    printf("%-5s %-20s | %10.2f ms | %10.3f ms | %10.2f GB/s\n", 
+           type_label.c_str(), shape.name.c_str(), plan_duration.count(), median_ms, throughput);
 
-        // Initialize input data on host
-        srand(time(NULL));
-        for (long int k = 0; k < n * batch; k++) {
-            host_input_data[k] = (float) rand() / RAND_MAX;
-        }
-        //get size estimate
-        cufftResult result = cufftEstimate1d(n, CUFFT_R2C, batch, &work_size);
-        float work_size_gb = work_size/1.0e9;
-        fprintf(stderr,"Work size estimate: %lf GB\n", work_size_gb);
-        fprintf(stderr, "Total size estimate: %lf GB\n", input_size_gb + output_size_gb + work_size_gb);
+    CHECK_CUFFT(cufftDestroy(plan));
+    CHECK_CUDA(cudaFree(d_input));
+    CHECK_CUDA(cudaFree(d_output));
+}
 
-        // Allocate memory on device
-        CHECK_CUDA_ERROR(cudaMalloc((void**) &input_data, n * batch * sizeof(float)));
-        CHECK_CUDA_ERROR(cudaMalloc((void**) &fft_data, n * batch * sizeof(cufftComplex)));
-        CHECK_CUDA_ERROR(cudaMalloc((void**) &output_data, n * batch * sizeof(float)));
+int main() {
+    std::vector<FFTShape> shapes = {
+        {"100k x 128",     100000, {128}},
+        {"100k x 2^10",   100000, {1024}},
+        // {"100 x 2^14",    100,    {16384}},
+        {"100 x 640x480", 100,    {640, 480}},
+        // {"10 x 1080p",    10,     {1920, 1080}},
+        // {"1 x 4K",        1,      {3840, 2160}},
+        // {"1 x 8K",        1,      {7680, 4320}},
+        {"100 x 64^3",    100,    {64, 64, 64}},
+        // {"10 x 128^3",     10,      {128, 128, 128}}
+        // {"1 x 256^3",     1,      {256, 256, 256}}
+        // {"1 x 512^3",     1,      {512, 512, 512}}
+    };
 
-        // Create FFT plan
-        CHECK_CUFFT_ERROR(cufftCreate(&forward_plan));
-        CHECK_CUFFT_ERROR(cufftMakePlanMany64(forward_plan, rank, nembed, inembed, istride, idist, onembed, ostride, odist, CUFFT_R2C, batch, &work_size));
+    printf("%-26s | %-13s | %-13s | %-13s\n", "Type & Shape", "Plan Time", "Exec Time", "Throughput");
+    printf("--------------------------------------------------------------------------------------------\n");
 
-
-        // Copy input data to device
-        CHECK_CUDA_ERROR(cudaMemcpy(input_data, host_input_data, n * batch * sizeof(float), cudaMemcpyHostToDevice));
-
-        mean_time = 0.0;
-
-        //Calculate median time
-        float times[num_iterations];
-        for (int iter = 0; iter < num_iterations; iter++) {
-            elapsed_time = 0.0;
-            inner_elapsed_time = 0.0;
-            for (int iter = 0; iter < num_inner_iterations; iter++) {
-                CHECK_CUDA_ERROR(cudaEventCreate(&start));
-                CHECK_CUDA_ERROR(cudaEventCreate(&stop));
-                CHECK_CUDA_ERROR(cudaEventRecord(start, 0));
-
-                CHECK_CUFFT_ERROR(cufftExecR2C(forward_plan, input_data, fft_data));
-
-
-                CHECK_CUDA_ERROR(cudaEventRecord(stop, 0));
-                CHECK_CUDA_ERROR(cudaEventSynchronize(stop));
-                CHECK_CUDA_ERROR(cudaEventElapsedTime(&inner_elapsed_time, start, stop));
-                elapsed_time += inner_elapsed_time;
-            }
-            mean_time += elapsed_time;    
-            times[iter] = elapsed_time;    
-        }
-
-        std::sort(times, times + num_iterations);
-        if (num_iterations % 2 == 0) {
-            median_time = (times[num_iterations / 2 - 1] + times[num_iterations / 2]) / 2.0;
-        } else {
-            median_time = times[num_iterations / 2];
-        }
-
-
-        mean_time = mean_time / num_iterations;
-
-        fprintf(stderr,"Mean time: %f ms\n", mean_time);
-        fprintf(stderr,"Median time: %f ms\n", median_time);
-
-        // Free memory
-        free(host_input_data);
-        CHECK_CUDA_ERROR(cudaFree(input_data));
-        CHECK_CUDA_ERROR(cudaFree(output_data));
-        CHECK_CUFFT_ERROR(cufftDestroy(forward_plan));
+    for (const auto& s : shapes) {
+        run_benchmark(s, R2C);
+        run_benchmark(s, C2C);
+        printf("--------------------------------------------------------------------------------------------\n");
     }
 
     return 0;

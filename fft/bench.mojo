@@ -1,12 +1,20 @@
 from complex import ComplexSIMD
-from benchmark import Bench, BenchConfig, Bencher, BenchId, keep
+from benchmark import (
+    Bench,
+    BenchConfig,
+    Bencher,
+    BenchId,
+    keep,
+    ThroughputMeasure,
+    BenchMetric,
+)
 from layout import Layout, LayoutTensor, IntTuple
 from gpu.host import DeviceContext
 from random import seed, randn, random_ui64
+from sys.info import size_of
 
 from fft.fft.fft import fft
-from fft.fft._fft import _intra_block_fft_kernel_radix_n
-from fft.fft._utils import _get_ordered_bases_processed_list
+from fft.fft._utils import _product_of_dims
 
 
 @parameter
@@ -20,7 +28,6 @@ fn bench_gpu_radix_n_rfft[dtype: DType, shape: IntTuple](mut b: Bencher) raises:
         var out = ctx.enqueue_create_buffer[out_dtype](out_layout.size())
         out.enqueue_fill(0)
         var x = ctx.enqueue_create_buffer[in_dtype](in_layout.size())
-        x.enqueue_fill(0)
         with x.map_to_host() as x_host:
             randn(x_host.unsafe_ptr(), in_layout.size())
 
@@ -35,12 +42,9 @@ fn bench_gpu_radix_n_rfft[dtype: DType, shape: IntTuple](mut b: Bencher) raises:
         @parameter
         fn call_fn(ctx: DeviceContext) raises:
             fft(out_tensor, x_tensor, ctx)
-            ctx.synchronize()
 
+        ctx.synchronize()
         b.iter_custom[call_fn](ctx)
-
-        _ = out_tensor
-        _ = x_tensor
 
 
 @parameter
@@ -67,7 +71,9 @@ fn bench_cpu_radix_n_rfft[
     @always_inline
     @parameter
     fn call_fn() raises:
-        fft(out_tensor, x_tensor, cpu_workers=cpu_workers)
+        fft[bases = [[UInt(in_layout.shape[1].value())]]](
+            out_tensor, x_tensor, cpu_workers=cpu_workers
+        )
 
     b.iter[call_fn]()
 
@@ -79,7 +85,8 @@ def main():
     seed()
     var m = Bench(BenchConfig(num_repetitions=1))
     comptime shapes: List[IntTuple] = [
-        # {10_000, 2**10},
+        {100_000, 128},
+        # {100_000, 2**10},
         # {100, 2**14},
         # {100, 640, 480},
         # {10, 1920, 1080},
@@ -88,14 +95,18 @@ def main():
         # {100, 64, 64, 64},
         # {10, 128, 128, 128},
         # {1, 256, 256, 256},
-        {1, 512, 512, 512},
+        # {1, 512, 512, 512},
     ]
 
     @parameter
     for shape in shapes:
         comptime dtype = DType.float32
         comptime name = String("bench_gpu_radix_n_rfft[", shape, "]")
-        m.bench_function[bench_gpu_radix_n_rfft[dtype, shape]](BenchId(name))
+        comptime num_elems = _product_of_dims(shape)
+        comptime total_bytes = num_elems * size_of[dtype]() * 3  # rfft
+        m.bench_function[bench_gpu_radix_n_rfft[dtype, shape]](
+            BenchId(name), [ThroughputMeasure(BenchMetric.bytes, total_bytes)]
+        )
         comptime cpu_bench = "bench_cpu_radix_n_rfft["
         # m.bench_function[
         #     bench_cpu_radix_n_rfft[dtype, shape, cpu_workers= {1}]
@@ -104,12 +115,13 @@ def main():
         #     BenchId(String(cpu_bench, shape, ", workers=n]"))
         # )
 
-    results = Dict[String, Tuple[Float64, Int]]()
-    for info in m.info_vec:
-        n = info.name
-        time = info.result.mean("ms")
-        avg, amnt = results.get(n, (Float64(0), 0))
-        results[n] = ((avg * amnt + time) / (amnt + 1), amnt + 1)
-    print("")
-    for k_v in results.items():
-        print(k_v.key, k_v.value[0].__round__(3), sep=", ")
+    # results = Dict[String, Tuple[Float64, Int]]()
+    # for info in m.info_vec:
+    #     n = info.name
+    #     time = info.result.mean("ms")
+    #     avg, amnt = results.get(n, (Float64(0), 0))
+    #     results[n] = ((avg * amnt + time) / (amnt + 1), amnt + 1)
+    # print("")
+    # for k_v in results.items():
+    #     print(k_v.key, k_v.value[0].__round__(3), sep=", ")
+    print(m)

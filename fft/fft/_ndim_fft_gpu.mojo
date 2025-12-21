@@ -1,9 +1,10 @@
 from algorithm import parallelize, vectorize
 from builtin.globals import global_constant
 from complex import ComplexScalar
+from collections import OptionalReg
 from gpu import thread_idx, block_idx, block_dim, barrier
 from gpu.cluster import cluster_arrive_relaxed, cluster_wait
-from gpu.host import DeviceContext, DeviceBuffer
+from gpu.host import DeviceContext, DeviceBuffer, Dim
 from gpu.host.info import Vendor, is_cpu
 from layout import Layout, LayoutTensor, IntTuple
 from utils.index import IndexList
@@ -26,8 +27,8 @@ from ._utils import (
 )
 from ._fft import (
     _radix_n_fft_kernel,
-    _intra_block_fft_kernel_radix_n,
     _inter_multiprocessor_fft_kernel_radix_n,
+    _radix_n_fft_kernel_exp,
 )
 
 
@@ -134,7 +135,8 @@ fn _fft_gpu_device_wide[
         batch_x_dtype: DType,
         batch_out_layout: Layout,
         batch_x_layout: Layout,
-        batch_x_origin: ImmutOrigin, //,
+        batch_x_origin: ImmutOrigin,
+        //,
         dim_idx: Int,
     ](
         batch_output: LayoutTensor[
@@ -320,8 +322,8 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
         comptime bases_processed = _get_ordered_bases_processed_list[
             length, bases[dim_idx]
         ]()
-        comptime ordered_bases = bases_processed[0]
-        comptime processed_list = bases_processed[1]
+        comptime ordered_bases = [length]  # bases_processed[0]
+        comptime processed_list = [UInt(1)]  # bases_processed[1]
         comptime total_offsets = _get_flat_twfs_total_offsets(
             ordered_bases, length
         )
@@ -575,16 +577,7 @@ fn _run_gpu_nd_fft[
         ceil(num_threads / num_blocks).cast[DType.uint]()
     )
     comptime thread_batch_size = max_threads_available // num_threads
-    comptime memory_batch_size = (
-        shared_mem_per_warp // full_output_size
-    ) if can_run_in_warp else (
-        shared_mem_per_block // full_output_size
-    ) if can_run_in_block else (
-        (
-            shared_mem_per_cluster // full_output_size
-        ) if can_run_in_block_cluster else thread_batch_size
-    )
-    comptime batch_size = max(min(thread_batch_size, memory_batch_size), 1)
+    comptime batch_size = min(batches, thread_batch_size)
 
     @parameter
     fn _launch_fn[batch_size: Int](offset: Int) raises:
@@ -651,8 +644,32 @@ fn _run_gpu_nd_fft[
                 "internal implementation error for the given shape, please file"
                 " an issue"
             )
+            comptime run_cluster = can_run_in_block_cluster and num_blocks > 1
+            comptime shared_mem = full_output_size if (
+                full_output_size <= max_shared_mem_size
+            ) else out_size_max_dim
+            # constrained[
+            #     False,
+            #     String(
+            #         "grid_dim: ",
+            #         grid_dim[0],
+            #         ", ",
+            #         grid_dim[1],
+            #         " block_threads: ",
+            #         block_threads,
+            #     ),
+            # ]()
             ctx.enqueue_function_checked[block_func_batch, block_func_batch](
-                out_batch, x_batch, grid_dim=grid_dim, block_dim=block_threads
+                out_batch,
+                x_batch,
+                grid_dim=grid_dim,
+                cluster_dim=OptionalReg[Dim](
+                    num_blocks
+                ) if run_cluster else None,
+                shared_mem_bytes=OptionalReg[Int](
+                    Int(shared_mem)
+                ) if run_cluster else None,
+                block_dim=block_threads,
             )
         else:
             _fft_gpu_device_wide[
