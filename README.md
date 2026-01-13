@@ -32,29 +32,69 @@ allocation or planning step which wasn't included in the benchmark.
 These are several implementations with different default behavior. Some use
 multi-threading on by default depending on the platform's linalg libs.
 
-```terminal
-lib   100_000x128  1_000_000x128
-numpy     44.663    431.364
-scipy     35.113    345.956
-pyfftw    31.148    805.163
-```
-
-Bellow are the results for different radix sizes, but for the sake of brevity
-if we choose the best multi-threaded combination we get:
+### Single-threaded
 
 ```terminal
-bench_cpu_radix_n_rfft[[16, 8], 100_000, 128, workers=n], 28.802
-bench_cpu_radix_n_rfft[[16, 8], 1_000_000, 128, workers=n], 306.103
+Shape                     | NumPy (ms)   | SciPy (ms)   | PyFFTW (ms) 
+----------------------------------------------------------------------
+(100000, 128)             |       80.419 |       18.948 |       14.668
+(100000, 1024)            |      721.269 |      161.764 |      177.246
+(100, 16384)              |       17.529 |        3.997 |        4.287
+(100, 640, 480)           |      427.481 |       91.605 |      107.713
+(10, 1920, 1080)          |      334.407 |       70.449 |       94.191
+(1, 3840, 2160)           |      151.040 |       35.203 |       55.885
+(1, 7680, 4320)           |      682.552 |      186.163 |      307.622
+(100, 64, 64, 64)         |      510.898 |       80.757 |       46.992
+(10, 128, 128, 128)       |      417.480 |       69.197 |       44.463
+(1, 256, 256, 256)        |      352.040 |       67.794 |      100.129
+(1, 512, 512, 512)        |     3512.941 |      640.898 |     1362.859
 ```
 
-Which means a ~ 10 % improvement for long sequences compared to the fastest
-implementation of the 3 (scipy). This is highly dependent on the chosen radix
-factors.
+This FFT implementation:
+```terminal
+bench_cpu_radix_n_rfft[(100000, 128), workers=1], 59.532
+bench_cpu_radix_n_rfft[(100000, 1024), workers=1], 659.04
+bench_cpu_radix_n_rfft[(100, 16384), workers=1], 15.716
+bench_cpu_radix_n_rfft[(100, 640, 480), workers=1], 640.201
+bench_cpu_radix_n_rfft[(10, 1920, 1080), workers=1], 541.857
+bench_cpu_radix_n_rfft[(1, 3840, 2160), workers=1], 462.305
+bench_cpu_radix_n_rfft[(1, 7680, 4320), workers=1], 3220.419
+bench_cpu_radix_n_rfft[(100, 64, 64, 64), workers=1], 806.693
+bench_cpu_radix_n_rfft[(10, 128, 128, 128), workers=1], 900.437
+bench_cpu_radix_n_rfft[(1, 256, 256, 256), workers=1], 1201.321
+```
 
-This is all ignoring the cost of interop between Python and the C/C++
-implementations. I tried setting up fftw locally but it was a headache, and
-this is just to give an estimate overview of the benefits of this
-implementation.
+### Multi-threaded
+
+```terminal
+Shape                     | NumPy (ms)   | SciPy (ms)   | PyFFTW (ms)
+----------------------------------------------------------------------
+(100000, 128)             |       78.862 |       19.667 |        7.649
+(100000, 1024)            |      697.248 |      163.304 |       55.119
+(100, 16384)              |       13.660 |        4.065 |        1.483
+(100, 640, 480)           |      432.518 |       91.246 |       33.092
+(10, 1920, 1080)          |      351.934 |       68.214 |       22.578
+(1, 3840, 2160)           |      158.390 |       37.060 |       14.928
+(1, 7680, 4320)           |      675.804 |      183.549 |       57.947
+(100, 64, 64, 64)         |      509.366 |       83.495 |       31.403
+(10, 128, 128, 128)       |      419.321 |       69.900 |       23.582
+(1, 256, 256, 256)        |      357.371 |       76.605 |       27.078
+(1, 512, 512, 512)        |     3547.772 |      648.791 |      230.020
+```
+
+This FFT implementation:
+```terminal
+bench_cpu_radix_n_rfft[(100000, 128), workers=n], 14.539
+bench_cpu_radix_n_rfft[(100000, 1024), workers=n], 147.371
+bench_cpu_radix_n_rfft[(100, 16384), workers=n], 4.674
+bench_cpu_radix_n_rfft[(100, 640, 480), workers=n], 175.633
+bench_cpu_radix_n_rfft[(10, 1920, 1080), workers=n], 155.772
+bench_cpu_radix_n_rfft[(1, 3840, 2160), workers=n], 109.511
+bench_cpu_radix_n_rfft[(1, 7680, 4320), workers=n], 622.908
+bench_cpu_radix_n_rfft[(100, 64, 64, 64), workers=n], 220.444
+bench_cpu_radix_n_rfft[(10, 128, 128, 128), workers=n], 371.172
+bench_cpu_radix_n_rfft[(1, 256, 256, 256), workers=n], 372.938
+```
 
 ## Conclusions
 

@@ -46,8 +46,8 @@ fn _fft_gpu_device_wide[
     grid_dim: Tuple[Int, Int],
     block_threads: UInt,
 ](
-    output: LayoutTensor[out_dtype, out_layout, out_origin, **_],
-    x: LayoutTensor[in_dtype, in_layout, in_origin, **_],
+    output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
+    x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
     ctx: DeviceContext,
 ) raises:
     comptime rank = out_layout.rank()
@@ -117,7 +117,7 @@ fn _fft_gpu_device_wide[
         comptime absolute_offsets_idx_start = absolute_offsets[idx][0]
         var view = DeviceBuffer(
             ctx,
-            twfs.unsafe_ptr().offset(absolute_offsets_idx_start * 2),
+            twfs.unsafe_ptr() + absolute_offsets_idx_start * 2,
             Int(dim_total_twfs_idx) * 2,
             owning=False,
         )
@@ -140,10 +140,10 @@ fn _fft_gpu_device_wide[
         dim_idx: Int,
     ](
         batch_output: LayoutTensor[
-            out_dtype, batch_out_layout, output.origin, **_
+            out_dtype, batch_out_layout, output.origin, ...
         ],
         batch_x: LayoutTensor[
-            batch_x_dtype, batch_x_layout, batch_x_origin, **_
+            batch_x_dtype, batch_x_layout, batch_x_origin, ...
         ],
     ) raises:
         comptime length = UInt(batch_x.layout.shape[0].value())
@@ -173,7 +173,9 @@ fn _fft_gpu_device_wide[
 
         @parameter
         for b in range(len(ordered_bases)):
-            ctx.enqueue_function_checked[func[b], func[b]](
+            var comp = ctx.compile_function_experimental[func[b]]()
+            ctx.enqueue_function_experimental(
+                comp,
                 batch_output,
                 batch_x,
                 twiddle_factors,
@@ -286,14 +288,14 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
     )
     var shared_f_total: type_of(
         out_t[
-            MutOrigin.external, address_space=shared_address_space
+            MutExternalOrigin, address_space=shared_address_space
         ].stack_allocation()
     )
     var shared_f_max_dim: type_of(
         LayoutTensor[
             out_dtype,
             Layout.row_major(Int(max_dim), 2),
-            MutOrigin.external,
+            MutExternalOrigin,
             address_space=shared_address_space,
         ].stack_allocation()
     )
@@ -308,22 +310,22 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
 
     comptime x_out_layout = Layout.row_major(Int(max_base), 2)
     var x_out = LayoutTensor[
-        out_dtype, x_out_layout, MutOrigin.external
+        out_dtype, x_out_layout, MutExternalOrigin
     ].stack_allocation()
 
     @parameter
     fn _run_1d_fft[
         dim_idx: Int
     ](
-        shared_f: LayoutTensor[mut=True, out_dtype, *_, **_],
-        x: LayoutTensor[mut=False, address_space=_, *_, **_],
+        shared_f: LayoutTensor[mut=True, out_dtype, ...],
+        x: LayoutTensor[mut=False, address_space=_, ...],
     ):
         comptime length = UInt(x.layout.shape[0].value())
         comptime bases_processed = _get_ordered_bases_processed_list[
             length, bases[dim_idx]
         ]()
-        comptime ordered_bases = [length]  # bases_processed[0]
-        comptime processed_list = [UInt(1)]  # bases_processed[1]
+        comptime ordered_bases = bases_processed[0]
+        comptime processed_list = bases_processed[1]
         comptime total_offsets = _get_flat_twfs_total_offsets(
             ordered_bases, length
         )
@@ -429,7 +431,7 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
                         mut=True,
                         out_dtype,
                         address_space=shared_address_space,
-                        *_, **_,
+                        ...,
                     ]
                 ):
                     @parameter
@@ -496,8 +498,8 @@ fn _run_gpu_nd_fft[
     max_cluster_size: UInt = 8,
     test: Optional[_GPUTest] = None,
 ](
-    output: LayoutTensor[mut=True, out_dtype, out_layout, **_],
-    x: LayoutTensor[mut=False, in_dtype, in_layout, **_],
+    output: LayoutTensor[mut=True, out_dtype, out_layout, ...],
+    x: LayoutTensor[mut=False, in_dtype, in_layout, ...],
     ctx: DeviceContext,
 ) raises:
     __comptime_assert (
@@ -579,6 +581,7 @@ fn _run_gpu_nd_fft[
     comptime thread_batch_size = max_threads_available // num_threads
     comptime batch_size = min(batches, thread_batch_size)
 
+    @always_inline
     @parameter
     fn _launch_fn[batch_size: Int](offset: Int) raises:
         comptime out_tuple = IntTuple(batch_size, dims, 2)
@@ -633,6 +636,7 @@ fn _run_gpu_nd_fft[
             stage_sync_fn=stage_sync_fn,
             shared_address_space=address_space,
         ]
+
         comptime grid_dim = (Int(num_blocks), batch_size)
 
         @parameter
@@ -648,18 +652,9 @@ fn _run_gpu_nd_fft[
             comptime shared_mem = full_output_size if (
                 full_output_size <= max_shared_mem_size
             ) else out_size_max_dim
-            # constrained[
-            #     False,
-            #     String(
-            #         "grid_dim: ",
-            #         grid_dim[0],
-            #         ", ",
-            #         grid_dim[1],
-            #         " block_threads: ",
-            #         block_threads,
-            #     ),
-            # ]()
-            ctx.enqueue_function_checked[block_func_batch, block_func_batch](
+            var func = ctx.compile_function_experimental[block_func_batch]()
+            ctx.enqueue_function_experimental(
+                func,
                 out_batch,
                 x_batch,
                 grid_dim=grid_dim,

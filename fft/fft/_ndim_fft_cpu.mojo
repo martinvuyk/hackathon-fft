@@ -17,14 +17,22 @@ from ._utils import (
     _get_dtype,
     _get_twiddle_factors,
     _get_flat_twfs,
+    _get_flat_twfs_inline,
     _mixed_radix_digit_reverse,
     _get_ordered_bases_processed_list,
     _mixed_radix_digit_reverse,
     _product_of_dims,
     _get_cascade_idxes,
     _get_flat_twfs_total_offsets,
+    _max,
 )
-from ._fft import _radix_n_fft_kernel
+from ._fft import (
+    _radix_n_fft_kernel,
+    _radix_n_fft_kernel_exp,
+    _radix_n_fft_kernel_exp2,
+)
+
+from benchmark import keep
 
 
 fn _run_cpu_nd_fft[
@@ -38,8 +46,8 @@ fn _run_cpu_nd_fft[
     inverse: Bool,
     bases: List[List[UInt]],
 ](
-    output: LayoutTensor[out_dtype, out_layout, out_origin, **_],
-    x: LayoutTensor[in_dtype, in_layout, in_origin, **_],
+    output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
+    x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
     *,
     cpu_workers: Optional[UInt] = None,
 ):
@@ -52,16 +60,18 @@ fn _run_cpu_nd_fft[
     comptime batches = UInt(out_layout.shape[0].value())
     comptime x_complex_in = in_layout.shape[rank - 1].value()
 
+    @always_inline
     @parameter
     fn _run_1d_fft[
         dtype_in: DType,
         layout_out: Layout,
         layout_in: Layout,
-        x_in_origin: ImmutOrigin, //,
+        x_in_origin: ImmutOrigin,
+        //,
         dim_idx: Int,
     ](
-        shared_f: LayoutTensor[out_dtype, layout_out, out_origin, **_],
-        x_in: LayoutTensor[dtype_in, layout_in, x_in_origin, **_],
+        shared_f: LayoutTensor[out_dtype, layout_out, out_origin, ...],
+        x_in: LayoutTensor[dtype_in, layout_in, x_in_origin, ...],
         enable_debug: Bool = False,
     ):
         comptime length = UInt(layout_in.shape[0].value())
@@ -87,16 +97,23 @@ fn _run_cpu_nd_fft[
         comptime twfs_layout = Layout.row_major(Int(total_twfs), 2)
         # FIXME(#5686): replace with this once it's solved
         # ref twfs_array_runtime = global_constant[twfs_array]()
-        var twfs_array_runtime = materialize[twfs_array]()
-        var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
-            twfs_array_runtime.unsafe_ptr()
+        # var twfs_array_runtime = materialize[twfs_array]()
+        # var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
+        #     twfs_array_runtime.unsafe_ptr()
+        # )
+        comptime max_base = Int(_max(ordered_bases))
+        var x_out_array = InlineArray[Scalar[out_dtype], max_base * 2](
+            uninitialized=True
+        )
+        var x_out = LayoutTensor[out_dtype, Layout.row_major(max_base, 2)](
+            x_out_array.unsafe_ptr()
         )
 
         @parameter
         for b in range(len(ordered_bases)):
             comptime base = ordered_bases[b]
             comptime processed = processed_list[b]
-            comptime func = _radix_n_fft_kernel[
+            comptime func = _radix_n_fft_kernel_exp2[
                 do_rfft = dim_idx == start_dim_idx and x_complex_in == 1,
                 base=base,
                 length=length,
@@ -108,14 +125,11 @@ fn _run_cpu_nd_fft[
             comptime num_iters = length // base
 
             for local_i in range(num_iters):
-                var x_out_array = InlineArray[Scalar[out_dtype], Int(base) * 2](
-                    uninitialized=True
-                )
-                var x_out = LayoutTensor[
-                    out_dtype, Layout.row_major(Int(base), 2)
-                ](x_out_array.unsafe_ptr())
-
-                func(shared_f, x_in, local_i, twfs, x_out)
+                keep(shared_f)
+                keep(x_in)
+                # keep(twfs)
+                keep(x_out)
+                # func(shared_f, x_in, local_i, x_out)
 
     # When running ffts on multiple dimensions, we need to copy the output of
     # each dimension into an intermediate buffer for reordering

@@ -300,6 +300,13 @@ fn _min(elems: List[UInt], out smallest: UInt):
 
 
 @always_inline
+fn _max(elems: List[UInt], out smallest: UInt):
+    smallest = elems[0]
+    for elem in elems[1:]:
+        smallest = max(elem, smallest)
+
+
+@always_inline
 fn _max(elems: List[List[UInt]], out biggest: UInt):
     biggest = 0
     for bases in elems:
@@ -319,7 +326,7 @@ fn _product_of_dims(dims: IntTuple) -> Int:
 fn _get_cascade_idxes[
     shape: IntTuple, excluded: IntTuple
 ](var flat_idx: Int, out idxes: IndexList[len(shape) - len(excluded)]):
-    idxes = 0
+    idxes = {fill = 0}
 
     @parameter
     fn _idxes_i(i: Int, out amnt: Int):

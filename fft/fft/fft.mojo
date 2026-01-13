@@ -132,8 +132,8 @@ fn fft[
         in_layout, out_layout, "cpu"
     ](),
 ](
-    output: LayoutTensor[out_dtype, out_layout, out_origin, **_],
-    x: LayoutTensor[in_dtype, in_layout, in_origin, **_],
+    output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
+    x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
     *,
     cpu_workers: Optional[UInt] = None,
 ) raises:
@@ -196,8 +196,8 @@ fn fft[
     # https://docs.nvidia.com/cuda/cuda-c-programming-guide/#thread-block-clusters
     max_cluster_size: UInt = 8,
 ](
-    output: LayoutTensor[out_dtype, out_layout, out_origin, **_],
-    x: LayoutTensor[in_dtype, in_layout, in_origin, **_],
+    output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
+    x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
     ctx: DeviceContext,
     *,
     cpu_workers: Optional[UInt] = None,

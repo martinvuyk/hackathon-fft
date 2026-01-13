@@ -16,6 +16,8 @@ from sys.info import size_of
 from fft.fft.fft import fft
 from fft.fft._utils import _product_of_dims
 
+comptime GPU_ITERS = 1
+
 
 @parameter
 fn bench_gpu_radix_n_rfft[dtype: DType, shape: IntTuple](mut b: Bencher) raises:
@@ -41,7 +43,9 @@ fn bench_gpu_radix_n_rfft[dtype: DType, shape: IntTuple](mut b: Bencher) raises:
         @always_inline
         @parameter
         fn call_fn(ctx: DeviceContext) raises:
+            # for _ in range(GPU_ITERS):
             fft(out_tensor, x_tensor, ctx)
+            ctx.synchronize()
 
         ctx.synchronize()
         b.iter_custom[call_fn](ctx)
@@ -71,9 +75,7 @@ fn bench_cpu_radix_n_rfft[
     @always_inline
     @parameter
     fn call_fn() raises:
-        fft[bases = [[UInt(in_layout.shape[1].value())]]](
-            out_tensor, x_tensor, cpu_workers=cpu_workers
-        )
+        fft(out_tensor, x_tensor, cpu_workers=cpu_workers)
 
     b.iter[call_fn]()
 
@@ -85,8 +87,8 @@ def main():
     seed()
     var m = Bench(BenchConfig(num_repetitions=1))
     comptime shapes: List[IntTuple] = [
-        {100_000, 128},
-        # {100_000, 2**10},
+        # {100_000, 128},
+        {100_000, 2**10},
         # {100, 2**14},
         # {100, 640, 480},
         # {10, 1920, 1080},
@@ -103,7 +105,7 @@ def main():
         comptime dtype = DType.float32
         comptime name = String("bench_gpu_radix_n_rfft[", shape, "]")
         comptime num_elems = _product_of_dims(shape)
-        comptime total_bytes = num_elems * size_of[dtype]() * 3  # rfft
+        comptime total_bytes = num_elems * size_of[dtype]() * 3 * GPU_ITERS
         m.bench_function[bench_gpu_radix_n_rfft[dtype, shape]](
             BenchId(name), [ThroughputMeasure(BenchMetric.bytes, total_bytes)]
         )

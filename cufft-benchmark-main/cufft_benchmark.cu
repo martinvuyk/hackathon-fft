@@ -40,8 +40,8 @@ void run_benchmark(const FFTShape& shape, FFTType type) {
 
         in_bytes = n_elements_per_fft * shape.batches * sizeof(float);
         out_bytes = n_complex_per_fft * shape.batches * sizeof(cufftComplex);
-        
-        // Consistent with Mojo logic: Input_Bytes * 3
+
+        // R2C moves: Input_Bytes * 3
         data_movement_bytes = (double)n_elements_per_fft * shape.batches * sizeof(float) * 3.0;
         cufft_kind = CUFFT_R2C;
     } else {
@@ -50,7 +50,6 @@ void run_benchmark(const FFTShape& shape, FFTType type) {
         out_bytes = n_elements_per_fft * shape.batches * sizeof(cufftComplex);
         
         // C2C moves 1 complex in, 1 complex out = 2 * sizeof(complex)
-        // Or to keep Mojo-style multiplier relative to 'elements': element * sizeof(complex) * 2
         data_movement_bytes = (double)n_elements_per_fft * shape.batches * sizeof(cufftComplex) * 2.0;
         cufft_kind = CUFFT_C2C;
     }
@@ -90,26 +89,21 @@ void run_benchmark(const FFTShape& shape, FFTType type) {
     cudaDeviceSynchronize();
 
     // --- 3. Execution Timing ---
-    const int iterations = 100;
+    auto start = std::chrono::steady_clock::now();
+    const int iterations = 1;
     std::vector<double> samples;
     for (int i = 0; i < iterations; i++) {
-        auto start = std::chrono::steady_clock::now();
 
         if (type == R2C) cufftExecR2C(plan, (float*)d_input, (cufftComplex*)d_output);
-        else cufftExecC2C(plan, (cufftComplex*)d_input, (cufftComplex*)d_output, CUFFT_FORWARD);
-        
-        CHECK_CUDA(cudaDeviceSynchronize());
-
-        auto end = std::chrono::steady_clock::now();
-        samples.push_back(std::chrono::duration<double, std::milli>(end - start).count());
+        else cufftExecC2C(plan, (cufftComplex*)d_input, (cufftComplex*)d_output, CUFFT_FORWARD);    
     }
-
-    std::sort(samples.begin(), samples.end());
-    double median_ms = samples[iterations / 2];
-    double throughput = (data_movement_bytes / 1e9) / (median_ms / 1000.0);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    auto end = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(end - start).count();
+    double throughput = (data_movement_bytes / 1e9) / (ms / 1000.0) * iterations;
 
     printf("%-5s %-20s | %10.2f ms | %10.3f ms | %10.2f GB/s\n", 
-           type_label.c_str(), shape.name.c_str(), plan_duration.count(), median_ms, throughput);
+           type_label.c_str(), shape.name.c_str(), plan_duration.count(), ms, throughput);
 
     CHECK_CUFFT(cufftDestroy(plan));
     CHECK_CUDA(cudaFree(d_input));
@@ -118,7 +112,7 @@ void run_benchmark(const FFTShape& shape, FFTType type) {
 
 int main() {
     std::vector<FFTShape> shapes = {
-        {"100k x 128",     100000, {128}},
+        // {"100k x 128",     100000, {128}},
         {"100k x 2^10",   100000, {1024}},
         // {"100 x 2^14",    100,    {16384}},
         {"100 x 640x480", 100,    {640, 480}},
