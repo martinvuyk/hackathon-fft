@@ -84,7 +84,7 @@ fn bench_cpu_radix_n_rfft[
 
 def main():
     seed()
-    var m = Bench(BenchConfig(num_repetitions=1))
+    var m = Bench(BenchConfig(num_repetitions=5))
     comptime shapes: List[IntTuple] = [
         # {100_000, 128},
         {100_000, 2**10},

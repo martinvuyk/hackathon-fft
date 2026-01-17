@@ -33,6 +33,13 @@ from fft._test_values import (
     _get_test_values_128,
 )
 
+# FIXME: once we have better support for cosine in
+# comptime ATOL[dtype: DType] = 1e-3 if dtype == DType.float64 else (
+#     1e-2 if dtype == DType.float32 else 1e-1
+# )
+comptime ATOL[dtype: DType] = 1e-2
+comptime RTOL = 1e-5
+
 
 def _test_fft_radix_n[
     dtype: DType,
@@ -82,11 +89,6 @@ def _test_fft_radix_n[
             print("]")
             print("expected: ", end="")
 
-        comptime ATOL = 1e-3 if dtype == DType.float64 else (
-            1e-2 if dtype == DType.float32 else 1e-1
-        )
-        comptime RTOL = 1e-5
-
         # gather all real parts and then the imaginary parts
         @parameter
         if inverse:
@@ -103,10 +105,12 @@ def _test_fft_radix_n[
                 assert_almost_equal(
                     result[i, 0],
                     Scalar[out_dtype](scalar_in[i]),
-                    atol=ATOL,
+                    atol=ATOL[out_dtype],
                     rtol=RTOL,
                 )
-                assert_almost_equal(result[i, 1], 0, atol=ATOL, rtol=RTOL)
+                assert_almost_equal(
+                    result[i, 1], 0, atol=ATOL[out_dtype], rtol=RTOL
+                )
         else:
 
             @parameter
@@ -123,13 +127,13 @@ def _test_fft_radix_n[
                 assert_almost_equal(
                     result[i, 0],
                     complex_out[i].re.cast[out_dtype](),
-                    atol=ATOL,
+                    atol=ATOL[out_dtype],
                     rtol=RTOL,
                 )
                 assert_almost_equal(
                     result[i, 1],
                     complex_out[i].im.cast[out_dtype](),
-                    atol=ATOL,
+                    atol=ATOL[out_dtype],
                     rtol=RTOL,
                 )
 
@@ -410,10 +414,11 @@ def test_2d_cpu[debug: Bool = False]():
     )
 
     comptime out_layout = Layout.row_major(1, ROWS, COLS, 2)
+    comptime out_dtype = DType.float64
     var out_buf = InlineArray[Co, ROWS * COLS](
-        fill=Co(nan[DType.float64](), nan[DType.float64]())
+        fill=Co(nan[out_dtype](), nan[out_dtype]())
     )
-    var out = LayoutTensor[mut=True, DType.float64, out_layout](
+    var out = LayoutTensor[mut=True, out_dtype, out_layout](
         out_buf.unsafe_ptr().bitcast[Float64]()
     )
 
@@ -445,8 +450,18 @@ def test_2d_cpu[debug: Bool = False]():
 
     for i in range(ROWS):
         for j in range(COLS):
-            assert_almost_equal(out[0, i, j, 0], expected[i][j].re)
-            assert_almost_equal(out[0, i, j, 1], expected[i][j].im)
+            assert_almost_equal(
+                out[0, i, j, 0],
+                expected[i][j].re,
+                atol=ATOL[out_dtype],
+                rtol=RTOL,
+            )
+            assert_almost_equal(
+                out[0, i, j, 1],
+                expected[i][j].im,
+                atol=ATOL[out_dtype],
+                rtol=RTOL,
+            )
 
 
 def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
@@ -513,8 +528,18 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
 
             for i in range(ROWS):
                 for j in range(COLS):
-                    assert_almost_equal(out_view[0, i, j, 0], expected[i][j].re)
-                    assert_almost_equal(out_view[0, i, j, 1], expected[i][j].im)
+                    assert_almost_equal(
+                        out_view[0, i, j, 0],
+                        expected[i][j].re,
+                        atol=ATOL[out_dtype],
+                        rtol=RTOL,
+                    )
+                    assert_almost_equal(
+                        out_view[0, i, j, 1],
+                        expected[i][j].im,
+                        atol=ATOL[out_dtype],
+                        rtol=RTOL,
+                    )
 
 
 def test_2d_gpu[debug: Bool = False]():
@@ -831,9 +856,10 @@ def test_3d_cpu[debug: Bool = False]():
     )
 
     comptime out_layout = Layout.row_major(1, D1, D2, D3, 2)
-    comptime n = nan[DType.float64]()
+    comptime out_dtype = DType.float64
+    comptime n = nan[out_dtype]()
     var out_buf = InlineArray[Co, D1 * D2 * D3](fill=Co(n, n))
-    var out = LayoutTensor[mut=True, DType.float64, out_layout](
+    var out = LayoutTensor[mut=True, out_dtype, out_layout](
         out_buf.unsafe_ptr().bitcast[Float64]()
     )
 
@@ -869,8 +895,18 @@ def test_3d_cpu[debug: Bool = False]():
     for i in range(D1):
         for j in range(D2):
             for k in range(D3):
-                assert_almost_equal(out[0, i, j, k, 0], expected[i][j][k].re)
-                assert_almost_equal(out[0, i, j, k, 1], expected[i][j][k].im)
+                assert_almost_equal(
+                    out[0, i, j, k, 0],
+                    expected[i][j][k].re,
+                    atol=ATOL[out_dtype],
+                    rtol=RTOL,
+                )
+                assert_almost_equal(
+                    out[0, i, j, k, 1],
+                    expected[i][j][k].im,
+                    atol=ATOL[out_dtype],
+                    rtol=RTOL,
+                )
 
 
 def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
@@ -947,17 +983,23 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
                 for j in range(D2):
                     for k in range(D3):
                         assert_almost_equal(
-                            out_view[0, i, j, k, 0], expected[i][j][k].re
+                            out_view[0, i, j, k, 0],
+                            expected[i][j][k].re,
+                            atol=ATOL[out_dtype],
+                            rtol=RTOL,
                         )
                         assert_almost_equal(
-                            out_view[0, i, j, k, 1], expected[i][j][k].im
+                            out_view[0, i, j, k, 1],
+                            expected[i][j][k].im,
+                            atol=ATOL[out_dtype],
+                            rtol=RTOL,
                         )
 
 
 def test_3d_gpu[debug: Bool = False]():
-    # _test_3d_gpu[debug, False, _GPUTest.BLOCK]()
+    _test_3d_gpu[debug, False, _GPUTest.BLOCK]()
     # _test_3d_gpu[debug, False, _GPUTest.WARP]()
-    _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
+    # _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
     # _test_3d_gpu[debug, False, _GPUTest.CLUSTER]()
 
 

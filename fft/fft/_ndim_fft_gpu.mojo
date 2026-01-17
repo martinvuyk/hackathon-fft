@@ -29,7 +29,8 @@ from ._utils import (
 from ._fft import (
     _radix_n_fft_kernel,
     _inter_multiprocessor_fft_kernel_radix_n,
-    _radix_n_fft_kernel_exp,
+    _radix_n_fft_kernel_exp_twfs_runtime,
+    _radix_n_fft_kernel_exp_no_params,
 )
 
 
@@ -482,47 +483,27 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
         ]()
         comptime ordered_bases = bases_processed[0]
         comptime processed_list = bases_processed[1]
-        comptime total_offsets = _get_flat_twfs_total_offsets(
-            ordered_bases, length
-        )
-        comptime total_twfs = total_offsets[0]
-        comptime twf_offsets = total_offsets[1]
-        # FIXME(#5686): replace with _get_flat_twfs once it's solved
-        comptime twfs_array = _get_flat_twfs_inline[
-            out_dtype,
-            length,
-            total_twfs,
-            ordered_bases,
-            processed_list,
-            inverse,
-        ]()
-        comptime twfs_layout = Layout.row_major(Int(total_twfs), 2)
-        ref twfs_array_runtime = global_constant[twfs_array]()
-        var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
-            twfs_array_runtime.unsafe_ptr()
-        )
 
         @parameter
         for b in range(len(ordered_bases)):
             comptime base = ordered_bases[b]
             comptime processed = processed_list[b]
             comptime threads_for_base = length // base
-            comptime func = _radix_n_fft_kernel[
+            comptime func = _radix_n_fft_kernel_exp_twfs_runtime[
                 do_rfft = dim_idx == start_dim_idx and x_complex_in == 1,
                 base=base,
                 length=length,
                 processed=processed,
                 inverse=inverse,
-                twf_offset = twf_offsets[b],
                 ordered_bases=ordered_bases,
             ]
 
             @parameter
             if threads_for_base == total_threads:
-                func(shared_f, x, local_i, twfs, x_out)
+                func(shared_f, x, local_i, x_out)
             else:
                 if local_i < threads_for_base:
-                    func(shared_f, x, local_i, twfs, x_out)
+                    func(shared_f, x, local_i, x_out)
 
             stage_sync_fn()
 

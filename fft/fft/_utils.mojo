@@ -1,4 +1,4 @@
-from sys.info import is_64bit
+from sys.info import is_64bit, is_nvidia_gpu
 from complex import ComplexScalar
 from math import exp, pi, ceil, sin, cos, log2
 from bit import count_trailing_zeros
@@ -67,30 +67,28 @@ fn _mixed_radix_digit_reverse[
 
 
 fn _get_twiddle_factor[
-    dtype: DType, *, inverse: Bool = False
-](n: UInt, N: UInt) -> ComplexScalar[dtype]:
+    dtype: DType, *, inverse: Bool, N: UInt
+](n: UInt) -> ComplexScalar[dtype]:
     """Returns `exp((-j * 2 * pi * n) / N)`."""
-    var factor = (2 * n) / N
+    comptime `-2π/N` = Scalar[dtype](-2.0 * pi) / Scalar[dtype](N)
+    var theta = `-2π/N` * Scalar[dtype](n)
 
     var num: ComplexScalar[dtype]
 
-    if factor == 0:
-        num = {1, 0}
-    elif factor == 0.5:
-        num = {0, -1}
-    elif factor == 1:
-        num = {-1, 0}
-    elif factor == 1.5:
-        num = {0, 1}
+    @parameter
+    if is_nvidia_gpu():  # FIXME
+        num = {
+            cos(theta.cast[DType.float32]()).cast[dtype](),
+            sin(theta.cast[DType.float32]()).cast[dtype](),
+        }
     else:
-        var theta = Float64(-factor * pi)
-        num = {cos(theta).cast[dtype](), sin(theta).cast[dtype]()}
+        num = {cos(theta), sin(theta)}
 
     @parameter
     if not inverse:
         return num
     else:
-        return {num.re, -num.im}
+        return num.conj()
 
 
 fn _get_twiddle_factors[
@@ -105,7 +103,7 @@ fn _get_twiddle_factors[
     res = {unsafe_uninit_length = Int(length - 1)}
     comptime N = length
     for n in range(UInt(1), N):
-        res[n - 1] = _get_twiddle_factor[dtype, inverse=inverse](n, N)
+        res[n - 1] = _get_twiddle_factor[dtype, inverse=inverse, N=N](n)
 
 
 fn _prep_twiddle_factors[
@@ -357,38 +355,3 @@ fn _get_cascade_idxes[
         comptime idxes_i = _idxes_i(i)
         idxes[idxes_i] = Int(UInt(flat_idx) % curr_num)
         flat_idx = Int(UInt(flat_idx) // curr_num)
-
-    # var j_idxes = 0
-
-    # @parameter
-    # for j in range(len(shape)):
-    #     if _is_excluded[j]():
-    #         continue
-    #     while flat_idx > 0 and idxes[j_idxes] < shape[j].value() - 1:
-    #         var i_idxes = j_idxes + 1
-
-    #         @parameter
-    #         for i in range((j + 1), len(shape)):
-    #             if _is_excluded[i]():
-    #                 continue
-    #             var max_dim_idx = shape[i].value() - 1
-    #             if idxes[i_idxes] + flat_idx <= max_dim_idx:
-    #                 idxes[i_idxes] += flat_idx
-    #                 flat_idx = 0
-    #                 break
-    #             idxes[i_idxes] = max_dim_idx
-    #             flat_idx -= max_dim_idx
-    #             i_idxes += 1
-
-    #         if flat_idx > 0:
-    #             idxes[j_idxes] += 1
-    #             i_idxes = j_idxes + 1
-
-    #             @parameter
-    #             for i in range((j + 1), len(shape)):
-    #                 if _is_excluded[i]():
-    #                     continue
-    #                 idxes[i_idxes] = 0
-    #                 i_idxes += 1
-    #             flat_idx -= 1
-    #     j_idxes += 1
