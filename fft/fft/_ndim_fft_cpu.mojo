@@ -29,7 +29,6 @@ from ._utils import (
 from ._fft import (
     _radix_n_fft_kernel,
     _radix_n_fft_kernel_exp,
-    _radix_n_fft_kernel_exp2,
 )
 
 from benchmark import keep
@@ -97,10 +96,10 @@ fn _run_cpu_nd_fft[
         comptime twfs_layout = Layout.row_major(Int(total_twfs), 2)
         # FIXME(#5686): replace with this once it's solved
         # ref twfs_array_runtime = global_constant[twfs_array]()
-        # var twfs_array_runtime = materialize[twfs_array]()
-        # var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
-        #     twfs_array_runtime.unsafe_ptr()
-        # )
+        var twfs_array_runtime = materialize[twfs_array]()
+        var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
+            twfs_array_runtime.unsafe_ptr()
+        )
         comptime max_base = Int(_max(ordered_bases))
         var x_out_array = InlineArray[Scalar[out_dtype], max_base * 2](
             uninitialized=True
@@ -113,7 +112,7 @@ fn _run_cpu_nd_fft[
         for b in range(len(ordered_bases)):
             comptime base = ordered_bases[b]
             comptime processed = processed_list[b]
-            comptime func = _radix_n_fft_kernel_exp2[
+            comptime func = _radix_n_fft_kernel[
                 do_rfft = dim_idx == start_dim_idx and x_complex_in == 1,
                 base=base,
                 length=length,
@@ -125,11 +124,7 @@ fn _run_cpu_nd_fft[
             comptime num_iters = length // base
 
             for local_i in range(num_iters):
-                keep(shared_f)
-                keep(x_in)
-                # keep(twfs)
-                keep(x_out)
-                # func(shared_f, x_in, local_i, x_out)
+                func(shared_f, x_in, local_i, twfs, x_out)
 
     # When running ffts on multiple dimensions, we need to copy the output of
     # each dimension into an intermediate buffer for reordering

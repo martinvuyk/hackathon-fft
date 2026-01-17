@@ -4,14 +4,15 @@ from complex import ComplexScalar
 from collections import OptionalReg
 from gpu import thread_idx, block_idx, block_dim, barrier
 from gpu.cluster import cluster_arrive_relaxed, cluster_wait
-from gpu.host import DeviceContext, DeviceBuffer, Dim
-from gpu.host.info import Vendor, is_cpu
+from gpu.host import DeviceContext, DeviceBuffer, Dim, DeviceFunction
+from gpu.host.info import Vendor, is_cpu, GPUInfo
 from layout import Layout, LayoutTensor, IntTuple
 from utils.index import IndexList
 from layout.int_tuple import IntArray
 from runtime.asyncrt import parallelism_level
 from sys.info import has_accelerator, size_of, simd_width_of
 from math import ceil
+from std.utils import Variant
 
 from ._utils import (
     _get_dtype,
@@ -32,65 +33,63 @@ from ._fft import (
 )
 
 
-fn _fft_gpu_device_wide[
-    in_dtype: DType,
+@fieldwise_init
+struct _GPUDeviceWidePlan[out_dtype: DType](ImplicitlyCopyable):
+    var twfs_buffer: Optional[DeviceBuffer[Self.out_dtype]]
+    var inter_layer_buf: Optional[DeviceBuffer[Self.out_dtype]]
+
+
+@fieldwise_init
+struct _GPUSharedMemPlan[out_dtype: DType](ImplicitlyCopyable):
+    ...
+
+
+comptime _GPUExecutionPlan[out_dtype: DType] = Variant[
+    _GPUDeviceWidePlan[out_dtype], _GPUSharedMemPlan[out_dtype]
+]
+
+
+fn _calc_total_bases_offsets[
+    dims: IntTuple, bases: List[List[UInt]]
+]() -> Tuple[
+    UInt,
+    InlineArray[UInt, len(dims)],
+    InlineArray[List[UInt], len(dims)],
+]:
+    var absolute_total = UInt(0)
+    var dim_totals = InlineArray[UInt, len(dims)](uninitialized=True)
+    var absolute_offsets = InlineArray[List[UInt], len(dims)](
+        uninitialized=True
+    )
+
+    @parameter
+    for idx in range(len(dims)):
+        comptime length = UInt(dims[idx].value())
+        comptime bases_processed = _get_ordered_bases_processed_list[
+            length, bases[idx]
+        ]()
+        comptime ordered_bases = bases_processed[0]
+        comptime processed_list = bases_processed[1]
+        ref total_offsets = _get_flat_twfs_total_offsets(
+            materialize[ordered_bases](), length, absolute_total
+        )
+        dim_totals[idx] = total_offsets[0]
+        absolute_total += total_offsets[0]
+        absolute_offsets[idx] = total_offsets[1].copy()
+    return absolute_total, dim_totals^, absolute_offsets^
+
+
+fn _get_gpu_device_wide_plan[
     out_dtype: DType,
-    in_layout: Layout,
     out_layout: Layout,
-    in_origin: ImmutOrigin,
-    out_origin: MutOrigin,
     *,
     inverse: Bool,
     bases: List[List[UInt]],
-    max_cluster_size: UInt,
-    grid_dim: Tuple[Int, Int],
-    block_threads: UInt,
-](
-    output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
-    x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
-    ctx: DeviceContext,
-) raises:
+](ctx: DeviceContext) raises -> _GPUDeviceWidePlan[out_dtype]:
     comptime rank = out_layout.rank()
     comptime dims = out_layout.shape[1 : rank - 1]
-    comptime prod = _product_of_dims(dims)
-    comptime start_dim_idx = len(dims) - 1
-    """We are running the ffts from right to left in the layout."""
 
-    comptime amnt_dims = len(bases)
-    comptime batches = out_layout.shape[0].value()
-    comptime x_complex_in = in_layout.shape[rank - 1].value()
-
-    @parameter
-    fn calc_total_bases_offsets() -> (
-        Tuple[
-            UInt,
-            InlineArray[UInt, amnt_dims],
-            InlineArray[List[UInt], amnt_dims],
-        ]
-    ):
-        var absolute_total = UInt(0)
-        var dim_totals = InlineArray[UInt, amnt_dims](uninitialized=True)
-        var absolute_offsets = InlineArray[List[UInt], amnt_dims](
-            uninitialized=True
-        )
-
-        @parameter
-        for idx in range(amnt_dims):
-            comptime length = UInt(dims[idx].value())
-            comptime bases_processed = _get_ordered_bases_processed_list[
-                length, bases[idx]
-            ]()
-            comptime ordered_bases = bases_processed[0]
-            comptime processed_list = bases_processed[1]
-            ref total_offsets = _get_flat_twfs_total_offsets(
-                materialize[ordered_bases](), length, absolute_total
-            )
-            dim_totals[idx] = total_offsets[0]
-            absolute_total += total_offsets[0]
-            absolute_offsets[idx] = total_offsets[1].copy()
-        return absolute_total, dim_totals^, absolute_offsets^
-
-    comptime total_bases_offsets = calc_total_bases_offsets()
+    comptime total_bases_offsets = _calc_total_bases_offsets[dims, bases]()
     comptime total_twfs = total_bases_offsets[0]
     comptime dim_total_twfs = total_bases_offsets[1]
     comptime absolute_offsets = total_bases_offsets[2]
@@ -98,7 +97,7 @@ fn _fft_gpu_device_wide[
     var twfs = ctx.enqueue_create_buffer[out_dtype](twf_layout.size())
 
     @parameter
-    for idx in range(amnt_dims):
+    for idx in range(len(bases)):
         comptime length = UInt(dims[idx].value())
         comptime bases_processed = _get_ordered_bases_processed_list[
             length, bases[idx]
@@ -126,8 +125,169 @@ fn _fft_gpu_device_wide[
         var twfs_array_runtime = materialize[twfs_array]()
         ctx.enqueue_copy(view, twfs_array_runtime.unsafe_ptr())
 
+    @parameter
+    if len(dims) == 1:
+        return {twfs, None}
+
+    # When running ffts on multiple dimensions, we need to copy the output of
+    # each dimension into an intermediate buffer for reordering
+    comptime out_b_layout = Layout.row_major(out_layout.shape[1:])
+    return {twfs, ctx.enqueue_create_buffer[out_dtype](out_b_layout.size())}
+
+
+struct _GPUPlan[
+    out_dtype: DType,
+    out_layout: Layout,
+    inverse: Bool,
+    bases: List[List[UInt]],
+    test: Optional[_GPUTest],
+    gpu_info: GPUInfo,
+    max_cluster_size: UInt,
+](ImplicitlyCopyable):
+    comptime rank = Self.out_layout.rank()
+    comptime dims = Self.out_layout.shape[1 : Self.rank - 1]
+    comptime prod = _product_of_dims(Self.dims)
+
+    @staticmethod
+    fn _find_max_threads(out threads_base: Tuple[UInt, UInt]):
+        threads_base = {0, 0}
+
+        @parameter
+        for i, base_set in enumerate(Self.bases):
+            comptime val = _min(base_set)
+            comptime dim = UInt(Self.dims[i].value())
+            comptime threads = dim // val
+            if threads_base[0] < threads:
+                threads_base = threads, val
+
+    comptime threads_base = Self._find_max_threads()
+    comptime num_threads = Self.threads_base[0]
+    comptime max_dim_base = Self.threads_base[1]
+    comptime max_dim = Self.num_threads * Self.max_dim_base
+
+    comptime batches = UInt(Self.out_layout.shape[0].value())
+
+    comptime max_threads_per_block = UInt(Self.gpu_info.max_thread_block_size)
+    comptime threads_per_m = Self.gpu_info.threads_per_multiprocessor
+    comptime max_threads_available = UInt(
+        Self.threads_per_m * Self.gpu_info.sm_count
+    )
+
+    comptime num_blocks = UInt(
+        ceil(Self.num_threads / Self.max_threads_per_block).cast[DType.uint]()
+    )
+    comptime shared_mem_per_m = UInt(
+        Self.gpu_info.shared_memory_per_multiprocessor
+    )
+    comptime shared_mem_per_t = Self.shared_mem_per_m // UInt(
+        Self.threads_per_m
+    )
+    comptime shared_mem_per_block = Self.shared_mem_per_t * Self.max_threads_per_block
+    comptime shared_mem_per_warp = Self.shared_mem_per_t * Self.warp_size
+    comptime shared_mem_per_cluster = Self.shared_mem_per_block * Self.max_cluster_size
+    comptime out_size_max_dim = UInt(
+        size_of[Self.out_dtype]()
+    ) * Self.max_dim * 2
+    comptime full_output_size = UInt(size_of[Self.out_dtype]() * Self.prod * 2)
+    comptime warp_size = UInt(Self.gpu_info.warp_size)
+
+    comptime can_run_in_warp = Self.num_threads <= Self.warp_size and (
+        Self.full_output_size <= Self.shared_mem_per_warp
+        or Self.out_size_max_dim <= Self.shared_mem_per_warp
+    ) and (Self.test.or_else(_GPUTest.WARP).v == _GPUTest.WARP.v)
+
+    comptime can_run_in_block = Self.num_threads <= Self.max_threads_per_block and (
+        Self.full_output_size <= Self.shared_mem_per_block
+        or Self.out_size_max_dim <= Self.shared_mem_per_block
+    ) and (
+        Self.test.or_else(_GPUTest.BLOCK).v
+        in (_GPUTest.BLOCK.v, _GPUTest.WARP.v)
+    )
+
+    comptime is_sm_90_or_newer = (
+        Self.gpu_info.vendor == Vendor.NVIDIA_GPU
+        and Self.gpu_info.compute >= 9.0
+    )
+    comptime can_run_in_block_cluster = Self.num_blocks <= Self.max_cluster_size and (
+        Self.full_output_size <= Self.shared_mem_per_cluster
+        or Self.out_size_max_dim <= Self.shared_mem_per_cluster
+    ) and Self.is_sm_90_or_newer and (
+        Self.test.or_else(_GPUTest.CLUSTER).v == _GPUTest.CLUSTER.v
+    )
+
+    comptime block_threads = UInt(
+        ceil(Self.num_threads / Self.num_blocks).cast[DType.uint]()
+    )
+    comptime thread_batch_size = Self.max_threads_available // Self.num_threads
+    comptime batch_size = min(Self.batches, Self.thread_batch_size)
+    comptime run_intra_something = Self.can_run_in_warp or Self.can_run_in_block or Self.can_run_in_block_cluster
+
+    var execution_plan: _GPUExecutionPlan[Self.out_dtype]
+
+    fn __init__(
+        ctx: DeviceContext,
+        out self: _GPUPlan[
+            Self.out_dtype,
+            Self.out_layout,
+            Self.inverse,
+            Self.bases,
+            Self.test,
+            ctx.default_device_info,
+            Self.max_cluster_size,
+        ],
+    ) raises:
+        __comptime_assert Self.threads_per_m > 0, (
+            "Unknown number of threads per sm for the given device. "
+            "It is needed in order to run the gpu implementation."
+        )
+
+        @parameter
+        if Self.run_intra_something:
+            self.execution_plan = _GPUSharedMemPlan[Self.out_dtype]()
+        else:
+            self.execution_plan = _get_gpu_device_wide_plan[
+                Self.out_dtype,
+                Self.out_layout,
+                inverse = Self.inverse,
+                bases = Self.bases,
+            ](ctx)
+
+
+fn _fft_gpu_device_wide[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+    in_origin: ImmutOrigin,
+    out_origin: MutOrigin,
+    *,
+    inverse: Bool,
+    bases: List[List[UInt]],
+    max_cluster_size: UInt,
+    grid_dim: Tuple[Int, Int],
+    block_threads: UInt,
+](
+    output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
+    x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
+    ctx: DeviceContext,
+    plan: _GPUDeviceWidePlan[out_dtype],
+) raises:
+    comptime rank = out_layout.rank()
+    comptime dims = out_layout.shape[1 : rank - 1]
+    comptime prod = _product_of_dims(dims)
+    comptime start_dim_idx = len(dims) - 1
+    """We are running the ffts from right to left in the layout."""
+
+    comptime amnt_dims = len(bases)
+    comptime batches = out_layout.shape[0].value()
+    comptime x_complex_in = in_layout.shape[rank - 1].value()
+
+    comptime total_bases_offsets = _calc_total_bases_offsets[dims, bases]()
+    comptime total_twfs = total_bases_offsets[0]
+    comptime absolute_offsets = total_bases_offsets[2]
+    comptime twf_layout = Layout.row_major(Int(total_twfs), 2)
     var twiddle_factors = LayoutTensor[mut=False, out_dtype, twf_layout](
-        twfs.unsafe_ptr()
+        plan.twfs_buffer.value().unsafe_ptr()
     )
 
     @parameter
@@ -173,9 +333,7 @@ fn _fft_gpu_device_wide[
 
         @parameter
         for b in range(len(ordered_bases)):
-            var comp = ctx.compile_function_experimental[func[b]]()
-            ctx.enqueue_function_experimental(
-                comp,
+            ctx.enqueue_function[func[b], func[b]](
                 batch_output,
                 batch_x,
                 twiddle_factors,
@@ -188,9 +346,7 @@ fn _fft_gpu_device_wide[
     comptime size = out_b_layout.size()
     # When running ffts on multiple dimensions, we need to copy the output of
     # each dimension into an intermediate buffer for reordering
-    var inter_layer_buf = ctx.enqueue_create_buffer[out_dtype](
-        size * Int(len(dims) > 1)
-    )
+    var inter_layer_buf = plan.inter_layer_buf.value()
 
     for block_num in range(batches):
         var block_offset = output.stride[0]() * block_num
@@ -501,6 +657,17 @@ fn _run_gpu_nd_fft[
     output: LayoutTensor[mut=True, out_dtype, out_layout, ...],
     x: LayoutTensor[mut=False, in_dtype, in_layout, ...],
     ctx: DeviceContext,
+    plan_in: Optional[
+        _GPUPlan[
+            out_dtype,
+            out_layout,
+            inverse,
+            bases,
+            test,
+            ctx.default_device_info,
+            max_cluster_size,
+        ]
+    ] = None,
 ) raises:
     __comptime_assert (
         out_dtype.is_floating_point()
@@ -508,83 +675,12 @@ fn _run_gpu_nd_fft[
     __comptime_assert (
         has_accelerator()
     ), "The non-cpu implementation is for GPU only"
-    comptime rank = out_layout.rank()
-    comptime dims = out_layout.shape[1 : rank - 1]
-    comptime prod = _product_of_dims(dims)
-
-    @parameter
-    fn _find_max_threads(out threads_base: Tuple[UInt, UInt]):
-        threads_base = {0, 0}
-
-        @parameter
-        for i, base_set in enumerate(bases):
-            comptime val = _min(base_set)
-            comptime dim = UInt(dims[i].value())
-            comptime threads = dim // val
-            if threads_base[0] < threads:
-                threads_base = threads, val
-
-    comptime threads_base = _find_max_threads()
-    comptime num_threads = threads_base[0]
-    comptime max_dim_base = threads_base[1]
-    comptime max_dim = num_threads * max_dim_base
-
-    comptime batches = UInt(in_layout.shape[0].value())
-    comptime in_complex = in_layout.shape[rank - 1].value()
-
-    comptime gpu_info = ctx.default_device_info
-    comptime max_threads_per_block = UInt(gpu_info.max_thread_block_size)
-    comptime threads_per_m = gpu_info.threads_per_multiprocessor
-    __comptime_assert threads_per_m > 0, (
-        "Unknown number of threads per sm for the given device. "
-        "It is needed in order to run the gpu implementation."
-    )
-    comptime max_threads_available = UInt(threads_per_m * gpu_info.sm_count)
-
-    comptime num_blocks = UInt(
-        ceil(num_threads / max_threads_per_block).cast[DType.uint]()
-    )
-    comptime shared_mem_per_m = UInt(gpu_info.shared_memory_per_multiprocessor)
-    comptime shared_mem_per_t = shared_mem_per_m // UInt(threads_per_m)
-    comptime shared_mem_per_block = shared_mem_per_t * max_threads_per_block
-    comptime shared_mem_per_warp = shared_mem_per_t * warp_size
-    comptime shared_mem_per_cluster = shared_mem_per_block * max_cluster_size
-    comptime out_size_max_dim = UInt(size_of[out_dtype]()) * max_dim * 2
-    comptime full_output_size = UInt(size_of[out_dtype]() * prod * 2)
-    comptime warp_size = UInt(gpu_info.warp_size)
-
-    comptime can_run_in_warp = num_threads <= warp_size and (
-        full_output_size <= shared_mem_per_warp
-        or out_size_max_dim <= shared_mem_per_warp
-    ) and (test.or_else(_GPUTest.WARP).v == _GPUTest.WARP.v)
-
-    comptime can_run_in_block = num_threads <= max_threads_per_block and (
-        full_output_size <= shared_mem_per_block
-        or out_size_max_dim <= shared_mem_per_block
-    ) and (
-        test.or_else(_GPUTest.BLOCK).v in (_GPUTest.BLOCK.v, _GPUTest.WARP.v)
-    )
-
-    comptime is_sm_90_or_newer = (
-        gpu_info.vendor == Vendor.NVIDIA_GPU and gpu_info.compute >= 9.0
-    )
-    comptime can_run_in_block_cluster = num_blocks <= max_cluster_size and (
-        full_output_size <= shared_mem_per_cluster
-        or out_size_max_dim <= shared_mem_per_cluster
-    ) and is_sm_90_or_newer and (
-        test.or_else(_GPUTest.CLUSTER).v == _GPUTest.CLUSTER.v
-    )
-
-    comptime block_threads = UInt(
-        ceil(num_threads / num_blocks).cast[DType.uint]()
-    )
-    comptime thread_batch_size = max_threads_available // num_threads
-    comptime batch_size = min(batches, thread_batch_size)
+    var plan = plan_in.or_else({ctx})
 
     @always_inline
     @parameter
     fn _launch_fn[batch_size: Int](offset: Int) raises:
-        comptime out_tuple = IntTuple(batch_size, dims, 2)
+        comptime out_tuple = IntTuple(batch_size, plan.dims, 2)
         comptime out_batch_layout = Layout.row_major(out_tuple.flatten())
         var out_batch = LayoutTensor[
             out_dtype,
@@ -592,11 +688,13 @@ fn _run_gpu_nd_fft[
             output.origin,
             address_space = output.address_space,
         ](output.ptr + output.stride[0]() * offset)
-        comptime x_tuple = IntTuple(batch_size, dims, in_complex)
+        comptime in_complex = in_layout.shape[plan.rank - 1].value()
+        comptime x_tuple = IntTuple(batch_size, plan.dims, in_complex)
         comptime x_batch_layout = Layout.row_major(x_tuple.flatten())
         var x_batch = LayoutTensor[
             in_dtype, x_batch_layout, x.origin, address_space = x.address_space
         ](x.ptr + x.stride[0]() * offset)
+        comptime run_warp = plan.can_run_in_warp
 
         fn cluster_stage_sync_fn():
             cluster_arrive_relaxed()
@@ -604,19 +702,19 @@ fn _run_gpu_nd_fft[
 
         fn block_or_warp_stage_sync_fn():
             @parameter
-            if not can_run_in_warp:
+            if run_warp:
                 barrier()
 
         comptime stage_sync_fn = block_or_warp_stage_sync_fn if (
-            can_run_in_block or can_run_in_warp
+            plan.can_run_in_block or plan.can_run_in_warp
         ) else cluster_stage_sync_fn
         comptime address_space = AddressSpace.SHARED if (
-            can_run_in_block or can_run_in_warp
+            plan.can_run_in_block or plan.can_run_in_warp
         ) else AddressSpace.SHARED_CLUSTER
-        comptime max_shared_mem_size = shared_mem_per_warp if (
-            can_run_in_warp
+        comptime max_shared_mem_size = plan.shared_mem_per_warp if (
+            plan.can_run_in_warp
         ) else (
-            shared_mem_per_block if can_run_in_block else shared_mem_per_cluster
+            plan.shared_mem_per_block if plan.can_run_in_block else plan.shared_mem_per_cluster
         )
 
         comptime block_func_batch = _intra_something_gpu_fft_kernel_radix_n_multi_dim[
@@ -629,42 +727,40 @@ fn _run_gpu_nd_fft[
             inverse=inverse,
             bases=bases,
             max_base = _max(bases),
-            max_dim=max_dim,
-            max_dim_base=max_dim_base,
+            max_dim = plan.max_dim,
+            max_dim_base = plan.max_dim_base,
             max_shared_mem_size=max_shared_mem_size,
-            total_threads = block_threads * num_blocks,
+            total_threads = plan.block_threads * plan.num_blocks,
             stage_sync_fn=stage_sync_fn,
             shared_address_space=address_space,
         ]
 
-        comptime grid_dim = (Int(num_blocks), batch_size)
+        comptime grid_dim = (Int(plan.num_blocks), batch_size)
 
         @parameter
-        if can_run_in_warp or can_run_in_block or can_run_in_block_cluster:
+        if plan.run_intra_something:
             __comptime_assert (
-                full_output_size <= max_shared_mem_size
-                or out_size_max_dim <= max_shared_mem_size
+                plan.full_output_size <= max_shared_mem_size
+                or plan.out_size_max_dim <= max_shared_mem_size
             ), (
                 "internal implementation error for the given shape, please file"
                 " an issue"
             )
-            comptime run_cluster = can_run_in_block_cluster and num_blocks > 1
-            comptime shared_mem = full_output_size if (
-                full_output_size <= max_shared_mem_size
-            ) else out_size_max_dim
-            var func = ctx.compile_function_experimental[block_func_batch]()
-            ctx.enqueue_function_experimental(
-                func,
+            comptime run_cluster = plan.can_run_in_block_cluster and plan.num_blocks > 1
+            comptime shared_mem = plan.full_output_size if (
+                plan.full_output_size <= max_shared_mem_size
+            ) else plan.out_size_max_dim
+            ctx.enqueue_function[block_func_batch, block_func_batch](
                 out_batch,
                 x_batch,
                 grid_dim=grid_dim,
                 cluster_dim=OptionalReg[Dim](
-                    num_blocks
+                    plan.num_blocks
                 ) if run_cluster else None,
                 shared_mem_bytes=OptionalReg[Int](
                     Int(shared_mem)
                 ) if run_cluster else None,
-                block_dim=block_threads,
+                block_dim=plan.block_threads,
             )
         else:
             _fft_gpu_device_wide[
@@ -672,16 +768,21 @@ fn _run_gpu_nd_fft[
                 inverse=inverse,
                 bases=bases,
                 grid_dim=grid_dim,
-                block_threads=block_threads,
-            ](output, x, ctx=ctx)
+                block_threads = plan.block_threads,
+            ](
+                output,
+                x,
+                ctx=ctx,
+                plan=plan.execution_plan[_GPUDeviceWidePlan[out_dtype]],
+            )
 
-    comptime full_batches = batches // batch_size
+    comptime full_batches = plan.batches // plan.batch_size
 
     for i in range(full_batches):
-        _launch_fn[Int(batch_size)](Int(i * batch_size))
+        _launch_fn[Int(plan.batch_size)](Int(i * plan.batch_size))
 
-    comptime remainder = batches % batch_size
+    comptime remainder = plan.batches % plan.batch_size
 
     @parameter
     if remainder > 0:
-        _launch_fn[Int(remainder)](Int(full_batches * batch_size))
+        _launch_fn[Int(remainder)](Int(full_batches * plan.batch_size))

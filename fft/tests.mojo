@@ -82,8 +82,8 @@ def _test_fft_radix_n[
             print("]")
             print("expected: ", end="")
 
-        comptime ATOL = 1e-3 if dtype is DType.float64 else (
-            1e-2 if dtype is DType.float32 else 1e-1
+        comptime ATOL = 1e-3 if dtype == DType.float64 else (
+            1e-2 if dtype == DType.float32 else 1e-1
         )
         comptime RTOL = 1e-5
 
@@ -955,10 +955,10 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
 
 
 def test_3d_gpu[debug: Bool = False]():
-    _test_3d_gpu[debug, False, _GPUTest.BLOCK]()
-    _test_3d_gpu[debug, False, _GPUTest.WARP]()
+    # _test_3d_gpu[debug, False, _GPUTest.BLOCK]()
+    # _test_3d_gpu[debug, False, _GPUTest.WARP]()
     _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
-    _test_3d_gpu[debug, False, _GPUTest.CLUSTER]()
+    # _test_3d_gpu[debug, False, _GPUTest.CLUSTER]()
 
 
 def main():

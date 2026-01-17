@@ -43,7 +43,6 @@ fn bench_gpu_radix_n_rfft[dtype: DType, shape: IntTuple](mut b: Bencher) raises:
         @always_inline
         @parameter
         fn call_fn(ctx: DeviceContext) raises:
-            # for _ in range(GPU_ITERS):
             fft(out_tensor, x_tensor, ctx)
             ctx.synchronize()
 
