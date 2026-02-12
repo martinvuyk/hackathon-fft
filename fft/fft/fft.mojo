@@ -11,29 +11,29 @@ from ._utils import (
     _product_of_dims,
     _times_divisible_by,
 )
-from ._ndim_fft_cpu import _run_cpu_nd_fft
-from ._ndim_fft_gpu import _run_gpu_nd_fft
+from ._ndim_fft_cpu import _run_cpu_nd_fft, _CPUPlan
+from ._ndim_fft_gpu import _run_gpu_nd_fft, _GPUPlan
 
 comptime _DEFAULT_DEVICE = "cpu" if not has_accelerator() else "gpu"
 
 
 fn _check_layout_conditions_nd[in_layout: Layout, out_layout: Layout]():
     comptime rank = out_layout.rank()
-    __comptime_assert rank > 2, (
+    comptime assert rank > 2, (
         "The rank should be bigger than 2. The first"
         " dimension represents the amount of batches, and the last the complex"
         " dimension."
     )
-    __comptime_assert (
+    comptime assert (
         in_layout.rank() == rank
     ), "in_layout and out_layout must have equal rank"
-    __comptime_assert (
+    comptime assert (
         1 <= in_layout.shape[rank - 1].value() <= 2
     ), "The last dimension of in_layout should be 1 or 2"
-    __comptime_assert (
+    comptime assert (
         out_layout.shape[rank - 1].value() == 2
     ), "out_layout must have the last dimension equal to 2"
-    __comptime_assert (
+    comptime assert (
         out_layout.shape[: rank - 2] == in_layout.shape[: rank - 2]
     ), (
         "out_layout and in_layout should have the same shape before"
@@ -42,7 +42,7 @@ fn _check_layout_conditions_nd[in_layout: Layout, out_layout: Layout]():
 
     @parameter
     for i in range(rank - 2):
-        __comptime_assert (
+        comptime assert (
             out_layout.shape[i + 1] != 1
         ), "no inner dimension should be of size 1"
 
@@ -50,7 +50,7 @@ fn _check_layout_conditions_nd[in_layout: Layout, out_layout: Layout]():
 fn _estimate_best_bases[
     out_layout: Layout, target: StaticString
 ](out bases: List[UInt]):
-    __comptime_assert out_layout.rank() > 1, "output rank must be > 1"
+    comptime assert out_layout.rank() > 1, "output rank must be > 1"
     comptime length = out_layout.shape[1].value()
     comptime max_radix_number = 32
 
@@ -81,14 +81,17 @@ fn _estimate_best_bases[
                 potential_bases.reverse()
                 return potential_bases^
 
-    comptime lower_primes = InlineArray[UInt, 11](
-        31, 29, 23, 19, 17, 13, 11, 7, 5, 3, 2
-    )
-    comptime amnt_primes = len(lower_primes)
-    bases = {capacity = amnt_primes}
+    # fmt: off
+    var lower_primes: InlineArray[Byte, 25] = [
+        97, 89, 83, 79, 73, 71, 67, 61, 59, 53, 47, 43, 41, 37, 31, 29, 23, 19,
+        17, 13, 11, 7, 5, 3, 2
+    ]
+    # fmt: on
+    bases = {capacity = len(lower_primes)}
     var processed = 1
-    for i in range(amnt_primes):
-        var prime = lower_primes[i]
+
+    for i in range(len(lower_primes)):
+        var prime = UInt(lower_primes[i])
         var amnt_divisible = _times_divisible_by(
             UInt(length // processed), prime
         )
@@ -119,6 +122,49 @@ fn _estimate_best_bases_nd[
         )
 
 
+@always_inline
+def plan_fft[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+    *,
+    inverse: Bool = False,
+    bases: List[List[UInt]] = _estimate_best_bases_nd[
+        in_layout, out_layout, "cpu"
+    ](),
+](*, cpu_workers: Optional[UInt] = None) -> _CPUPlan[
+    out_dtype, out_layout, inverse, bases
+]:
+    return {}
+
+
+@always_inline
+def plan_fft[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+    *,
+    runtime_twfs: Bool = True,
+    max_cluster_size: Int = 8,
+    inverse: Bool = False,
+    bases: List[List[UInt]] = _estimate_best_bases_nd[
+        in_layout, out_layout, "gpu"
+    ](),
+](*, ctx: DeviceContext) -> _GPUPlan[
+    out_dtype,
+    out_layout,
+    inverse,
+    bases,
+    None,
+    ctx.default_device_info,
+    max_cluster_size = UInt(max_cluster_size),
+    runtime_twfs=runtime_twfs,
+]:
+    return {ctx}
+
+
 fn fft[
     in_dtype: DType,
     out_dtype: DType,
@@ -135,6 +181,7 @@ fn fft[
     output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
     x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
     *,
+    plan: Optional[_CPUPlan[out_dtype, out_layout, inverse, bases]] = None,
     cpu_workers: Optional[UInt] = None,
 ) raises:
     """Calculate the Fast Fourier Transform.
@@ -152,6 +199,8 @@ fn fft[
     Args:
         output: The output tensor.
         x: The input tensor.
+        plan: The execution plan, it is best to build it outside this function
+            if it is to be called repeatedly.
         cpu_workers: The amount of workers to use when running on CPU.
 
     Constraints:
@@ -167,14 +216,14 @@ fn fft[
         `sequence_length // smallest_base`.
     """
     _check_layout_conditions_nd[in_layout, out_layout]()
-    __comptime_assert len(bases) == out_layout.rank() - 2, (
+    comptime assert len(bases) == out_layout.rank() - 2, (
         "The bases list should have the same outer size as the amount of"
         " internal dimensions. e.g. (batches, dim_0, dim_1, dim_2, 2) ->"
         " len(bases) == 3"
     )
 
     _run_cpu_nd_fft[inverse=inverse, bases=bases](
-        output, x, cpu_workers=cpu_workers
+        output, x, plan=plan.or_else({}), cpu_workers=cpu_workers
     )
 
 
@@ -187,10 +236,10 @@ fn fft[
     out_origin: MutOrigin,
     *,
     inverse: Bool = False,
-    target: StaticString = _DEFAULT_DEVICE,
     bases: List[List[UInt]] = _estimate_best_bases_nd[
-        in_layout, out_layout, target
+        in_layout, out_layout, "gpu"
     ](),
+    runtime_twfs: Bool = True,
     # TODO: we'd need to know the cudaOccupancyMaxPotentialClusterSize for
     # every device to not use the portable 8
     # https://docs.nvidia.com/cuda/cuda-c-programming-guide/#thread-block-clusters
@@ -200,7 +249,18 @@ fn fft[
     x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
     ctx: DeviceContext,
     *,
-    cpu_workers: Optional[UInt] = None,
+    plan: Optional[
+        _GPUPlan[
+            out_dtype,
+            out_layout,
+            inverse,
+            bases,
+            None,
+            ctx.default_device_info,
+            max_cluster_size=max_cluster_size,
+            runtime_twfs=runtime_twfs,
+        ]
+    ] = None,
 ) raises:
     """Calculate the Fast Fourier Transform.
 
@@ -212,8 +272,9 @@ fn fft[
         in_origin: The `Origin` of the input tensor.
         out_origin: The `Origin` of the output tensor.
         inverse: Whether to run the inverse fourier transform.
-        target: Target device ("cpu" or "gpu").
         bases: The list of bases for which to build the mixed-radix algorithm.
+        runtime_twfs: Whether to calculate the twiddle factors at runtime (
+            faster for big tensors) at the cost of lower precision.
         max_cluster_size: In the case of NVIDIA GPUs, what the maximum cluster
             size for the device is.
 
@@ -221,7 +282,8 @@ fn fft[
         output: The output tensor.
         x: The input tensor.
         ctx: The `DeviceContext`.
-        cpu_workers: The amount of workers to use when running on CPU.
+        plan: The execution plan, it is best to build it outside this function
+            if it is to be called repeatedly.
 
     Constraints:
         The layout should match one of: `{(batches, dim_0 [, dim_1 [, ...]], 1),
@@ -238,104 +300,14 @@ fn fft[
         launched is equal to the `sequence_length // smallest_base`.
     """
     _check_layout_conditions_nd[in_layout, out_layout]()
-    __comptime_assert len(bases) == out_layout.rank() - 2, (
+    comptime assert len(bases) == out_layout.rank() - 2, (
         "The bases list should have the same outer size as the amount of"
         " internal dimensions. e.g. (batches, dim_0, dim_1, dim_2, 2) ->"
         " len(bases) == 3"
     )
-
-    @parameter
-    if is_cpu[target]():
-        fft[inverse=inverse, bases=bases](output, x, cpu_workers=cpu_workers)
-    else:
-        _run_gpu_nd_fft[
-            inverse=inverse, bases=bases, max_cluster_size=max_cluster_size
-        ](output, x, ctx)
-
-
-@always_inline
-fn ifft[
-    in_dtype: DType,
-    out_dtype: DType,
-    in_layout: Layout,
-    out_layout: Layout,
-    *,
-    bases: List[List[UInt]] = _estimate_best_bases_nd[
-        in_layout, out_layout, "cpu"
-    ](),
-](
-    output: LayoutTensor[mut=True, out_dtype, out_layout],
-    x: LayoutTensor[mut=False, in_dtype, in_layout],
-    *,
-    cpu_workers: Optional[UInt] = None,
-) raises:
-    """Calculate the inverse Fast Fourier Transform.
-
-    Parameters:
-        in_dtype: The `DType` of the input tensor.
-        out_dtype: The `DType` of the output tensor.
-        in_layout: The `Layout` of the input tensor.
-        out_layout: The `Layout` of the output tensor.
-        bases: The list of bases for which to build the mixed-radix algorithm.
-
-    Args:
-        output: The output tensor.
-        x: The input tensor.
-        cpu_workers: The amount of workers to use when running on CPU.
-
-    Constraints:
-        The layout should match one of: `{(batches, dim_0 [, dim_1 [, ...]], 1),
-        (batches, dim_0 [, dim_1 [, ...]], 2)}`
-
-    Notes:
-        This function is provided as a wrapper for the `fft` function. The
-        documentation is more complete there.
-    """
-    fft[bases=bases, inverse=True](output, x, cpu_workers=cpu_workers)
-
-
-@always_inline
-fn ifft[
-    in_dtype: DType,
-    out_dtype: DType,
-    in_layout: Layout,
-    out_layout: Layout,
-    *,
-    target: StaticString = _DEFAULT_DEVICE,
-    bases: List[List[UInt]] = _estimate_best_bases_nd[
-        in_layout, out_layout, target
-    ](),
-](
-    output: LayoutTensor[mut=True, out_dtype, out_layout],
-    x: LayoutTensor[mut=False, in_dtype, in_layout],
-    ctx: DeviceContext,
-    *,
-    cpu_workers: Optional[UInt] = None,
-) raises:
-    """Calculate the inverse Fast Fourier Transform.
-
-    Parameters:
-        in_dtype: The `DType` of the input tensor.
-        out_dtype: The `DType` of the output tensor.
-        in_layout: The `Layout` of the input tensor.
-        out_layout: The `Layout` of the output tensor.
-        target: Target device ("cpu" or "gpu").
-        bases: The list of bases for which to build the mixed-radix algorithm.
-
-    Args:
-        output: The output tensor.
-        x: The input tensor.
-        ctx: The `DeviceContext`.
-        cpu_workers: The amount of workers to use when running on CPU.
-
-    Constraints:
-        The layout should match one of: `{(batches, dim_0 [, dim_1 [, ...]], 1),
-        (batches, dim_0 [, dim_1 [, ...]], 2)}`
-
-    Notes:
-        This function is provided as a wrapper for the `fft` function. The
-        documentation is more complete there.
-    """
-    fft[bases=bases, inverse=True, target=target](
-        output, x, ctx, cpu_workers=cpu_workers
-    )
+    _run_gpu_nd_fft[
+        inverse=inverse,
+        bases=bases,
+        max_cluster_size=max_cluster_size,
+        runtime_twfs=runtime_twfs,
+    ](output, x, ctx)

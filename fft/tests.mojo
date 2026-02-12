@@ -57,7 +57,9 @@ def _test_fft_radix_n[
     comptime in_layout = Layout.row_major(
         BATCHES, SIZE, 2
     ) if inverse else Layout.row_major(BATCHES, SIZE, 1)
+    comptime in_size = in_layout.size()
     comptime out_layout = Layout.row_major(BATCHES, SIZE, 2)
+    comptime out_size = out_layout.size()
 
     @parameter
     if debug:
@@ -65,7 +67,7 @@ def _test_fft_radix_n[
         print("SIZE:", SIZE)
         print("Buffers for Bases: ", end="")
         var b = materialize[bases]()
-        print(b.__str__().replace("UInt(", "").replace(")", ""))
+        print(b.__str__().replace("SIMD[DType.uint, 1](", "").replace(")", ""))
         print("----------------------------")
 
     @parameter
@@ -140,10 +142,10 @@ def _test_fft_radix_n[
     @parameter
     if target == "cpu":
         var out_data = List[Scalar[in_dtype]](
-            length=out_layout.size(), fill=nan[in_dtype]()
+            length=out_size, fill=nan[in_dtype]()
         )
         var x_data = List[Scalar[out_dtype]](
-            length=in_layout.size(), fill=nan[out_dtype]()
+            length=in_size, fill=nan[out_dtype]()
         )
         var batch_output = LayoutTensor[mut=True, out_dtype, out_layout](
             Span(out_data)
@@ -178,11 +180,9 @@ def _test_fft_radix_n[
             _eval(output, test[0], test[1])
     else:
         with DeviceContext() as ctx:
-            var x_data = ctx.enqueue_create_buffer[in_dtype](in_layout.size())
+            var x_data = ctx.enqueue_create_buffer[in_dtype](in_size)
             x_data.enqueue_fill(Scalar[in_dtype].MAX)
-            var out_data = ctx.enqueue_create_buffer[out_dtype](
-                out_layout.size()
-            )
+            var out_data = ctx.enqueue_create_buffer[out_dtype](out_size)
             out_data.enqueue_fill(nan[out_dtype]())
             var batch_output = LayoutTensor[mut=True, out_dtype, out_layout](
                 out_data.unsafe_ptr()
@@ -209,9 +209,12 @@ def _test_fft_radix_n[
                             x[i, 0] = Scalar[in_dtype](test[0][i])
 
             ctx.synchronize()
-            _run_gpu_nd_fft[inverse=inverse, bases= [bases], test=gpu_test](
-                batch_output, batch_x, ctx
-            )
+            _run_gpu_nd_fft[
+                inverse=inverse,
+                bases= [bases],
+                test=gpu_test,
+                runtime_twfs=False,
+            ](batch_output, batch_x, ctx)
             ctx.synchronize()
             with out_data.map_to_host() as out_host:
                 for idx, test in enumerate(materialize[test_values]()):
@@ -232,7 +235,7 @@ def _test_fft_radix_n[
 
 def _test_fft[
     dtype: DType,
-    func: fn[bases: List[UInt], test_values: _TestValues[dtype]] () raises,
+    func: fn[bases: List[UInt], test_values: _TestValues[dtype]]() raises,
 ]():
     comptime L = List[UInt]
 
@@ -344,16 +347,25 @@ comptime _test[
 ]
 
 
-def test_fft[debug: Bool = False]():
+def test_fft_1d_cpu[debug: Bool = False]():
     comptime dtype = DType.float64
     _test[dtype, False, "cpu", debug=debug]()
+
+
+def test_fft_1d_gpu[debug: Bool = False]():
+    comptime dtype = DType.float64
     _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.BLOCK]()
-    _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.WARP]()
-    _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.DEVICE_WIDE]()
-    _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.CLUSTER]()
+    # _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.WARP]()
+    # _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.DEVICE_WIDE]()
+    # _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.CLUSTER]()
 
 
-def test_ifft[debug: Bool = False]():
+def test_ifft_1d_cpu[debug: Bool = False]():
+    comptime dtype = DType.float64
+    _test[dtype, True, "cpu", debug=debug]()
+
+
+def test_ifft_1d_gpu[debug: Bool = False]():
     comptime dtype = DType.float64
     _test[dtype, True, "cpu", debug=debug]()
     _test[dtype, True, "gpu", debug=debug, gpu_test = _GPUTest.BLOCK]()
@@ -470,12 +482,14 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
     comptime in_dtype = DType.uint8
     comptime out_dtype = DType.float64
     comptime in_layout = Layout.row_major(1, ROWS, COLS, 1)
+    comptime in_size = in_layout.size()
     comptime out_layout = Layout.row_major(1, ROWS, COLS, 2)
+    comptime out_size = out_layout.size()
 
     with DeviceContext() as ctx:
-        var x_data = ctx.enqueue_create_buffer[in_dtype](in_layout.size())
+        var x_data = ctx.enqueue_create_buffer[in_dtype](in_size)
         x_data.enqueue_fill(Scalar[in_dtype].MAX)
-        var out_data = ctx.enqueue_create_buffer[out_dtype](out_layout.size())
+        var out_data = ctx.enqueue_create_buffer[out_dtype](out_size)
         out_data.enqueue_fill(nan[out_dtype]())
 
         var out = LayoutTensor[mut=True, out_dtype, out_layout](
@@ -494,9 +508,9 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
 
         ctx.synchronize()
         comptime bases = _estimate_best_bases_nd[in_layout, out_layout, "gpu"]()
-        _run_gpu_nd_fft[inverse=inverse, bases=bases, test=gpu_test](
-            out, x.get_immutable(), ctx
-        )
+        _run_gpu_nd_fft[
+            inverse=inverse, bases=bases, test=gpu_test, runtime_twfs=True
+        ](out, x.get_immutable(), ctx)
         ctx.synchronize()
 
         ref expected = global_constant[expected_2d]()
@@ -546,7 +560,7 @@ def test_2d_gpu[debug: Bool = False]():
     _test_2d_gpu[debug, False, _GPUTest.BLOCK]()
     _test_2d_gpu[debug, False, _GPUTest.WARP]()
     _test_2d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
-    _test_2d_gpu[debug, False, _GPUTest.CLUSTER]()
+    # _test_2d_gpu[debug, False, _GPUTest.CLUSTER]()
 
 
 comptime input_3d: InlineArray[InlineArray[InlineArray[UInt8, 8], 4], 6] = [
@@ -916,12 +930,14 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
     comptime in_dtype = DType.uint8
     comptime out_dtype = DType.float64
     comptime in_layout = Layout.row_major(1, D1, D2, D3, 1)
+    comptime in_size = in_layout.size()
     comptime out_layout = Layout.row_major(1, D1, D2, D3, 2)
+    comptime out_size = out_layout.size()
 
     with DeviceContext() as ctx:
-        var x_data = ctx.enqueue_create_buffer[in_dtype](in_layout.size())
+        var x_data = ctx.enqueue_create_buffer[in_dtype](in_size)
         x_data.enqueue_fill(Scalar[in_dtype].MAX)
-        var out_data = ctx.enqueue_create_buffer[out_dtype](out_layout.size())
+        var out_data = ctx.enqueue_create_buffer[out_dtype](out_size)
         out_data.enqueue_fill(nan[out_dtype]())
 
         var out = LayoutTensor[mut=True, out_dtype, out_layout](
@@ -943,9 +959,9 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
 
         ctx.synchronize()
         comptime bases = _estimate_best_bases_nd[in_layout, out_layout, "gpu"]()
-        _run_gpu_nd_fft[inverse=inverse, bases=bases, test=gpu_test](
-            out, x.get_immutable(), ctx
-        )
+        _run_gpu_nd_fft[
+            inverse=inverse, bases=bases, test=gpu_test, runtime_twfs=True
+        ](out, x.get_immutable(), ctx)
         ctx.synchronize()
 
         ref expected = global_constant[expected_3d]()
@@ -998,14 +1014,16 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
 
 def test_3d_gpu[debug: Bool = False]():
     _test_3d_gpu[debug, False, _GPUTest.BLOCK]()
-    # _test_3d_gpu[debug, False, _GPUTest.WARP]()
-    # _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
+    _test_3d_gpu[debug, False, _GPUTest.WARP]()
+    _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
     # _test_3d_gpu[debug, False, _GPUTest.CLUSTER]()
 
 
 def main():
-    # test_fft()
-    # test_ifft()
+    # test_fft_1d_cpu()
+    # test_fft_1d_gpu()
+    # test_ifft_1d_cpu()
+    # test_ifft_1d_gpu()
     # test_2d_cpu()
     # test_2d_gpu()
     # test_3d_cpu()

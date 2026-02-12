@@ -1,34 +1,67 @@
-from algorithm import parallelize, vectorize
+from algorithm import parallelize, vectorize, parallel_memcpy
 from builtin.globals import global_constant
 from complex import ComplexScalar
-from gpu import thread_idx, block_idx, block_dim, barrier
-from gpu.cluster import cluster_arrive_relaxed, cluster_wait
-from gpu.host import DeviceContext, DeviceBuffer
-from gpu.host.info import Vendor, is_cpu
 from layout import Layout, LayoutTensor, IntTuple
 from utils.index import IndexList
 from layout.int_tuple import IntArray
 from runtime.asyncrt import parallelism_level
 from sys.info import has_accelerator, size_of, simd_width_of
 from math import ceil
-from memory import memcpy
+from memory import memcpy, ArcPointer
 
 from ._utils import (
     _get_dtype,
     _get_twiddle_factors,
-    _get_flat_twfs,
-    _get_flat_twfs_inline,
     _mixed_radix_digit_reverse,
     _get_ordered_bases_processed_list,
     _mixed_radix_digit_reverse,
     _product_of_dims,
     _get_cascade_idxes,
-    _get_flat_twfs_total_offsets,
     _max,
+    _min,
 )
-from ._fft import _radix_n_fft_kernel, _radix_n_fft_kernel_exp_twfs_runtime
+from ._fft import _radix_n_fft_kernel
 
-from benchmark import keep
+
+struct _CPUPlan[
+    out_dtype: DType,
+    out_layout: Layout,
+    inverse: Bool,
+    bases: List[List[UInt]],
+](Copyable):
+    comptime dims = Self.out_layout.shape[1 : Self.out_layout.rank() - 1]
+    comptime L = List[ComplexScalar[Self.out_dtype]]
+
+    var inter_layer_buf: ArcPointer[Self.L]
+    var twiddle_factors: ArcPointer[List[Self.L]]
+
+    fn __init__(out self):
+        comptime l_size = Self.out_layout.size()
+        comptime size = Self.out_layout.size() if len(Self.dims) > 1 else 0
+        self.inter_layer_buf = {Self.L(capacity=size)}
+        self.twiddle_factors = {
+            _get_dims_twfs[
+                Self.out_dtype, Self.out_layout, Self.inverse, Self.bases
+            ]()
+        }
+
+
+fn _get_dims_twfs[
+    out_dtype: DType,
+    out_layout: Layout,
+    inverse: Bool,
+    bases: List[List[UInt]],
+](out twfs: List[List[ComplexScalar[out_dtype]]]):
+    comptime rank = out_layout.rank()
+    comptime dims = out_layout.shape[1 : rank - 1]
+    comptime amnt_dims = len(dims)
+
+    twfs = {capacity = amnt_dims}
+
+    @parameter
+    for dim_idx in range(amnt_dims):
+        comptime length = UInt(out_layout.shape[dim_idx + 1].value())
+        twfs.append(_get_twiddle_factors[length, out_dtype, inverse]())
 
 
 fn _run_cpu_nd_fft[
@@ -45,6 +78,7 @@ fn _run_cpu_nd_fft[
     output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
     x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
     *,
+    plan: _CPUPlan[out_dtype, out_layout, inverse, bases],
     cpu_workers: Optional[UInt] = None,
 ):
     comptime rank = out_layout.rank()
@@ -55,6 +89,26 @@ fn _run_cpu_nd_fft[
 
     comptime batches = UInt(out_layout.shape[0].value())
     comptime x_complex_in = in_layout.shape[rank - 1].value()
+    # NOTE: extract the unsafe pointer to avoid the arcpointer refcount
+    var twfs_runtime_ptr = plan.twiddle_factors[].unsafe_ptr()
+
+    @parameter
+    fn _find_max_threads(out max_threads: UInt):
+        max_threads = 0
+
+        @parameter
+        for i, base_set in enumerate(bases):
+            comptime val = _min(base_set)
+            comptime dim = UInt(dims[i].value())
+            comptime threads = dim // val
+            max_threads = max(threads, max_threads)
+
+    comptime max_threads = _find_max_threads()
+
+    var threads = cpu_workers.or_else(UInt(parallelism_level()))
+    var per_batch_workers = min(threads, max_threads)
+    threads = max(threads - per_batch_workers, 1)
+    var parallel_batches = min(threads, batches)
 
     @always_inline
     @parameter
@@ -62,11 +116,12 @@ fn _run_cpu_nd_fft[
         dtype_in: DType,
         layout_out: Layout,
         layout_in: Layout,
+        shared_origin: MutOrigin,
         x_in_origin: ImmutOrigin,
         //,
         dim_idx: Int,
     ](
-        shared_f: LayoutTensor[out_dtype, layout_out, out_origin, ...],
+        shared_f: LayoutTensor[out_dtype, layout_out, shared_origin, ...],
         x_in: LayoutTensor[dtype_in, layout_in, x_in_origin, ...],
         enable_debug: Bool = False,
     ):
@@ -77,67 +132,68 @@ fn _run_cpu_nd_fft[
         ]()
         comptime ordered_bases = bases_processed[0]
         comptime processed_list = bases_processed[1]
-        comptime total_offsets = _get_flat_twfs_total_offsets(
-            ordered_bases, length
-        )
-        comptime total_twfs = total_offsets[0]
-        comptime twf_offsets = total_offsets[1]
-        comptime twfs_array = _get_flat_twfs[
-            out_dtype,
-            length,
-            total_twfs,
-            ordered_bases,
-            processed_list,
-            inverse,
-        ]()
-        comptime twfs_layout = Layout.row_major(Int(total_twfs), 2)
-        # FIXME(#5686): replace with this once it's solved
+        # FIXME(#5686): maybe replace with this once it's solved
+        # comptime twfs_array = _get_flat_twfs[
+        #     out_dtype,
+        #     length,
+        #     total_twfs,
+        #     ordered_bases,
+        #     processed_list,
+        #     inverse,
+        # ]()
         # ref twfs_array_runtime = global_constant[twfs_array]()
-        # var twfs_array_runtime = materialize[twfs_array]()
-        # var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
-        #     twfs_array_runtime.unsafe_ptr()
-        # )
-        comptime max_base = Int(_max(ordered_bases))
-        var x_out_array = InlineArray[Scalar[out_dtype], max_base * 2](
-            uninitialized=True
-        )
-        var x_out = LayoutTensor[out_dtype, Layout.row_major(max_base, 2)](
-            x_out_array.unsafe_ptr()
+        comptime twfs_layout = Layout.row_major(Int(length), 2)
+        var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
+            twfs_runtime_ptr[dim_idx].unsafe_ptr().bitcast[Scalar[out_dtype]]()
         )
 
         @parameter
         for b in range(len(ordered_bases)):
             comptime base = ordered_bases[b]
             comptime processed = processed_list[b]
-            comptime func = _radix_n_fft_kernel_exp_twfs_runtime[
-                do_rfft = dim_idx == start_dim_idx and x_complex_in == 1,
+            comptime func = _radix_n_fft_kernel[
+                do_rfft = x_complex_in == 1 and dim_idx == start_dim_idx,
                 base=base,
                 length=length,
                 processed=processed,
                 inverse=inverse,
-                # twf_offset = twf_offsets[b],
                 ordered_bases=ordered_bases,
+                runtime_twfs=False,
+                inline_twfs = Int(length) * size_of[out_dtype]() * 2
+                <= 64 * 1024,
             ]
             comptime num_iters = length // base
 
-            for local_i in range(num_iters):
-                # func(shared_f, x_in, local_i, twfs, x_out)
-                func(shared_f, x_in, local_i, x_out)
+            @always_inline
+            fn _run[
+                width: Int
+            ](local_i: Int) unified {mut shared_f, read x_in, read twfs}:
+                var x_out = LayoutTensor[
+                    out_dtype, Layout.row_major(Int(base), 2), MutExternalOrigin
+                ].stack_allocation()
+                func(shared_f, x_in, UInt(local_i), twfs, x_out)
+
+            # TODO: replace with unroll once we have it again
+            comptime factor = simd_width_of[out_dtype]()
+            vectorize[1, unroll_factor=factor](Int(num_iters), _run)
 
     # When running ffts on multiple dimensions, we need to copy the output of
     # each dimension into an intermediate buffer for reordering
-    var inter_layer_buf = List[Scalar[out_dtype]](
-        unsafe_uninit_length=output.size() * Int(len(dims) > 1)
+    # NOTE: extract the unsafe pointer to avoid the arcpointer refcount
+    var inter_layer_buf_ptr = (
+        plan.inter_layer_buf[]
+        .unsafe_ptr()
+        .mut_cast[True]()
+        .bitcast[Scalar[out_dtype]]()
     )
     comptime o_layout = Layout.row_major(output.layout.shape[1:])
     comptime out_t = LayoutTensor[out_dtype, o_layout, address_space=_]
-    var max_threads_available = cpu_workers.or_else(UInt(parallelism_level()))
 
+    @always_inline
     @parameter
     fn _run_batch(block_num: Int):
         var block_offset = output.stride[0]() * block_num
         var base_out = out_t(output.ptr + block_offset)
-        var base_inter_out = out_t(inter_layer_buf.unsafe_ptr() + block_offset)
         comptime x_out_layout = Layout.row_major(x.layout.shape[1:])
         var base_x = LayoutTensor[in_dtype, x_out_layout, address_space=_](
             x.ptr + x.stride[0]() * block_num
@@ -147,6 +203,7 @@ fn _run_cpu_nd_fft[
         if len(dims) == 1:
             _run_1d_fft[start_dim_idx](base_out, base_x)
         else:
+            var base_inter_out = out_t(inter_layer_buf_ptr + block_offset)
 
             @parameter
             for idx in reversed(range(len(dims))):
@@ -158,8 +215,16 @@ fn _run_cpu_nd_fft[
                 if idx != start_dim_idx:
                     comptime G = AddressSpace.GENERIC
                     var b_o = base_out.ptr.address_space_cast[G]()
-                    memcpy(dest=base_inter_out.ptr, src=b_o, count=prod * 2)
+                    comptime count = prod * 2
+                    parallel_memcpy(
+                        dest=base_inter_out.ptr,
+                        src=b_o,
+                        count=count,
+                        count_per_task=count // Int(per_batch_workers),
+                        num_tasks=Int(per_batch_workers),
+                    )
 
+                @always_inline
                 @parameter
                 fn _run_dim_batch(flat_idx: Int):
                     comptime exclude = (idx, rank - 2)
@@ -176,10 +241,9 @@ fn _run_cpu_nd_fft[
 
                     @parameter
                     if idx == start_dim_idx:
-                        comptime x_comp = Slice(0, x_complex_in)
-                        var dim_batch_x = base_x.slice[dim_sl, x_comp, exclude](
-                            idxes
-                        )
+                        var dim_batch_x = base_x.slice[
+                            dim_sl, Slice(0, x_complex_in), exclude
+                        ](idxes)
                         _run_1d_fft[idx](dim_batch_out, dim_batch_x)
                     else:
                         var dim_batch_inter_out = base_inter_out.slice[
@@ -187,13 +251,8 @@ fn _run_cpu_nd_fft[
                         ](idxes).get_immutable()
                         _run_1d_fft[idx](dim_batch_out, dim_batch_inter_out)
 
-                var num_workers = Int(min(max_threads_available, batch_prod))
-                parallelize[func=_run_dim_batch](Int(batch_prod), num_workers)
+                parallelize[func=_run_dim_batch](
+                    Int(batch_prod), Int(per_batch_workers)
+                )
 
-    @parameter
-    if len(dims) == 1:
-        var num_workers = min(max_threads_available, batches)
-        parallelize[func=_run_batch](Int(batches), Int(num_workers))
-    else:
-        for block_num in range(Int(batches)):
-            _run_batch(block_num)
+    parallelize[func=_run_batch](Int(batches), Int(parallel_batches))

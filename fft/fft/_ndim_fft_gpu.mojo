@@ -2,8 +2,14 @@ from algorithm import parallelize, vectorize
 from builtin.globals import global_constant
 from complex import ComplexScalar
 from collections import OptionalReg
-from gpu import thread_idx, block_idx, block_dim, barrier
-from gpu.cluster import cluster_arrive_relaxed, cluster_wait
+from gpu import (
+    thread_idx,
+    block_idx,
+    block_dim,
+    barrier,
+    cluster_arrive_relaxed,
+    cluster_wait,
+)
 from gpu.host import DeviceContext, DeviceBuffer, Dim, DeviceFunction
 from gpu.host.info import Vendor, is_cpu, GPUInfo
 from layout import Layout, LayoutTensor, IntTuple
@@ -16,32 +22,27 @@ from std.utils import Variant
 
 from ._utils import (
     _get_dtype,
-    _get_flat_twfs,
-    _get_flat_twfs_inline,
     _mixed_radix_digit_reverse,
     _get_ordered_bases_processed_list,
     _max,
     _min,
     _product_of_dims,
     _get_cascade_idxes,
-    _get_flat_twfs_total_offsets,
+    _get_twiddle_factors,
 )
-from ._fft import (
-    _radix_n_fft_kernel,
-    _inter_multiprocessor_fft_kernel_radix_n,
-    _radix_n_fft_kernel_exp_twfs_runtime,
-    _radix_n_fft_kernel_exp_no_params,
-)
+from ._fft import _radix_n_fft_kernel
 
 
 @fieldwise_init
-struct _GPUDeviceWidePlan[out_dtype: DType](ImplicitlyCopyable):
-    var twfs_buffer: Optional[DeviceBuffer[Self.out_dtype]]
+struct _GPUDeviceWidePlan[out_dtype: DType](Copyable):
+    var twfs_buffer: List[DeviceBuffer[Self.out_dtype]]
     var inter_layer_buf: Optional[DeviceBuffer[Self.out_dtype]]
 
 
 @fieldwise_init
 struct _GPUSharedMemPlan[out_dtype: DType](ImplicitlyCopyable):
+    # TODO
+    # var twfs_buffer: List[DeviceBuffer[Self.out_dtype]]
     ...
 
 
@@ -50,90 +51,50 @@ comptime _GPUExecutionPlan[out_dtype: DType] = Variant[
 ]
 
 
-fn _calc_total_bases_offsets[
-    dims: IntTuple, bases: List[List[UInt]]
-]() -> Tuple[
-    UInt,
-    InlineArray[UInt, len(dims)],
-    InlineArray[List[UInt], len(dims)],
-]:
-    var absolute_total = UInt(0)
-    var dim_totals = InlineArray[UInt, len(dims)](uninitialized=True)
-    var absolute_offsets = InlineArray[List[UInt], len(dims)](
-        uninitialized=True
-    )
-
-    @parameter
-    for idx in range(len(dims)):
-        comptime length = UInt(dims[idx].value())
-        comptime bases_processed = _get_ordered_bases_processed_list[
-            length, bases[idx]
-        ]()
-        comptime ordered_bases = bases_processed[0]
-        comptime processed_list = bases_processed[1]
-        ref total_offsets = _get_flat_twfs_total_offsets(
-            materialize[ordered_bases](), length, absolute_total
-        )
-        dim_totals[idx] = total_offsets[0]
-        absolute_total += total_offsets[0]
-        absolute_offsets[idx] = total_offsets[1].copy()
-    return absolute_total, dim_totals^, absolute_offsets^
-
-
 fn _get_gpu_device_wide_plan[
     out_dtype: DType,
     out_layout: Layout,
     *,
     inverse: Bool,
     bases: List[List[UInt]],
+    inline_twfs: Bool,
 ](ctx: DeviceContext) raises -> _GPUDeviceWidePlan[out_dtype]:
     comptime rank = out_layout.rank()
     comptime dims = out_layout.shape[1 : rank - 1]
 
-    comptime total_bases_offsets = _calc_total_bases_offsets[dims, bases]()
-    comptime total_twfs = total_bases_offsets[0]
-    comptime dim_total_twfs = total_bases_offsets[1]
-    comptime absolute_offsets = total_bases_offsets[2]
-    comptime twf_layout = Layout.row_major(Int(total_twfs), 2)
-    var twfs = ctx.enqueue_create_buffer[out_dtype](twf_layout.size())
+    # When running ffts on multiple dimensions, we need to copy the output of
+    # each dimension into an intermediate buffer for reordering
+    comptime out_b_layout = Layout.row_major(out_layout.shape[1:])
+    comptime b_size = out_b_layout.size()
+
+    @parameter
+    if inline_twfs and len(dims) == 1:
+        return {[], None}
+    elif inline_twfs:
+        return {[], ctx.enqueue_create_buffer[out_dtype](b_size)}
+
+    var twfs = List[DeviceBuffer[out_dtype]](capacity=len(dims))
 
     @parameter
     for idx in range(len(bases)):
         comptime length = UInt(dims[idx].value())
-        comptime bases_processed = _get_ordered_bases_processed_list[
-            length, bases[idx]
-        ]()
-        comptime ordered_bases = bases_processed[0]
-        comptime processed_list = bases_processed[1]
-        comptime dim_total_twfs_idx = dim_total_twfs[idx]
-        comptime twfs_array = _get_flat_twfs[
-            out_dtype,
-            length,
-            dim_total_twfs_idx,
-            ordered_bases,
-            processed_list,
-            inverse,
-        ]()
-        comptime absolute_offsets_idx_start = absolute_offsets[idx][0]
-        var view = DeviceBuffer(
-            ctx,
-            twfs.unsafe_ptr() + absolute_offsets_idx_start * 2,
-            Int(dim_total_twfs_idx) * 2,
-            owning=False,
-        )
+        comptime twfs_array = _get_twiddle_factors[length, out_dtype, inverse]()
         # FIXME(#5686): replace with this once it's solved
         # ref twfs_array_runtime = global_constant[twfs_array]()
         var twfs_array_runtime = materialize[twfs_array]()
-        ctx.enqueue_copy(view, twfs_array_runtime.unsafe_ptr())
+        var buf = ctx.enqueue_create_buffer[out_dtype](
+            len(twfs_array_runtime) * 2
+        )
+        ctx.enqueue_copy(
+            buf, twfs_array_runtime.unsafe_ptr().bitcast[Scalar[out_dtype]]()
+        )
+        twfs.append(buf)
 
     @parameter
     if len(dims) == 1:
-        return {twfs, None}
-
-    # When running ffts on multiple dimensions, we need to copy the output of
-    # each dimension into an intermediate buffer for reordering
-    comptime out_b_layout = Layout.row_major(out_layout.shape[1:])
-    return {twfs, ctx.enqueue_create_buffer[out_dtype](out_b_layout.size())}
+        return {twfs^, None}
+    else:
+        return {twfs^, ctx.enqueue_create_buffer[out_dtype](b_size)}
 
 
 struct _GPUPlan[
@@ -144,6 +105,7 @@ struct _GPUPlan[
     test: Optional[_GPUTest],
     gpu_info: GPUInfo,
     max_cluster_size: UInt,
+    runtime_twfs: Bool,
 ](ImplicitlyCopyable):
     comptime rank = Self.out_layout.rank()
     comptime dims = Self.out_layout.shape[1 : Self.rank - 1]
@@ -175,7 +137,9 @@ struct _GPUPlan[
     )
 
     comptime num_blocks = UInt(
-        ceil(Self.num_threads / Self.max_threads_per_block).cast[DType.uint]()
+        ceil(
+            Float64(Self.num_threads) / Float64(Self.max_threads_per_block)
+        ).cast[DType.uint]()
     )
     comptime shared_mem_per_m = UInt(
         Self.gpu_info.shared_memory_per_multiprocessor
@@ -183,9 +147,13 @@ struct _GPUPlan[
     comptime shared_mem_per_t = Self.shared_mem_per_m // UInt(
         Self.threads_per_m
     )
-    comptime shared_mem_per_block = Self.shared_mem_per_t * Self.max_threads_per_block
-    comptime shared_mem_per_warp = Self.shared_mem_per_t * Self.warp_size
-    comptime shared_mem_per_cluster = Self.shared_mem_per_block * Self.max_cluster_size
+    comptime shared_mem_per_block = (
+        Self.shared_mem_per_t * Self.max_threads_per_block
+    )
+    comptime shared_mem_per_warp = (Self.shared_mem_per_t * Self.warp_size)
+    comptime shared_mem_per_cluster = (
+        Self.shared_mem_per_block * Self.max_cluster_size
+    )
     comptime out_size_max_dim = UInt(
         size_of[Self.out_dtype]()
     ) * Self.max_dim * 2
@@ -197,7 +165,9 @@ struct _GPUPlan[
         or Self.out_size_max_dim <= Self.shared_mem_per_warp
     ) and (Self.test.or_else(_GPUTest.WARP).v == _GPUTest.WARP.v)
 
-    comptime can_run_in_block = Self.num_threads <= Self.max_threads_per_block and (
+    comptime can_run_in_block = Self.num_threads <= (
+        Self.max_threads_per_block
+    ) and (
         Self.full_output_size <= Self.shared_mem_per_block
         or Self.out_size_max_dim <= Self.shared_mem_per_block
     ) and (
@@ -209,7 +179,9 @@ struct _GPUPlan[
         Self.gpu_info.vendor == Vendor.NVIDIA_GPU
         and Self.gpu_info.compute >= 9.0
     )
-    comptime can_run_in_block_cluster = Self.num_blocks <= Self.max_cluster_size and (
+    comptime can_run_in_block_cluster = Self.num_blocks <= (
+        Self.max_cluster_size
+    ) and (
         Self.full_output_size <= Self.shared_mem_per_cluster
         or Self.out_size_max_dim <= Self.shared_mem_per_cluster
     ) and Self.is_sm_90_or_newer and (
@@ -217,11 +189,22 @@ struct _GPUPlan[
     )
 
     comptime block_threads = UInt(
-        ceil(Self.num_threads / Self.num_blocks).cast[DType.uint]()
+        ceil(Float64(Self.num_threads) / Float64(Self.num_blocks)).cast[
+            DType.uint
+        ]()
     )
     comptime thread_batch_size = Self.max_threads_available // Self.num_threads
     comptime batch_size = min(Self.batches, Self.thread_batch_size)
-    comptime run_intra_something = Self.can_run_in_warp or Self.can_run_in_block or Self.can_run_in_block_cluster
+
+    comptime inline_twfs = (
+        Int(Self.max_dim) * size_of[Self.out_dtype]() * 2
+    ) <= Self.gpu_info.max_registers_per_block // 2
+
+    comptime run_intra_something = (
+        Self.can_run_in_warp
+        or (Self.can_run_in_block)
+        or Self.can_run_in_block_cluster
+    ) and (Self.inline_twfs or Self.runtime_twfs)
 
     var execution_plan: _GPUExecutionPlan[Self.out_dtype]
 
@@ -235,9 +218,10 @@ struct _GPUPlan[
             Self.test,
             ctx.default_device_info,
             Self.max_cluster_size,
+            Self.runtime_twfs,
         ],
     ) raises:
-        __comptime_assert Self.threads_per_m > 0, (
+        comptime assert Self.threads_per_m > 0, (
             "Unknown number of threads per sm for the given device. "
             "It is needed in order to run the gpu implementation."
         )
@@ -251,7 +235,66 @@ struct _GPUPlan[
                 Self.out_layout,
                 inverse = Self.inverse,
                 bases = Self.bases,
+                inline_twfs = Self.inline_twfs,
             ](ctx)
+
+
+# ===-----------------------------------------------------------------------===#
+# inter_multiprocessor_fft
+# ===-----------------------------------------------------------------------===#
+
+
+fn _inter_multiprocessor_fft_kernel_radix_n[
+    in_dtype: DType,
+    out_dtype: DType,
+    in_layout: Layout,
+    out_layout: Layout,
+    twf_layout: Layout,
+    in_origin: ImmutOrigin,
+    out_origin: MutOrigin,
+    twf_origin: ImmutOrigin,
+    twf_address_space: AddressSpace,
+    *,
+    length: UInt,
+    base: UInt,
+    ordered_bases: List[UInt],
+    processed: UInt,
+    do_rfft: Bool,
+    inverse: Bool,
+    runtime_twfs: Bool,
+    inline_twfs: Bool,
+](
+    output: LayoutTensor[out_dtype, out_layout, out_origin],
+    x: LayoutTensor[in_dtype, in_layout, in_origin],
+    twiddle_factors: LayoutTensor[
+        out_dtype, twf_layout, twf_origin, address_space=twf_address_space
+    ],
+):
+    """A kernel that assumes `sequence_length // smallest_base <=
+    max_threads_available`."""
+    var global_i = block_dim.x * block_idx.x + thread_idx.x
+    var block_num = block_dim.y * block_idx.y
+
+    comptime amnt_threads = length // base
+    comptime x_out_layout = Layout.row_major(Int(base), 2)
+    var x_out = LayoutTensor[
+        out_dtype, x_out_layout, MutExternalOrigin
+    ].stack_allocation()
+
+    comptime last_base = ordered_bases[len(ordered_bases) - 1]
+    comptime func = _radix_n_fft_kernel[
+        do_rfft=do_rfft,
+        base=base,
+        length=length,
+        processed=processed,
+        inverse=inverse,
+        ordered_bases=ordered_bases,
+        runtime_twfs=runtime_twfs,
+        inline_twfs=inline_twfs,
+    ]
+
+    if global_i < amnt_threads:  # is execution thread
+        func(output, x, global_i, twiddle_factors, x_out)
 
 
 fn _fft_gpu_device_wide[
@@ -267,6 +310,8 @@ fn _fft_gpu_device_wide[
     max_cluster_size: UInt,
     grid_dim: Tuple[Int, Int],
     block_threads: UInt,
+    runtime_twfs: Bool,
+    inline_twfs: Bool,
 ](
     output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
     x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
@@ -282,14 +327,6 @@ fn _fft_gpu_device_wide[
     comptime amnt_dims = len(bases)
     comptime batches = out_layout.shape[0].value()
     comptime x_complex_in = in_layout.shape[rank - 1].value()
-
-    comptime total_bases_offsets = _calc_total_bases_offsets[dims, bases]()
-    comptime total_twfs = total_bases_offsets[0]
-    comptime absolute_offsets = total_bases_offsets[2]
-    comptime twf_layout = Layout.row_major(Int(total_twfs), 2)
-    var twiddle_factors = LayoutTensor[mut=False, out_dtype, twf_layout](
-        plan.twfs_buffer.value().unsafe_ptr()
-    )
 
     @parameter
     fn _run_1d_fft[
@@ -327,10 +364,15 @@ fn _fft_gpu_device_wide[
             base = ordered_bases[b],
             ordered_bases=ordered_bases,
             processed = processed_list[b],
-            do_rfft = dim_idx == start_dim_idx and x_complex_in == 1,
+            do_rfft = x_complex_in == 1 and dim_idx == start_dim_idx,
             inverse=inverse,
-            twf_offset = absolute_offsets[dim_idx][b],
+            runtime_twfs=runtime_twfs,
+            inline_twfs=inline_twfs,
         ]
+        comptime twf_layout = Layout.row_major(Int(length), 2)
+        var twiddle_factors = LayoutTensor[mut=False, out_dtype, twf_layout](
+            plan.twfs_buffer[dim_idx].unsafe_ptr() if not inline_twfs else {}
+        )
 
         @parameter
         for b in range(len(ordered_bases)):
@@ -345,14 +387,10 @@ fn _fft_gpu_device_wide[
     comptime out_b_layout = Layout.row_major(output.layout.shape[1:])
     comptime out_b_t = LayoutTensor[out_dtype, out_b_layout, address_space=_]
     comptime size = out_b_layout.size()
-    # When running ffts on multiple dimensions, we need to copy the output of
-    # each dimension into an intermediate buffer for reordering
-    var inter_layer_buf = plan.inter_layer_buf.value()
 
     for block_num in range(batches):
         var block_offset = output.stride[0]() * block_num
         var base_out = out_b_t(output.ptr + block_offset)
-        var base_inter_out = out_b_t(inter_layer_buf)
         comptime base_x_layout = Layout.row_major(x.layout.shape[1:])
         var base_x = LayoutTensor[in_dtype, base_x_layout, address_space=_](
             x.ptr + x.stride[0]() * block_num
@@ -362,6 +400,10 @@ fn _fft_gpu_device_wide[
         if len(dims) == 1:
             _run_1d_fft[start_dim_idx](base_out, base_x)
         else:
+            # When running ffts on multiple dimensions, we need to copy the
+            # output of each dimension into an intermediate buffer for reordering
+            ref inter_layer_buf = plan.inter_layer_buf.value()
+            var base_inter_out = out_b_t(inter_layer_buf)
 
             @parameter
             for idx in reversed(range(len(dims))):
@@ -419,7 +461,9 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
     total_threads: UInt,
     max_shared_mem_size: UInt,
     shared_address_space: AddressSpace,
-    stage_sync_fn: fn (),
+    stage_sync_fn: fn(),
+    runtime_twfs: Bool,
+    inline_twfs: Bool,
 ](
     output: LayoutTensor[out_dtype, out_layout, out_origin],
     x: LayoutTensor[in_dtype, in_layout, in_origin],
@@ -489,21 +533,27 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
             comptime base = ordered_bases[b]
             comptime processed = processed_list[b]
             comptime threads_for_base = length // base
-            comptime func = _radix_n_fft_kernel_exp_twfs_runtime[
+            var empty = Scalar[out_dtype]()
+            var empty_fake_twfs = LayoutTensor[
+                out_dtype, Layout.row_major(0), ImmutExternalOrigin
+            ](UnsafePointer(to=empty))
+            comptime func = _radix_n_fft_kernel[
                 do_rfft = dim_idx == start_dim_idx and x_complex_in == 1,
                 base=base,
                 length=length,
                 processed=processed,
                 inverse=inverse,
                 ordered_bases=ordered_bases,
+                runtime_twfs=runtime_twfs,
+                inline_twfs=inline_twfs,
             ]
 
             @parameter
             if threads_for_base == total_threads:
-                func(shared_f, x, local_i, x_out)
+                func(shared_f, x, local_i, empty_fake_twfs, x_out)
             else:
                 if local_i < threads_for_base:
-                    func(shared_f, x, local_i, x_out)
+                    func(shared_f, x, local_i, empty_fake_twfs, x_out)
 
             stage_sync_fn()
 
@@ -535,7 +585,7 @@ fn _intra_something_gpu_fft_kernel_radix_n_multi_dim[
 
     @parameter
     if len(dims) == 1:
-        __comptime_assert size <= max_shared_mem_size, (
+        comptime assert size <= max_shared_mem_size, (
             "internal implementation error for the given shape, please file"
             " an issue"
         )
@@ -632,6 +682,7 @@ fn _run_gpu_nd_fft[
     *,
     inverse: Bool,
     bases: List[List[UInt]],
+    runtime_twfs: Bool,
     max_cluster_size: UInt = 8,
     test: Optional[_GPUTest] = None,
 ](
@@ -647,13 +698,14 @@ fn _run_gpu_nd_fft[
             test,
             ctx.default_device_info,
             max_cluster_size,
+            runtime_twfs,
         ]
     ] = None,
 ) raises:
-    __comptime_assert (
+    comptime assert (
         out_dtype.is_floating_point()
     ), "out_dtype must be floating point"
-    __comptime_assert (
+    comptime assert (
         has_accelerator()
     ), "The non-cpu implementation is for GPU only"
     var plan = plan_in.or_else({ctx})
@@ -714,13 +766,15 @@ fn _run_gpu_nd_fft[
             total_threads = plan.block_threads * plan.num_blocks,
             stage_sync_fn=stage_sync_fn,
             shared_address_space=address_space,
+            runtime_twfs=runtime_twfs,
+            inline_twfs = plan.inline_twfs,
         ]
 
         comptime grid_dim = (Int(plan.num_blocks), batch_size)
 
         @parameter
         if plan.run_intra_something:
-            __comptime_assert (
+            comptime assert (
                 plan.full_output_size <= max_shared_mem_size
                 or plan.out_size_max_dim <= max_shared_mem_size
             ), (
@@ -750,6 +804,8 @@ fn _run_gpu_nd_fft[
                 bases=bases,
                 grid_dim=grid_dim,
                 block_threads = plan.block_threads,
+                runtime_twfs=runtime_twfs,
+                inline_twfs = plan.inline_twfs,
             ](
                 output,
                 x,
