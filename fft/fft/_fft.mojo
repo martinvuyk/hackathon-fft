@@ -1,14 +1,16 @@
 from algorithm import parallelize, vectorize
+from bit import next_power_of_two
 from builtin.globals import global_constant
-from complex import ComplexScalar
+from complex import ComplexScalar, ComplexSIMD
 from gpu import thread_idx, block_idx, block_dim
 from gpu.host import DeviceContext
 from gpu.host.info import Vendor, is_cpu
-from math import sqrt
+from math import sqrt, ceil, log2, iota
 from layout import Layout, LayoutTensor, IntTuple
 from layout.int_tuple import IntArray
 from runtime.asyncrt import parallelism_level
 from sys.info import simd_width_of, size_of
+from std.utils import IndexList
 
 from ._utils import (
     _get_dtype,
@@ -47,8 +49,8 @@ fn _radix_n_fft_kernel[
     processed: UInt,
     inverse: Bool,
     ordered_bases: List[UInt],
-    runtime_twfs: Bool,
     inline_twfs: Bool,
+    runtime_twfs: Bool,
 ](
     output: LayoutTensor[
         out_dtype, out_layout, out_origin, address_space=out_address_space, ...
@@ -71,9 +73,14 @@ fn _radix_n_fft_kernel[
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
     optimizations."""
     comptime assert length >= base, "length must be >= base"
-    comptime Sc = Scalar[_get_dtype[length * base]()]
+    comptime assert out_dtype.is_floating_point()
+
+    comptime Sc = Scalar[_get_dtype[length]()]
     comptime offset = Sc(processed)
-    var n = Sc(local_i) % offset + (Sc(local_i) // offset) * (offset * Sc(base))
+    comptime next_offset = offset * Sc(base)
+    comptime ratio = Sc(length) // next_offset
+
+    var n = Sc(local_i) % offset + (Sc(local_i) // offset) * next_offset
 
     comptime Co = ComplexScalar[out_dtype]
     comptime CoV = SIMD[out_dtype, 2]
@@ -140,7 +147,7 @@ fn _radix_n_fft_kernel[
                 if j == 1:
                     acc = x_0
                 else:
-                    acc = to_Co(x_out.load[2](Int(i), 0))
+                    acc = to_Co(x_out.load[CoV.size](Int(i), 0))
 
                 @parameter
                 if do_rfft:
@@ -151,22 +158,20 @@ fn _radix_n_fft_kernel[
                     x_out.store(Int(i), 0, to_CoV(res))
             continue
 
-        comptime next_offset = offset * Sc(base)
-        comptime ratio = Sc(length) // next_offset
-        var twf_index = ((Sc(j) * n) % next_offset) * ratio
+        var twf_index = Sc(j) * (Sc(local_i) % offset) * ratio
         var i0_j_twf: Co
 
         @parameter
-        if runtime_twfs:
-            i0_j_twf = _get_twiddle_factor[
-                out_dtype, inverse=inverse, N=length
-            ](UInt(twf_index))
-        elif inline_twfs:
+        if inline_twfs:
             comptime twfs = _get_twiddle_factors_inline[
                 length, out_dtype, inverse
             ]()
             ref twfs_runtime = global_constant[twfs]()
             i0_j_twf = twfs_runtime[twf_index]
+        elif runtime_twfs:
+            i0_j_twf = _get_twiddle_factor[
+                out_dtype, inverse=inverse, N = Sc(length)
+            ](twf_index)
         else:
             i0_j_twf = to_Co(twiddle_factors.load[2](Int(twf_index), 0))
 
@@ -180,7 +185,7 @@ fn _radix_n_fft_kernel[
             if j == 1:
                 acc = x_0
             else:
-                acc = to_Co(x_out.load[2](Int(i), 0))
+                acc = to_Co(x_out.load[CoV.size](Int(i), 0))
 
             x_out.store(Int(i), 0, to_CoV(twf.fma(x_j, acc)))
 
@@ -190,14 +195,15 @@ fn _radix_n_fft_kernel[
 
         @parameter
         if UInt64(base).is_power_of_two():
-            x_out.ptr.store(x_out.load[Int(base) * 2](0, 0) * `1 / N`)
+            x_out.ptr.store(x_out.ptr.load[Int(base) * CoV.size]() * `1 / N`)
         else:
 
             @parameter
             for i in range(base):
-                x_out.store(Int(i), 0, x_out.load[2](Int(i), 0) * `1 / N`)
+                var res = x_out.load[CoV.size](Int(i), 0) * `1 / N`
+                x_out.store(Int(i), 0, res)
 
     @parameter
     for i in range(base):
         comptime step = Sc(i) * offset
-        output.store(Int(n + step), 0, x_out.load[2](Int(i), 0))
+        output.store(Int(n + step), 0, x_out.load[CoV.size](Int(i), 0))

@@ -1,11 +1,12 @@
 from sys import is_compile_time
 from sys.info import is_64bit, is_nvidia_gpu
-from complex import ComplexScalar
+from complex import ComplexScalar, ComplexSIMD
 from math import exp, pi, ceil, sin, cos, log2
-from bit import count_trailing_zeros
+from bit import count_trailing_zeros, bit_reverse
 from gpu.host.info import is_cpu
 from layout import IntTuple
 from utils.index import IndexList
+from sys.info import simd_width_of
 
 
 fn _get_dtype[length: UInt]() -> DType:
@@ -68,8 +69,8 @@ fn _mixed_radix_digit_reverse[
 
 
 fn _get_twiddle_factor[
-    dtype: DType, *, inverse: Bool, N: UInt
-](n: UInt) -> ComplexScalar[dtype]:
+    dtype: DType, *, inverse: Bool, N: Scalar
+](n: Scalar) -> ComplexScalar[dtype]:
     """Returns `exp((-j * 2 * pi * n) / N)`."""
     comptime assert dtype.is_floating_point()
     comptime `-2π/N` = Scalar[dtype](-2.0 * pi) / Scalar[dtype](N)
@@ -172,17 +173,14 @@ fn _reduce_mul(b: List[UInt], out res: UInt):
 
 
 @parameter
-fn _build_ordered_bases[
-    length: UInt
-](bases: List[UInt], out new_bases: List[UInt]):
-    if _reduce_mul(bases) == length:
-        new_bases = bases.copy()
-        sort(new_bases)  # FIXME: this should just be ascending=False
-        new_bases.reverse()
+fn _build_ordered_bases[length: UInt, bases: List[UInt]]() -> List[UInt]:
+    var existing_bases = materialize[bases]()
+    sort(existing_bases)  # FIXME: this should just be ascending=False
+    if _reduce_mul(existing_bases) == length:
+        existing_bases.reverse()
+        return existing_bases^
     else:
-        var existing_bases = bases.copy()
-        sort(existing_bases)
-        new_bases = List[UInt](capacity=len(existing_bases))
+        var new_bases = List[UInt](capacity=len(existing_bases))
 
         var processed = UInt(1)
         for i in reversed(range(len(existing_bases))):
@@ -194,13 +192,17 @@ fn _build_ordered_bases[
                 processed *= base
 
             if processed == length:
-                return
+                break
+        return new_bases^
 
 
 fn _get_ordered_bases_processed_list[
     length: UInt, bases: List[UInt]
 ]() -> Tuple[List[UInt], List[UInt]]:
-    comptime ordered_bases = _build_ordered_bases[length](materialize[bases]())
+    comptime assert len(bases) > 0, String(
+        "The amount of bases is not enough: ", bases
+    )
+    comptime ordered_bases = _build_ordered_bases[length, bases]()
 
     @parameter
     fn _build_processed_list() -> List[UInt]:
@@ -213,16 +215,21 @@ fn _get_ordered_bases_processed_list[
         return processed_list^
 
     comptime processed_list = _build_processed_list()
-    constrained[
-        processed_list[len(processed_list) - 1]
+    comptime assert len(processed_list) == len(ordered_bases), "internal error"
+    comptime assert (
+        len(processed_list) > 0
+        and processed_list[len(processed_list) - 1]
         * ordered_bases[len(ordered_bases) - 1]
-        == length,
+        == length
+    ), String(
         "powers of the bases must multiply together  to equal the sequence ",
         "length. The builtin algorithm was only able to produce: ",
-        ordered_bases.__str__().replace("UInt(", "").replace(")", ""),
+        ordered_bases.__str__()
+        .replace("SIMD[DType.uint, 1](", "")
+        .replace(")", ""),
         " for the length: ",
-        String(length),
-    ]()
+        length,
+    )
     comptime assert 1 not in ordered_bases, "Cannot do an fft with base 1."
     return materialize[ordered_bases](), materialize[processed_list]()
 
@@ -296,7 +303,7 @@ fn _get_cascade_idxes[
 
 @always_inline
 fn _unit_phasor_mul[
-    phasor: ComplexScalar
+    phasor: ComplexSIMD
 ](twf: type_of(phasor)) -> type_of(phasor):
     """Optimizes `phasor * twf`."""
 
@@ -327,8 +334,8 @@ fn _unit_phasor_mul[
 
 @always_inline
 fn _unit_phasor_fma[
-    dtype: DType, //, twf: ComplexScalar[dtype]
-](x_j: ComplexScalar[dtype], acc: ComplexScalar[dtype]) -> ComplexScalar[dtype]:
+    twf: ComplexSIMD
+](x_j: type_of(twf), acc: type_of(twf)) -> type_of(twf):
     @parameter
     if twf.re == 1:  # Co(1, 0)
         return acc + x_j
@@ -358,11 +365,8 @@ fn _unit_phasor_fma[
 
 @always_inline
 fn _unit_phasor_fma[
-    dtype: DType,
-    //,
-    twf: ComplexScalar[dtype],
-    accum_is_real: Bool,
-](x_j: Scalar[dtype], acc: ComplexScalar[dtype]) -> ComplexScalar[dtype]:
+    twf: ComplexSIMD, accum_is_real: Bool
+](x_j: SIMD[twf.dtype, twf.size], acc: type_of(twf)) -> type_of(twf):
     @parameter
     if twf.re == 1:  # Co(1, 0)
         return {acc.re + x_j, acc.im}

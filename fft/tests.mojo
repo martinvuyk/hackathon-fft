@@ -41,6 +41,10 @@ comptime ATOL[dtype: DType] = 1e-2
 comptime RTOL = 1e-5
 
 
+fn _round(val: SIMD) -> type_of(val):
+    return round(val, 5)
+
+
 def _test_fft_radix_n[
     dtype: DType,
     bases: List[UInt],
@@ -83,10 +87,22 @@ def _test_fft_radix_n[
             print("out: ", end="")
             for i in range(SIZE):
                 if i == 0:
-                    print("[", result[i, 0], ", ", result[i, 1], sep="", end="")
+                    print(
+                        "[",
+                        _round(result[i, 0]),
+                        ", ",
+                        _round(result[i, 1]),
+                        sep="",
+                        end="",
+                    )
                 else:
                     print(
-                        ", ", result[i, 0], ", ", result[i, 1], sep="", end=""
+                        ", ",
+                        _round(result[i, 0]),
+                        ", ",
+                        _round(result[i, 1]),
+                        sep="",
+                        end="",
                     )
             print("]")
             print("expected: ", end="")
@@ -99,9 +115,21 @@ def _test_fft_radix_n[
             if debug:
                 for i in range(SIZE):
                     if i == 0:
-                        print("[", scalar_in[i], ".0, 0.0", sep="", end="")
+                        print(
+                            "[",
+                            _round(Scalar[DType.int](scalar_in[i])),
+                            ".0, 0.0",
+                            sep="",
+                            end="",
+                        )
                     else:
-                        print(", ", scalar_in[i], ".0, 0.0", sep="", end="")
+                        print(
+                            ", ",
+                            _round(Scalar[DType.int](scalar_in[i])),
+                            ".0, 0.0",
+                            sep="",
+                            end="",
+                        )
                 print("]")
             for i in range(SIZE):
                 assert_almost_equal(
@@ -119,10 +147,18 @@ def _test_fft_radix_n[
             if debug:
                 for i in range(SIZE):
                     if i == 0:
-                        print("[", complex_out[i].re, ", ", sep="", end="")
+                        print(
+                            "[", _round(complex_out[i].re), ", ", sep="", end=""
+                        )
                     else:
-                        print(", ", complex_out[i].re, ", ", sep="", end="")
-                    print(complex_out[i].im, end="")
+                        print(
+                            ", ",
+                            _round(complex_out[i].re),
+                            ", ",
+                            sep="",
+                            end="",
+                        )
+                    print(_round(complex_out[i].im), end="")
                 print("]")
             for i in range(SIZE):
                 # break
@@ -449,9 +485,9 @@ def test_2d_cpu[debug: Bool = False]():
                     ", ",
                     j,
                     "]: [",
-                    out[0, i, j, 0],
+                    _round(out[0, i, j, 0]),
                     ", ",
-                    out[0, i, j, 1],
+                    _round(out[0, i, j, 1]),
                     "] expected: [",
                     expected[i][j].re,
                     ", ",
@@ -529,9 +565,9 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
                             ", ",
                             j,
                             "]: [",
-                            out_view[0, i, j, 0],
+                            _round(out_view[0, i, j, 0]),
                             ", ",
-                            out_view[0, i, j, 1],
+                            _round(out_view[0, i, j, 1]),
                             "] expected: [",
                             expected[i][j].re,
                             ", ",
@@ -559,7 +595,7 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
 def test_2d_gpu[debug: Bool = False]():
     _test_2d_gpu[debug, False, _GPUTest.BLOCK]()
     _test_2d_gpu[debug, False, _GPUTest.WARP]()
-    _test_2d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
+    # _test_2d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
     # _test_2d_gpu[debug, False, _GPUTest.CLUSTER]()
 
 
@@ -895,9 +931,9 @@ def test_3d_cpu[debug: Bool = False]():
                         ", ",
                         k,
                         "]: [",
-                        out[0, i, j, k, 0],
+                        _round(out[0, i, j, k, 0]),
                         ", ",
-                        out[0, i, j, k, 1],
+                        _round(out[0, i, j, k, 1]),
                         "] expected: [",
                         expected[i][j][k].re,
                         ", ",
@@ -984,9 +1020,9 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
                                 ", ",
                                 k,
                                 "]: [",
-                                out_view[0, i, j, k, 0],
+                                _round(out_view[0, i, j, k, 0]),
                                 ", ",
-                                out_view[0, i, j, k, 1],
+                                _round(out_view[0, i, j, k, 1]),
                                 "] expected: [",
                                 expected[i][j][k].re,
                                 ", ",
@@ -1015,16 +1051,16 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
 def test_3d_gpu[debug: Bool = False]():
     _test_3d_gpu[debug, False, _GPUTest.BLOCK]()
     _test_3d_gpu[debug, False, _GPUTest.WARP]()
-    _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
+    # _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
     # _test_3d_gpu[debug, False, _GPUTest.CLUSTER]()
 
 
 def main():
     # test_fft_1d_cpu()
-    # test_fft_1d_gpu()
+    test_fft_1d_gpu()
     # test_ifft_1d_cpu()
     # test_ifft_1d_gpu()
     # test_2d_cpu()
-    # test_2d_gpu()
+    test_2d_gpu()
     # test_3d_cpu()
     test_3d_gpu()

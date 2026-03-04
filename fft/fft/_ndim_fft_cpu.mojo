@@ -123,25 +123,14 @@ fn _run_cpu_nd_fft[
     ](
         shared_f: LayoutTensor[out_dtype, layout_out, shared_origin, ...],
         x_in: LayoutTensor[dtype_in, layout_in, x_in_origin, ...],
-        enable_debug: Bool = False,
     ):
         comptime length = UInt(layout_in.shape[0].value())
         comptime bases_idx = bases[dim_idx]
-        comptime bases_processed = _get_ordered_bases_processed_list[
-            length, bases_idx
+        comptime bases_processed = materialize[
+            _get_ordered_bases_processed_list[length, bases_idx]()
         ]()
         comptime ordered_bases = bases_processed[0]
         comptime processed_list = bases_processed[1]
-        # FIXME(#5686): maybe replace with this once it's solved
-        # comptime twfs_array = _get_flat_twfs[
-        #     out_dtype,
-        #     length,
-        #     total_twfs,
-        #     ordered_bases,
-        #     processed_list,
-        #     inverse,
-        # ]()
-        # ref twfs_array_runtime = global_constant[twfs_array]()
         comptime twfs_layout = Layout.row_major(Int(length), 2)
         var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
             twfs_runtime_ptr[dim_idx].unsafe_ptr().bitcast[Scalar[out_dtype]]()
@@ -158,11 +147,17 @@ fn _run_cpu_nd_fft[
                 processed=processed,
                 inverse=inverse,
                 ordered_bases=ordered_bases,
+                inline_twfs = (
+                    Int(length) * size_of[out_dtype]() * 2 <= 64 * 1024
+                ),
                 runtime_twfs=False,
-                inline_twfs = Int(length) * size_of[out_dtype]() * 2
-                <= 64 * 1024,
             ]
             comptime num_iters = length // base
+
+            # TODO: once we can stop this from fully unrolling. Measure perf
+            # @parameter
+            # for local_i in range(num_iters):
+            #     func[local_i](shared_f, x_in)
 
             @always_inline
             fn _run[
