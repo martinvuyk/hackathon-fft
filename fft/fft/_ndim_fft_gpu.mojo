@@ -429,28 +429,28 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
         base_out: base_out_t, base_x: base_x_t, mut circular_idx: Int
     ):
         comptime if len(dims) == 1:
-            # comptime if size <= max_shared_mem_size:
-            #     comptime circular_offset = base_out_layout.size()
-            #     var sliced_lhs = shared_f_total_t[base_out_layout](
-            #         shared_f_total_lhs.ptr + circular_idx * circular_offset
-            #     )
-            #     var sliced_rhs = shared_f_total_t[base_out_layout](
-            #         shared_f_total_rhs.ptr + circular_idx * circular_offset
-            #     )
-            #     # TODO: this could be parallelized using a circular buffer
-            #     # and a producer consumer setup
-            #     # if global_i < worker_threads:
-            #     _run_1d_fft[start_dim_idx](sliced_lhs, sliced_rhs, base_x)
-            #     # else:
-            #     _copy_shared_f_total_to_output[start_dim_idx](
-            #         base_out, sliced_lhs, sliced_rhs
-            #     )
-            #     circular_idx = (circular_idx + 1) % amnt_circular_idxs
-            #     # stage_sync_fn()
-            # else:
-            _run_1d_fft[start_dim_idx](
-                base_out, base_out.as_any_origin(), base_x
-            )
+            comptime if size <= max_shared_mem_size:
+                comptime circular_offset = base_out_layout.size()
+                var sliced_lhs = shared_f_total_t[base_out_layout](
+                    shared_f_total_lhs.ptr + circular_idx * circular_offset
+                )
+                var sliced_rhs = shared_f_total_t[base_out_layout](
+                    shared_f_total_rhs.ptr + circular_idx * circular_offset
+                )
+                # TODO: this could be parallelized using a circular buffer
+                # and a producer consumer setup
+                # if global_i < worker_threads:
+                _run_1d_fft[start_dim_idx](sliced_lhs, sliced_rhs, base_x)
+                # else:
+                _copy_shared_f_total_to_output[start_dim_idx](
+                    base_out, sliced_lhs, sliced_rhs
+                )
+                circular_idx = (circular_idx + 1) % amnt_circular_idxs
+                # stage_sync_fn()
+            else:
+                _run_1d_fft[start_dim_idx](
+                    base_out, base_out.as_any_origin(), base_x
+                )
         else:
             comptime for idx in reversed(range(len(dims))):
                 comptime dim = dims[idx].value()
