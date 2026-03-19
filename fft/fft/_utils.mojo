@@ -1,17 +1,13 @@
-from sys import is_compile_time
-from sys.info import is_64bit, is_nvidia_gpu
-from complex import ComplexScalar, ComplexSIMD
-from math import exp, pi, ceil, sin, cos, log2
-from bit import count_trailing_zeros, bit_reverse
-from gpu.host.info import is_cpu
+from std.sys.info import is_64bit, is_nvidia_gpu
+from std.complex import ComplexScalar, ComplexSIMD
+from std.math import exp, pi, sin, cos, log2
+from std.bit import count_trailing_zeros
 from layout import IntTuple
-from utils.index import IndexList
-from sys.info import simd_width_of
+from std.utils.index import IndexList
 
 
-fn _get_dtype[length: UInt]() -> DType:
-    @parameter
-    if length <= UInt(UInt8.MAX):
+def _get_dtype[length: UInt]() -> DType:
+    comptime if length <= UInt(UInt8.MAX):
         return DType.uint8
     elif length <= UInt(UInt16.MAX):
         return DType.uint16
@@ -25,7 +21,7 @@ fn _get_dtype[length: UInt]() -> DType:
         return DType.uint256
 
 
-fn _mixed_radix_digit_reverse[
+def _mixed_radix_digit_reverse[
     length: UInt, ordered_bases: List[UInt], reverse: Bool = False
 ](idx: Scalar) -> type_of(idx):
     """Performs mixed-radix digit reversal for an index `idx` based on a
@@ -44,31 +40,27 @@ fn _mixed_radix_digit_reverse[
     var current_val = idx
     var base_offset: type_of(idx)
 
-    @parameter
-    if reverse:
+    comptime if reverse:
         base_offset = 1
     else:
         base_offset = {length}
 
-    @parameter
-    for i in range(len(ordered_bases)):
+    comptime for i in range(len(ordered_bases)):
         comptime base = type_of(idx)(
             ordered_bases[i if not reverse else (len(ordered_bases) - 1 - i)]
         )
 
-        @parameter
-        if not reverse:
+        comptime if not reverse:
             base_offset //= base
         reversed_idx += (current_val % base) * base_offset
         current_val //= base
 
-        @parameter
-        if reverse:
+        comptime if reverse:
             base_offset *= base
     return reversed_idx
 
 
-fn _get_twiddle_factor[
+def _get_twiddle_factor[
     dtype: DType, *, inverse: Bool, N: Scalar
 ](n: Scalar) -> ComplexScalar[dtype]:
     """Returns `exp((-j * 2 * pi * n) / N)`."""
@@ -78,7 +70,7 @@ fn _get_twiddle_factor[
 
     var num: ComplexScalar[dtype]
 
-    if is_compile_time():
+    if __is_run_in_comptime_interpreter:
         var factor = 2 * n.cast[dtype]() / N.cast[dtype]()
         if factor < 1e-9:  # approx. 0
             num = {1, 0}
@@ -90,8 +82,7 @@ fn _get_twiddle_factor[
             num = {0, 1}
         else:
             # FIXME: remove once comptime branch and comptime assert don't short circuit
-            @parameter
-            if is_nvidia_gpu():
+            comptime if is_nvidia_gpu():
                 num = {
                     cos(theta.cast[DType.float32]()).cast[dtype](),
                     sin(theta.cast[DType.float32]()).cast[dtype](),
@@ -99,9 +90,7 @@ fn _get_twiddle_factor[
             else:
                 num = {cos(theta), sin(theta)}
     else:
-
-        @parameter
-        if is_nvidia_gpu():
+        comptime if is_nvidia_gpu():
             num = {
                 cos(theta.cast[DType.float32]()).cast[dtype](),
                 sin(theta.cast[DType.float32]()).cast[dtype](),
@@ -109,14 +98,13 @@ fn _get_twiddle_factor[
         else:
             num = {cos(theta), sin(theta)}
 
-    @parameter
-    if not inverse:
+    comptime if not inverse:
         return num
     else:
         return num.conj()
 
 
-fn _get_twiddle_factors[
+def _get_twiddle_factors[
     length: UInt, dtype: DType, inverse: Bool = False
 ](out res: List[ComplexScalar[dtype]]):
     """Get all the twiddle factors for the length."""
@@ -125,7 +113,7 @@ fn _get_twiddle_factors[
         res[n] = _get_twiddle_factor[dtype, inverse=inverse, N=length](n)
 
 
-fn _get_twiddle_factors_inline[
+def _get_twiddle_factors_inline[
     length: UInt, dtype: DType, inverse: Bool = False
 ](out res: InlineArray[ComplexScalar[dtype], Int(length)]):
     """Get all the twiddle factors for the length."""
@@ -134,14 +122,14 @@ fn _get_twiddle_factors_inline[
         res[n] = _get_twiddle_factor[dtype, inverse=inverse, N=length](n)
 
 
-fn _div_by(x: UInt, base: UInt) -> UInt:
+def _div_by(x: UInt, base: UInt) -> UInt:
     # TODO: benchmark whether this performs better than doing branches
     return 1 if base == x else (
         0 if (base > x or x % base != 0) else (_div_by(x // base, base) + 1)
     )
 
 
-fn _times_divisible_by(length: UInt, base: UInt, out amnt_divisible: UInt):
+def _times_divisible_by(length: UInt, base: UInt, out amnt_divisible: UInt):
     debug_assert(base != 1, "The number 1 can infinitely divide any number")
     if UInt64(base).is_power_of_two():
         # FIXME(#5003): this should work
@@ -150,8 +138,7 @@ fn _times_divisible_by(length: UInt, base: UInt, out amnt_divisible: UInt):
         #     // log2(Float64(base)).cast[DType.uint]()
         # )
 
-        @parameter
-        if is_64bit():
+        comptime if is_64bit():
             amnt_divisible = UInt(
                 count_trailing_zeros(UInt64(length))
                 // log2(Float64(base)).cast[DType.uint64]()
@@ -166,14 +153,14 @@ fn _times_divisible_by(length: UInt, base: UInt, out amnt_divisible: UInt):
 
 
 @parameter
-fn _reduce_mul(b: List[UInt], out res: UInt):
+def _reduce_mul(b: List[UInt], out res: UInt):
     res = UInt(1)
     for base in b:
         res *= base
 
 
 @parameter
-fn _build_ordered_bases[length: UInt, bases: List[UInt]]() -> List[UInt]:
+def _build_ordered_bases[length: UInt, bases: List[UInt]]() -> List[UInt]:
     var existing_bases = materialize[bases]()
     sort(existing_bases)  # FIXME: this should just be ascending=False
     if _reduce_mul(existing_bases) == length:
@@ -196,7 +183,7 @@ fn _build_ordered_bases[length: UInt, bases: List[UInt]]() -> List[UInt]:
         return new_bases^
 
 
-fn _get_ordered_bases_processed_list[
+def _get_ordered_bases_processed_list[
     length: UInt, bases: List[UInt]
 ]() -> Tuple[List[UInt], List[UInt]]:
     comptime assert len(bases) > 0, String(
@@ -205,7 +192,7 @@ fn _get_ordered_bases_processed_list[
     comptime ordered_bases = _build_ordered_bases[length, bases]()
 
     @parameter
-    fn _build_processed_list() -> List[UInt]:
+    def _build_processed_list() -> List[UInt]:
         var ordered_bases_var = materialize[ordered_bases]()
         var processed_list = List[UInt](capacity=len(ordered_bases_var))
         var processed = UInt(1)
@@ -224,7 +211,7 @@ fn _get_ordered_bases_processed_list[
     ), String(
         "powers of the bases must multiply together  to equal the sequence ",
         "length. The builtin algorithm was only able to produce: ",
-        ordered_bases.__str__()
+        String(ordered_bases)
         .replace("SIMD[DType.uint, 1](", "")
         .replace(")", ""),
         " for the length: ",
@@ -235,21 +222,28 @@ fn _get_ordered_bases_processed_list[
 
 
 @always_inline
-fn _min(elems: List[UInt], out smallest: UInt):
+def _min(elems: List[UInt], out smallest: UInt):
     smallest = elems[0]
     for elem in elems[1:]:
         smallest = min(elem, smallest)
 
 
 @always_inline
-fn _max(elems: List[UInt], out smallest: UInt):
+def _max(elems: IntTuple, out smallest: UInt):
+    smallest = UInt(elems[0].value())
+    for elem in elems[1:]:
+        smallest = max(UInt(elem.value()), smallest)
+
+
+@always_inline
+def _max(elems: List[UInt], out smallest: UInt):
     smallest = elems[0]
     for elem in elems[1:]:
         smallest = max(elem, smallest)
 
 
 @always_inline
-fn _max(elems: List[List[UInt]], out biggest: UInt):
+def _max(elems: List[List[UInt]], out biggest: UInt):
     biggest = 0
     for bases in elems:
         for elem in bases:
@@ -257,7 +251,7 @@ fn _max(elems: List[List[UInt]], out biggest: UInt):
 
 
 @always_inline
-fn _product_of_dims(dims: IntTuple) -> Int:
+def _product_of_dims(dims: IntTuple) -> Int:
     """Calculates the product of a tuple of dimensions."""
     var prod = 1
     for i in range(len(dims)):
@@ -265,35 +259,28 @@ fn _product_of_dims(dims: IntTuple) -> Int:
     return prod
 
 
-fn _get_cascade_idxes[
+def _get_cascade_idxes[
     shape: IntTuple, excluded: IntTuple
 ](var flat_idx: Int, out idxes: IndexList[len(shape) - len(excluded)]):
     idxes = {fill = 0}
 
     @parameter
-    fn _idxes_i(i: Int, out amnt: Int):
+    def _idxes_i(i: Int, out amnt: Int):
         amnt = i
 
-        @parameter
-        for j in range(len(excluded)):
+        comptime for j in range(len(excluded)):
             comptime val = excluded[j].value()
             amnt -= Int(i > val)
 
     @parameter
-    fn _is_excluded[i: Int]() -> Bool:
-        @parameter
-        for j in range(len(excluded)):
-
-            @parameter
-            if i == excluded[j].value():
+    def _is_excluded[i: Int]() -> Bool:
+        comptime for j in range(len(excluded)):
+            comptime if i == excluded[j].value():
                 return True
         return False
 
-    @parameter
-    for i in range(len(shape)):
-
-        @parameter
-        if _is_excluded[i]():
+    comptime for i in range(len(shape)):
+        comptime if _is_excluded[i]():
             continue
         comptime curr_num = UInt(shape[i].value())
         comptime idxes_i = _idxes_i(i)
@@ -302,13 +289,12 @@ fn _get_cascade_idxes[
 
 
 @always_inline
-fn _unit_phasor_mul[
+def _unit_phasor_mul[
     phasor: ComplexSIMD
 ](twf: type_of(phasor)) -> type_of(phasor):
     """Optimizes `phasor * twf`."""
 
-    @parameter
-    if phasor.re == 1:  # Co(1, 0)
+    comptime if phasor.re == 1:  # Co(1, 0)
         return twf
     elif phasor.im == -1:  # Co(0, -1)
         return {twf.im, -twf.re}
@@ -319,8 +305,7 @@ fn _unit_phasor_mul[
     elif abs(phasor.re) == abs(phasor.im):  # Co(1/√2, 1/√2)
         comptime factor = abs(phasor.re)
 
-        @parameter
-        if phasor.re > 0 and phasor.im > 0:  # Q1
+        comptime if phasor.re > 0 and phasor.im > 0:  # Q1
             return {factor * (twf.re - twf.im), factor * (twf.re + twf.im)}
         elif phasor.re < 0 and phasor.im > 0:  # Q2
             return {factor * (-twf.re - twf.im), factor * (twf.re - twf.im)}
@@ -333,11 +318,10 @@ fn _unit_phasor_mul[
 
 
 @always_inline
-fn _unit_phasor_fma[
+def _unit_phasor_fma[
     twf: ComplexSIMD
 ](x_j: type_of(twf), acc: type_of(twf)) -> type_of(twf):
-    @parameter
-    if twf.re == 1:  # Co(1, 0)
+    comptime if twf.re == 1:  # Co(1, 0)
         return acc + x_j
     elif twf.im == -1:  # Co(0, -1)
         return {acc.re + x_j.im, acc.im - x_j.re}
@@ -350,8 +334,7 @@ fn _unit_phasor_fma[
         var re = x_j.re
         var im = x_j.im
 
-        @parameter
-        if twf.re > 0 and twf.im > 0:  # Q1
+        comptime if twf.re > 0 and twf.im > 0:  # Q1
             return acc + {factor * (re - im), factor * (re + im)}
         elif twf.re < 0 and twf.im > 0:  # Q2
             return acc + {factor * (-re - im), factor * (re - im)}
@@ -364,11 +347,10 @@ fn _unit_phasor_fma[
 
 
 @always_inline
-fn _unit_phasor_fma[
+def _unit_phasor_fma[
     twf: ComplexSIMD, accum_is_real: Bool
 ](x_j: SIMD[twf.dtype, twf.size], acc: type_of(twf)) -> type_of(twf):
-    @parameter
-    if twf.re == 1:  # Co(1, 0)
+    comptime if twf.re == 1:  # Co(1, 0)
         return {acc.re + x_j, acc.im}
     elif twf.im == -1 and accum_is_real:  # Co(0, -1)
         return {acc.re, -x_j}

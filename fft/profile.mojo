@@ -1,8 +1,8 @@
-from complex import ComplexSIMD
-from benchmark import Bench, BenchConfig, Bencher, BenchId, keep
+from std.complex import ComplexSIMD
+from std.benchmark import Bench, BenchConfig, Bencher, BenchId, keep
 from layout import Layout, LayoutTensor
-from gpu.host import DeviceContext
-from random import seed
+from std.gpu.host import DeviceContext
+from std.random import seed
 
 from fft._test_values import _get_test_values_128
 from fft.tests import _TestValues
@@ -10,7 +10,7 @@ from fft.fft.fft import fft
 
 
 @parameter
-fn profile_intra_block_radix_n[
+def profile_intra_block_radix_n[
     dtype: DType, test_values: _TestValues[dtype]
 ](mut b: Bencher) raises:
     comptime values = test_values[len(test_values) - 1]
@@ -22,18 +22,20 @@ fn profile_intra_block_radix_n[
     comptime out_dtype = dtype
     comptime in_layout = Layout.row_major(BATCHES, SIZE, 1)
     comptime out_layout = Layout.row_major(BATCHES, SIZE, 2)
+    comptime in_size = in_layout.size()
+    comptime out_size = out_layout.size()
     comptime calc_dtype = dtype
     comptime Complex = ComplexSIMD[calc_dtype, 1]
 
     with DeviceContext() as ctx:
-        out = ctx.enqueue_create_buffer[out_dtype](out_layout.size())
-        x = ctx.enqueue_create_buffer[in_dtype](in_layout.size())
-        ref series = values[0]
+        out = ctx.enqueue_create_buffer[out_dtype](out_size)
+        x = ctx.enqueue_create_buffer[in_dtype](in_size)
+        ref series = materialize[values]()[0]
         var idx = 0
         with x.map_to_host() as x_host:
             for _ in range(BATCHES):
                 for i in range(SIZE):
-                    x_host[idx] = series[i]
+                    x_host[idx] = {series[i]}
                     idx += 1
 
         var out_tensor = LayoutTensor[mut=True, out_dtype, out_layout](
@@ -45,7 +47,7 @@ fn profile_intra_block_radix_n[
 
         @always_inline
         @parameter
-        fn call_fn(ctx: DeviceContext) raises:
+        def call_fn(ctx: DeviceContext) raises:
             fft(out_tensor, x_tensor, ctx)
             ctx.synchronize()
 
@@ -55,7 +57,7 @@ fn profile_intra_block_radix_n[
         _ = x_tensor
 
 
-def main():
+def main() raises:
     seed()
     var m = Bench(BenchConfig(num_repetitions=1))
     comptime dtype = DType.float32

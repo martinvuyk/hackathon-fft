@@ -1,11 +1,11 @@
-from complex import ComplexScalar
+from std.complex import ComplexScalar
 
 comptime _TestValues[complex_dtype: DType] = List[
     Tuple[List[Int], List[ComplexScalar[complex_dtype]]]
 ]
 
 
-fn _get_test_values_2[
+def _get_test_values_2[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -24,7 +24,7 @@ fn _get_test_values_2[
     ]
 
 
-fn _get_test_values_3[
+def _get_test_values_3[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -58,7 +58,7 @@ fn _get_test_values_3[
     ]
 
 
-fn _get_test_values_4[
+def _get_test_values_4[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -103,7 +103,7 @@ fn _get_test_values_4[
     # fmt: on
 
 
-fn _get_test_values_5[
+def _get_test_values_5[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -153,7 +153,7 @@ fn _get_test_values_5[
     # fmt: on
 
 
-fn _get_test_values_6[
+def _get_test_values_6[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -203,7 +203,7 @@ fn _get_test_values_6[
     # fmt: on
 
 
-fn _get_test_values_7[
+def _get_test_values_7[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -259,7 +259,7 @@ fn _get_test_values_7[
     # fmt: on
 
 
-fn _get_test_values_8[
+def _get_test_values_8[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -314,7 +314,7 @@ fn _get_test_values_8[
     # fmt: on
 
 
-fn _get_test_values_10[
+def _get_test_values_10[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -373,7 +373,7 @@ fn _get_test_values_10[
     # fmt: on
 
 
-fn _get_test_values_16[
+def _get_test_values_16[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -410,7 +410,7 @@ fn _get_test_values_16[
     # fmt: on
 
 
-fn _get_test_values_20[
+def _get_test_values_20[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -451,7 +451,7 @@ fn _get_test_values_20[
     # fmt: on
 
 
-fn _get_test_values_32[
+def _get_test_values_32[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -502,7 +502,7 @@ fn _get_test_values_32[
     # fmt: on
 
 
-fn _get_test_values_21[
+def _get_test_values_21[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -549,7 +549,7 @@ fn _get_test_values_21[
     # fmt: on
 
 
-fn _get_test_values_30[
+def _get_test_values_30[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -597,7 +597,7 @@ fn _get_test_values_30[
     # fmt: on
 
 
-fn _get_test_values_35[
+def _get_test_values_35[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -658,7 +658,7 @@ fn _get_test_values_35[
     # fmt: on
 
 
-fn _get_test_values_48[
+def _get_test_values_48[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -721,7 +721,7 @@ fn _get_test_values_48[
     # fmt: on
 
 
-fn _get_test_values_60[
+def _get_test_values_60[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -794,7 +794,7 @@ fn _get_test_values_60[
     # fmt: on
 
 
-fn _get_test_values_64[
+def _get_test_values_64[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -871,7 +871,7 @@ fn _get_test_values_64[
     # fmt: on
 
 
-fn _get_test_values_100[
+def _get_test_values_100[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.
@@ -978,7 +978,7 @@ fn _get_test_values_100[
     # fmt: on
 
 
-fn _get_test_values_128[
+def _get_test_values_128[
     complex_dtype: DType
 ](out res: _TestValues[complex_dtype]):
     """Get the series on the lhs, and the expected complex values on rhs.

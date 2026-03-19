@@ -11,7 +11,7 @@ from testing import assert_almost_equal
 from _test_values import _get_test_values_8
 
 
-fn _get_ordered_items[stages: UInt](out res: InlineArray[UInt, 2**stages]):
+def _get_ordered_items[stages: UInt](out res: InlineArray[UInt, 2**stages]):
     """The Butterfly diagram orders indexes by bit-reversed size."""
     res = InlineArray[UInt, 2**stages](uninitialized=True)
     values = List[UInt](capacity=2**stages)
@@ -22,7 +22,7 @@ fn _get_ordered_items[stages: UInt](out res: InlineArray[UInt, 2**stages]):
         res[i] = bit_reverse(values[i])
 
 
-fn _get_offsets[stages: UInt](out res: InlineArray[UInt, stages]):
+def _get_offsets[stages: UInt](out res: InlineArray[UInt, stages]):
     """Offsets are the numeric jump that the indexes make from the
     upper line to the lower line in the butterfly diagram. It is
     the same number for the whole stage."""
@@ -32,7 +32,7 @@ fn _get_offsets[stages: UInt](out res: InlineArray[UInt, stages]):
         res[UInt(i)] = UInt(2**i)
 
 
-fn _get_twiddle_factors[
+def _get_twiddle_factors[
     stages: UInt, length: UInt, dtype: DType
 ](out res: InlineArray[ComplexSIMD[dtype, 1], length - 1]):
     """Twiddle factors are stored contiguously in memory but the
@@ -57,7 +57,7 @@ fn _get_twiddle_factors[
             i += 1
 
 
-fn fast_fourier_transform[
+def fast_fourier_transform[
     in_dtype: DType,
     out_dtype: DType,
     in_layout: Layout,
@@ -114,8 +114,7 @@ fn fast_fourier_transform[
 
     barrier()
 
-    @parameter
-    for stage in range(stages):
+    comptime for stage in range(stages):
         next_idx = local_i + offsets[stage]
         # Run the Danielson-Lanczos Lemma if the current local_i is an "x_0"
         # line in the butterfly diagram. "x_0" would mean that the given

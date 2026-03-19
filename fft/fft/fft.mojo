@@ -1,9 +1,9 @@
-from gpu.host import DeviceContext
-from gpu.host.info import is_cpu
+from std.gpu.host import DeviceContext
+from std.gpu.host.info import is_cpu
 from layout import Layout, LayoutTensor
-from math import ceil, log2
-from sys.info import has_accelerator, size_of, is_64bit
-from bit import count_trailing_zeros
+from std.math import ceil, log2
+from std.sys.info import has_accelerator, size_of, is_64bit
+from std.bit import count_trailing_zeros
 
 from ._utils import (
     _build_ordered_bases,
@@ -17,7 +17,7 @@ from ._ndim_fft_gpu import _run_gpu_nd_fft, _GPUPlan
 comptime _DEFAULT_DEVICE = "cpu" if not has_accelerator() else "gpu"
 
 
-fn _check_layout_conditions_nd[in_layout: Layout, out_layout: Layout]():
+def _check_layout_conditions_nd[in_layout: Layout, out_layout: Layout]():
     comptime rank = out_layout.rank()
     comptime assert rank > 2, (
         "The rank should be bigger than 2. The first"
@@ -40,14 +40,13 @@ fn _check_layout_conditions_nd[in_layout: Layout, out_layout: Layout]():
         " the last dimension"
     )
 
-    @parameter
-    for i in range(rank - 2):
+    comptime for i in range(rank - 2):
         comptime assert (
             out_layout.shape[i + 1] != 1
         ), "no inner dimension should be of size 1"
 
 
-fn _estimate_best_bases[
+def _estimate_best_bases[
     out_layout: Layout, target: StaticString
 ](out bases: List[UInt]):
     comptime assert out_layout.rank() > 1, "output rank must be > 1"
@@ -59,8 +58,7 @@ fn _estimate_best_bases[
     comptime common_thread_block_size = 1024
     comptime min_radix_for_block = Int(ceil(length / common_thread_block_size))
 
-    @parameter
-    if (
+    comptime if (
         not is_cpu[target]()
         and length // max_radix_number <= common_thread_block_size
     ):
@@ -106,7 +104,7 @@ fn _estimate_best_bases[
             return
 
 
-fn _estimate_best_bases_nd[
+def _estimate_best_bases_nd[
     in_layout: Layout, out_layout: Layout, target: StaticString
 ](out bases: List[List[UInt]]):
     _check_layout_conditions_nd[in_layout, out_layout]()
@@ -114,8 +112,7 @@ fn _estimate_best_bases_nd[
     comptime amnt_dims = len(dims)
     bases = {capacity = amnt_dims}
 
-    @parameter
-    for i in range(amnt_dims):
+    comptime for i in range(amnt_dims):
         comptime dim = dims[i].value()
         bases.append(
             _estimate_best_bases[Layout.row_major(1, dim, 2), target]()
@@ -152,20 +149,20 @@ def plan_fft[
     bases: List[List[UInt]] = _estimate_best_bases_nd[
         in_layout, out_layout, "gpu"
     ](),
-](*, ctx: DeviceContext) -> _GPUPlan[
+](*, ctx: DeviceContext) raises -> _GPUPlan[
     out_dtype,
     out_layout,
     inverse,
     bases,
     None,
     ctx.default_device_info,
-    max_cluster_size = UInt(max_cluster_size),
+    max_cluster_size=UInt(max_cluster_size),
     runtime_twfs=runtime_twfs,
 ]:
     return {ctx}
 
 
-fn fft[
+def fft[
     in_dtype: DType,
     out_dtype: DType,
     in_layout: Layout,
@@ -181,7 +178,7 @@ fn fft[
     output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
     x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
     *,
-    plan: Optional[_CPUPlan[out_dtype, out_layout, inverse, bases]] = None,
+    var plan: Optional[_CPUPlan[out_dtype, out_layout, inverse, bases]] = None,
     cpu_workers: Optional[UInt] = None,
 ) raises:
     """Calculate the Fast Fourier Transform.
@@ -223,11 +220,11 @@ fn fft[
     )
 
     _run_cpu_nd_fft[inverse=inverse, bases=bases](
-        output, x, plan=plan.or_else({}), cpu_workers=cpu_workers
+        output, x, plan=plan^.or_else({}), cpu_workers=cpu_workers
     )
 
 
-fn fft[
+def fft[
     in_dtype: DType,
     out_dtype: DType,
     in_layout: Layout,

@@ -1,5 +1,5 @@
-from complex import ComplexSIMD
-from benchmark import (
+from std.complex import ComplexSIMD
+from std.benchmark import (
     Bench,
     BenchConfig,
     Bencher,
@@ -9,16 +9,18 @@ from benchmark import (
     BenchMetric,
 )
 from layout import Layout, LayoutTensor, IntTuple
-from gpu.host import DeviceContext
-from random import seed, randn, random_ui64
-from sys.info import size_of
+from std.gpu.host import DeviceContext
+from std.random import seed, randn, random_ui64
+from std.sys.info import size_of
 
 from fft.fft.fft import fft, plan_fft
 from fft.fft._utils import _product_of_dims
 
 
 @parameter
-fn bench_gpu_radix_n_rfft[dtype: DType, shape: IntTuple](mut b: Bencher) raises:
+def bench_gpu_radix_n_rfft[
+    dtype: DType, shape: IntTuple
+](mut b: Bencher) raises:
     comptime in_dtype = dtype
     comptime out_dtype = dtype
     comptime in_layout = Layout.row_major(IntTuple(shape, 1).flatten())
@@ -43,7 +45,7 @@ fn bench_gpu_radix_n_rfft[dtype: DType, shape: IntTuple](mut b: Bencher) raises:
 
         @always_inline
         @parameter
-        fn call_fn(ctx: DeviceContext) raises:
+        def call_fn(ctx: DeviceContext) raises:
             fft(out_tensor, x_tensor, ctx, plan=plan.copy())
             ctx.synchronize()
 
@@ -52,7 +54,7 @@ fn bench_gpu_radix_n_rfft[dtype: DType, shape: IntTuple](mut b: Bencher) raises:
 
 
 @parameter
-fn bench_cpu_radix_n_rfft[
+def bench_cpu_radix_n_rfft[
     dtype: DType,
     shape: IntTuple,
     *,
@@ -80,7 +82,7 @@ fn bench_cpu_radix_n_rfft[
 
     @always_inline
     @parameter
-    fn call_fn() raises:
+    def call_fn() raises:
         fft(out_tensor, x_tensor, plan=plan.copy(), cpu_workers=cpu_workers)
 
     b.iter[call_fn]()
@@ -90,11 +92,11 @@ fn bench_cpu_radix_n_rfft[
     _ = x_tensor
 
 
-def main():
+def main() raises:
     seed()
     var m = Bench(
-        # BenchConfig(num_repetitions=1)
-        BenchConfig(num_repetitions=1, num_warmup_iters=1, max_iters=1)
+        BenchConfig(num_repetitions=1)
+        # BenchConfig(num_repetitions=1, num_warmup_iters=20, max_iters=20)
     )
     comptime shapes: List[IntTuple] = [
         # {1_000_000, 93},
@@ -113,8 +115,7 @@ def main():
         # {1, 25, 160, 160, 48},
     ]
 
-    @parameter
-    for shape in shapes:
+    comptime for shape in shapes:
         comptime dtype = DType.float32
         comptime name = String("bench_gpu_radix_n_rfft[", shape, "]")
         comptime num_elems = _product_of_dims(shape)

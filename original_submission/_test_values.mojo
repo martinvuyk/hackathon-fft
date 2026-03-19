@@ -1,7 +1,7 @@
 from complex import ComplexSIMD
 
 
-fn _get_test_values_8[
+def _get_test_values_8[
     complex_dtype: DType
 ](out res: List[Tuple[List[Int], List[ComplexSIMD[complex_dtype, 1]]]]):
     """Get the series on the lhs, and the expected complex values on rhs.

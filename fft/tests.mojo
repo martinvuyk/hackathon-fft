@@ -1,13 +1,13 @@
-from builtin.globals import global_constant
-from complex import ComplexScalar
-from gpu.host import DeviceContext
-from gpu.host.info import is_cpu
+from std.builtin.globals import global_constant
+from std.complex import ComplexScalar
+from std.gpu.host import DeviceContext
+from std.gpu.host.info import is_cpu
 from layout import Layout, LayoutTensor
-from math import ceil
-from sys.info import has_accelerator, size_of
-from utils.numerics import nan
+from std.math import ceil
+from std.sys.info import has_accelerator, size_of
+from std.utils.numerics import nan
 
-from testing import assert_almost_equal
+from std.testing import assert_almost_equal
 
 from fft.fft.fft import fft, _estimate_best_bases_nd
 from fft.fft._ndim_fft_gpu import _run_gpu_nd_fft, _GPUTest
@@ -41,7 +41,7 @@ comptime ATOL[dtype: DType] = 1e-2
 comptime RTOL = 1e-5
 
 
-fn _round(val: SIMD) -> type_of(val):
+def _round(val: SIMD) -> type_of(val):
     return round(val, 5)
 
 
@@ -53,7 +53,7 @@ def _test_fft_radix_n[
     target: StaticString,
     debug: Bool,
     gpu_test: Optional[_GPUTest] = None,
-]():
+]() raises:
     comptime BATCHES = len(test_values)
     comptime SIZE = len(test_values[0][0])
     comptime in_dtype = dtype
@@ -65,25 +65,23 @@ def _test_fft_radix_n[
     comptime out_layout = Layout.row_major(BATCHES, SIZE, 2)
     comptime out_size = out_layout.size()
 
-    @parameter
-    if debug:
+    comptime if debug:
         print("----------------------------")
         print("SIZE:", SIZE)
         print("Buffers for Bases: ", end="")
         var b = materialize[bases]()
-        print(b.__str__().replace("SIMD[DType.uint, 1](", "").replace(")", ""))
+        print(String(b).replace("SIMD[DType.uint, 1](", "").replace(")", ""))
         print("----------------------------")
 
     @parameter
-    fn _eval[
+    def _eval[
         res_layout: Layout, res_origin: MutOrigin
     ](
         result: LayoutTensor[out_dtype, res_layout, res_origin],
         scalar_in: List[Int],
         complex_out: List[ComplexScalar[out_dtype]],
     ) raises:
-        @parameter
-        if debug:
+        comptime if debug:
             print("out: ", end="")
             for i in range(SIZE):
                 if i == 0:
@@ -108,11 +106,8 @@ def _test_fft_radix_n[
             print("expected: ", end="")
 
         # gather all real parts and then the imaginary parts
-        @parameter
-        if inverse:
-
-            @parameter
-            if debug:
+        comptime if inverse:
+            comptime if debug:
                 for i in range(SIZE):
                     if i == 0:
                         print(
@@ -142,9 +137,7 @@ def _test_fft_radix_n[
                     result[i, 1], 0, atol=ATOL[out_dtype], rtol=RTOL
                 )
         else:
-
-            @parameter
-            if debug:
+            comptime if debug:
                 for i in range(SIZE):
                     if i == 0:
                         print(
@@ -175,8 +168,7 @@ def _test_fft_radix_n[
                     rtol=RTOL,
                 )
 
-    @parameter
-    if target == "cpu":
+    comptime if target == "cpu":
         var out_data = List[Scalar[in_dtype]](
             length=out_size, fill=nan[in_dtype]()
         )
@@ -186,25 +178,25 @@ def _test_fft_radix_n[
         var batch_output = LayoutTensor[mut=True, out_dtype, out_layout](
             Span(out_data)
         )
-        var batch_x = LayoutTensor[mut=False, in_dtype, in_layout](Span(x_data))
+        var batch_x = LayoutTensor[mut=True, in_dtype, in_layout](Span(x_data))
 
         for idx, test in enumerate(materialize[test_values]()):
             comptime x_layout = Layout.row_major(
                 in_layout.shape[1].value(), in_layout.shape[2].value()
             )
-            var x = LayoutTensor[mut=True, in_dtype, x_layout](
+            var x = LayoutTensor[mut=True, in_dtype, x_layout, ...](
                 batch_x.ptr + batch_x.stride[0]() * idx
             )
             for i in range(SIZE):
-
-                @parameter
-                if inverse:
+                comptime if inverse:
                     x[i, 0] = test[1][i].re.cast[in_dtype]()
                     x[i, 1] = test[1][i].im.cast[in_dtype]()
                 else:
                     x[i, 0] = Scalar[in_dtype](test[0][i])
 
-        fft[bases= [bases], inverse=inverse](batch_output, batch_x)
+        fft[bases=[bases], inverse=inverse](
+            batch_output, batch_x.get_immutable()
+        )
 
         for idx, test in enumerate(materialize[test_values]()):
             comptime output_layout = Layout.row_major(
@@ -236,9 +228,7 @@ def _test_fft_radix_n[
                     )
 
                     for i in range(SIZE):
-
-                        @parameter
-                        if inverse:
+                        comptime if inverse:
                             x[i, 0] = test[1][i].re.cast[in_dtype]()
                             x[i, 1] = test[1][i].im.cast[in_dtype]()
                         else:
@@ -247,9 +237,9 @@ def _test_fft_radix_n[
             ctx.synchronize()
             _run_gpu_nd_fft[
                 inverse=inverse,
-                bases= [bases],
+                bases=[bases],
                 test=gpu_test,
-                runtime_twfs=False,
+                runtime_twfs=True,
             ](batch_output, batch_x, ctx)
             ctx.synchronize()
             with out_data.map_to_host() as out_host:
@@ -262,8 +252,7 @@ def _test_fft_radix_n[
                     ](out_host.unsafe_ptr() + batch_output.stride[0]() * idx)
                     _eval(output, test[0], test[1])
 
-    @parameter
-    if debug:
+    comptime if debug:
         print("----------------------------")
         print("Tests passed")
         print("----------------------------")
@@ -272,7 +261,7 @@ def _test_fft_radix_n[
 def _test_fft[
     dtype: DType,
     func: fn[bases: List[UInt], test_values: _TestValues[dtype]]() raises,
-]():
+]() raises:
     comptime L = List[UInt]
 
     comptime values_2 = _get_test_values_2[dtype]()
@@ -378,36 +367,41 @@ comptime _test[
 ] = _test_fft[
     dtype,
     _test_fft_radix_n[
-        dtype, inverse=inverse, target=target, gpu_test=gpu_test, debug=debug
+        dtype,
+        inverse=inverse,
+        target=target,
+        gpu_test=gpu_test,
+        debug=debug,
+        ...,
     ],
 ]
 
 
-def test_fft_1d_cpu[debug: Bool = False]():
+def test_fft_1d_cpu[debug: Bool = False]() raises:
     comptime dtype = DType.float64
     _test[dtype, False, "cpu", debug=debug]()
 
 
-def test_fft_1d_gpu[debug: Bool = False]():
+def test_fft_1d_gpu[debug: Bool = False]() raises:
     comptime dtype = DType.float64
-    _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.BLOCK]()
+    _test[dtype, False, "gpu", debug=debug, gpu_test=_GPUTest.BLOCK]()
     # _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.WARP]()
     # _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.DEVICE_WIDE]()
     # _test[dtype, False, "gpu", debug=debug, gpu_test = _GPUTest.CLUSTER]()
 
 
-def test_ifft_1d_cpu[debug: Bool = False]():
+def test_ifft_1d_cpu[debug: Bool = False]() raises:
     comptime dtype = DType.float64
     _test[dtype, True, "cpu", debug=debug]()
 
 
-def test_ifft_1d_gpu[debug: Bool = False]():
+def test_ifft_1d_gpu[debug: Bool = False]() raises:
     comptime dtype = DType.float64
     _test[dtype, True, "cpu", debug=debug]()
-    _test[dtype, True, "gpu", debug=debug, gpu_test = _GPUTest.BLOCK]()
-    _test[dtype, True, "gpu", debug=debug, gpu_test = _GPUTest.WARP]()
-    _test[dtype, True, "gpu", debug=debug, gpu_test = _GPUTest.DEVICE_WIDE]()
-    _test[dtype, True, "gpu", debug=debug, gpu_test = _GPUTest.CLUSTER]()
+    _test[dtype, True, "gpu", debug=debug, gpu_test=_GPUTest.BLOCK]()
+    _test[dtype, True, "gpu", debug=debug, gpu_test=_GPUTest.WARP]()
+    _test[dtype, True, "gpu", debug=debug, gpu_test=_GPUTest.DEVICE_WIDE]()
+    _test[dtype, True, "gpu", debug=debug, gpu_test=_GPUTest.CLUSTER]()
 
 
 comptime Co = ComplexScalar[DType.float64]
@@ -451,7 +445,7 @@ comptime expected_2d: InlineArray[InlineArray[Co, 4], 6] = [
 ]
 
 
-def test_2d_cpu[debug: Bool = False]():
+def test_2d_cpu[debug: Bool = False]() raises:
     comptime ROWS = 6
     comptime COLS = 4
 
@@ -474,8 +468,7 @@ def test_2d_cpu[debug: Bool = False]():
 
     ref expected = global_constant[expected_2d]()
 
-    @parameter
-    if debug:
+    comptime if debug:
         print("Output values:")
         for i in range(ROWS):
             for j in range(COLS):
@@ -512,7 +505,7 @@ def test_2d_cpu[debug: Bool = False]():
             )
 
 
-def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
+def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]() raises:
     comptime ROWS = 6
     comptime COLS = 4
     comptime in_dtype = DType.uint8
@@ -554,8 +547,7 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
         with out_data.map_to_host() as out_host:
             var out_view = type_of(out)(out_host.unsafe_ptr())
 
-            @parameter
-            if debug:
+            comptime if debug:
                 print("Output values:")
                 for i in range(ROWS):
                     for j in range(COLS):
@@ -592,7 +584,7 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
                     )
 
 
-def test_2d_gpu[debug: Bool = False]():
+def test_2d_gpu[debug: Bool = False]() raises:
     _test_2d_gpu[debug, False, _GPUTest.BLOCK]()
     _test_2d_gpu[debug, False, _GPUTest.WARP]()
     # _test_2d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
@@ -894,7 +886,7 @@ comptime expected_3d: InlineArray[InlineArray[InlineArray[Co, 8], 4], 6] = [
 ]
 
 
-def test_3d_cpu[debug: Bool = False]():
+def test_3d_cpu[debug: Bool = False]() raises:
     comptime D1 = 6
     comptime D2 = 4
     comptime D3 = 8
@@ -917,8 +909,7 @@ def test_3d_cpu[debug: Bool = False]():
 
     ref expected = global_constant[expected_3d]()
 
-    @parameter
-    if debug:
+    comptime if debug:
         print("Output values:")
         for i in range(D1):
             for j in range(D2):
@@ -959,7 +950,7 @@ def test_3d_cpu[debug: Bool = False]():
                 )
 
 
-def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
+def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]() raises:
     comptime D1 = 6
     comptime D2 = 4
     comptime D3 = 8
@@ -1005,8 +996,7 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
         with out_data.map_to_host() as out_host:
             var out_view = type_of(out)(out_host.unsafe_ptr())
 
-            @parameter
-            if debug:
+            comptime if debug:
                 print("Output values:")
 
                 for i in range(D1):
@@ -1048,19 +1038,19 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]():
                         )
 
 
-def test_3d_gpu[debug: Bool = False]():
+def test_3d_gpu[debug: Bool = False]() raises:
     _test_3d_gpu[debug, False, _GPUTest.BLOCK]()
     _test_3d_gpu[debug, False, _GPUTest.WARP]()
     # _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
     # _test_3d_gpu[debug, False, _GPUTest.CLUSTER]()
 
 
-def main():
+def main() raises:
     # test_fft_1d_cpu()
-    test_fft_1d_gpu()
+    test_fft_1d_gpu[debug=True]()
     # test_ifft_1d_cpu()
     # test_ifft_1d_gpu()
     # test_2d_cpu()
-    test_2d_gpu()
+    # test_2d_gpu()
     # test_3d_cpu()
-    test_3d_gpu()
+    # test_3d_gpu()
