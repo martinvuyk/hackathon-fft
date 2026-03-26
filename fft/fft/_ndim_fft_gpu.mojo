@@ -236,41 +236,32 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
             address_space=shared_address_space,
         ].stack_allocation()
     )
-    var shared_f_total_lhs: shared_f_total_t
-    var shared_f_total_rhs: shared_f_total_t
     comptime max_dim_layout = Layout.row_major(Int(max_dim), 2)
     comptime max_dim_size = UInt(size_of[out_dtype]() * max_dim_layout.size())
-    comptime shared_f_max_dim_t = type_of(
-        LayoutTensor[
-            out_dtype,
-            max_dim_layout,
-            MutExternalOrigin,
-            address_space=shared_address_space,
-        ].stack_allocation()
-    )
-    var shared_f_max_dim_lhs: shared_f_max_dim_t
-    var shared_f_max_dim_rhs: shared_f_max_dim_t
+
     comptime use_shared_f_total = 2 * size <= max_shared_mem_size
     comptime use_shared_f_max_dim = 2 * max_dim_size <= max_shared_mem_size
     comptime use_global_memory = not (
         use_shared_f_total or use_shared_f_max_dim
     )
 
-    comptime if use_shared_f_total:
-        shared_f_total_lhs = type_of(shared_f_total_lhs).stack_allocation()
-        shared_f_total_rhs = type_of(shared_f_total_rhs).stack_allocation()
-        shared_f_max_dim_lhs = {unsafe_ptr = {}}
-        shared_f_max_dim_rhs = {unsafe_ptr = {}}
-    elif use_shared_f_max_dim:
-        shared_f_total_lhs = {unsafe_ptr = {}}
-        shared_f_total_rhs = {unsafe_ptr = {}}
-        shared_f_max_dim_lhs = type_of(shared_f_max_dim_lhs).stack_allocation()
-        shared_f_max_dim_rhs = type_of(shared_f_max_dim_rhs).stack_allocation()
+    comptime shared_f_t = type_of(
+        LayoutTensor[
+            out_dtype,
+            shared_f_total_layout if use_shared_f_total else max_dim_layout,
+            MutExternalOrigin,
+            address_space=shared_address_space,
+        ].stack_allocation()
+    )
+    var shared_f_lhs: shared_f_t
+    var shared_f_rhs: shared_f_t
+
+    comptime if use_global_memory:
+        shared_f_lhs = {unsafe_ptr = {}}
+        shared_f_rhs = {unsafe_ptr = {}}
     else:
-        shared_f_total_lhs = {unsafe_ptr = {}}
-        shared_f_total_rhs = {unsafe_ptr = {}}
-        shared_f_max_dim_lhs = {unsafe_ptr = {}}
-        shared_f_max_dim_rhs = {unsafe_ptr = {}}
+        shared_f_lhs = shared_f_t.stack_allocation()
+        shared_f_rhs = shared_f_t.stack_allocation()
 
     @parameter
     def _run_1d_fft[
@@ -360,11 +351,9 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
     ):
         comptime if len(dims) == 1:
             comptime if use_shared_f_total:
-                _run_1d_fft[start_dim_idx](
-                    shared_f_total_lhs, shared_f_total_rhs, base_x
-                )
+                _run_1d_fft[start_dim_idx](shared_f_lhs, shared_f_rhs, base_x)
                 _copy_to_output[start_dim_idx](
-                    base_out, shared_f_total_lhs, shared_f_total_rhs
+                    base_out, shared_f_lhs, shared_f_rhs
                 )
             else:
                 _run_1d_fft[start_dim_idx](base_out, base_calc, base_x)
@@ -416,12 +405,12 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
                             )
 
                     comptime if use_shared_f_total:
-                        var lhs = shared_f_total_lhs.slice[
-                            dim_sl, o_comp, exclude
-                        ](idxes)
-                        var rhs = shared_f_total_rhs.slice[
-                            dim_sl, o_comp, exclude
-                        ](idxes)
+                        var lhs = shared_f_lhs.slice[dim_sl, o_comp, exclude](
+                            idxes
+                        )
+                        var rhs = shared_f_rhs.slice[dim_sl, o_comp, exclude](
+                            idxes
+                        )
                         _run(lhs, rhs)
                     elif use_global_memory:
                         var lhs = base_out.slice[dim_sl, o_comp, exclude](idxes)
@@ -430,7 +419,7 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
                         )
                         _run(lhs, rhs)
                     else:
-                        _run(shared_f_max_dim_lhs, shared_f_max_dim_rhs)
+                        _run(shared_f_lhs, shared_f_rhs)
                         var dim_batch_inter_out = base_out.slice[
                             dim_sl, o_comp, exclude
                         ](idxes)
@@ -443,7 +432,7 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
                                 break
 
                         comptime length = UInt(
-                            shared_f_max_dim_lhs.layout.shape[0].value()
+                            shared_f_lhs.layout.shape[0].value()
                         )
                         comptime bases_processed = materialize[
                             _get_ordered_bases_processed_list[
@@ -454,19 +443,17 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
                         var c_num: SIMD[out_dtype, 2]
 
                         comptime if is_in_lhs:
-                            c_num = shared_f_max_dim_lhs.load[2](local_idx, 0)
+                            c_num = shared_f_lhs.load[2](local_idx, 0)
                         else:
-                            c_num = shared_f_max_dim_rhs.load[2](local_idx, 0)
+                            c_num = shared_f_rhs.load[2](local_idx, 0)
                         dim_batch_inter_out.store(local_idx, 0, c_num)
                         stage_sync_fn()
 
                 comptime if use_shared_f_total:
-                    _copy_to_output[idx](
-                        base_out, shared_f_total_lhs, shared_f_total_rhs
-                    )
+                    _copy_to_output[idx](base_out, shared_f_lhs, shared_f_rhs)
                     stage_sync_fn()
                 elif use_global_memory:
-                    _copy_to_output[idx](base_out, calc_buf, calc_buf)
+                    _copy_to_output[idx](base_out, base_calc, base_calc)
                     stage_sync_fn()
 
     comptime batched_iters = max(batches // batch_size, 1)
