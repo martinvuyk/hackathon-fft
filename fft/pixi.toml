@@ -46,5 +46,5 @@ profile-ncu = """mojo build --debug-level=full -o build/profile profile.mojo && 
 """
 
 [dependencies]
-mojo = ">=0.26.3.0.dev2026031705,<0.27"
-modular = ">=26.3.0.dev2026031705,<27"
+mojo = ">=0.26.3.0.dev2026032521,<0.27"
+modular = ">=26.3.0.dev2026032521,<27"

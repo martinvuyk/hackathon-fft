@@ -16,7 +16,7 @@ from ._utils import (
     _max,
     _min,
 )
-from ._fft import _radix_n_fft_kernel
+from ._fft import _radix_n_fft_kernel_cooley_tukey
 
 
 struct _CPUPlan[
@@ -133,7 +133,7 @@ def _run_cpu_nd_fft[
         comptime for b in range(len(ordered_bases)):
             comptime base = ordered_bases[b]
             comptime processed = processed_list[b]
-            comptime func = _radix_n_fft_kernel[
+            comptime func = _radix_n_fft_kernel_cooley_tukey[
                 ...,
                 do_rfft=x_complex_in == 1 and dim_idx == start_dim_idx,
                 base=base,

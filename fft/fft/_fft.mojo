@@ -18,7 +18,7 @@ from ._utils import (
 
 
 @always_inline
-def _radix_n_fft_kernel[
+def _radix_n_fft_kernel_cooley_tukey[
     out_dtype: DType,
     out_layout: Layout,
     out_origin: MutOrigin,
@@ -185,7 +185,7 @@ def _radix_n_fft_kernel[
 
 
 @always_inline
-def _radix_n_fft_kernel_spread[
+def _radix_n_fft_kernel_stockham[
     out_dtype: DType,
     out_layout: Layout,
     out_origin: MutOrigin,
@@ -206,7 +206,6 @@ def _radix_n_fft_kernel_spread[
     ordered_bases: List[UInt],
     inline_twfs: Bool,
     runtime_twfs: Bool,
-    run_inplace: Bool,
 ](
     output: LayoutTensor[
         out_dtype, out_layout, out_origin, address_space=out_address_space, ...
@@ -219,7 +218,7 @@ def _radix_n_fft_kernel_spread[
         out_dtype, twf_layout, twf_origin, address_space=twf_address_space, ...
     ],
 ):
-    """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
+    """A generic Stockham algorithm. It has most of the generalizable radix
     optimizations."""
     comptime assert length >= base, "length must be >= base"
     comptime assert out_dtype.is_floating_point()
@@ -229,12 +228,7 @@ def _radix_n_fft_kernel_spread[
     comptime next_offset = offset * Sc(base)
     comptime ratio = Sc(length) // next_offset
 
-    # cooley-tukey fft indexing
-    var cooley_tukey_n = (Sc(local_i) // next_offset) * next_offset + (
-        Sc(local_i) % offset
-    )
-    # stockham fft indexing
-    var stockham_n = (Sc(local_i) // next_offset) * offset + (
+    var n = (Sc(local_i) // next_offset) * offset + (
         Sc(local_i) % next_offset
     ) % offset
 
@@ -252,30 +246,23 @@ def _radix_n_fft_kernel_spread[
     @always_inline
     @parameter
     def _get_x[i: UInt]() -> Co:
-        comptime if run_inplace:
-            comptime step = Sc(i) * offset
-            return to_Co(output.load[2](Int(cooley_tukey_n + step), 0))
-        else:
-            comptime step = Sc(i) * (Sc(length) // Sc(base))
-            var src_idx = Int(stockham_n + step)
+        comptime step = Sc(i) * (Sc(length) // Sc(base))
+        var src_idx = Int(n + step)
 
-            comptime if processed == 1 and do_rfft:
-                return Co(x.load[1](src_idx, 0).cast[out_dtype](), 0)
-            else:
-                return to_Co(x.load[2](src_idx, 0).cast[out_dtype]())
+        comptime if processed == 1 and do_rfft:
+            return Co(x.load[1](src_idx, 0).cast[out_dtype](), 0)
+        else:
+            return to_Co(x.load[2](src_idx, 0).cast[out_dtype]())
 
     var x_out = Co(0, 0)
 
     comptime for j in range(UInt(1), base):
         var x_j = _get_x[j]()
 
-        comptime max_twf_idx = (base - 1) * (
-            (length - 1) % UInt(next_offset)
-        ) * UInt(ratio)
+        comptime max_twf_idx = (base - 1) * UInt(next_offset)
         comptime Sc_twf = Scalar[_get_dtype[max_twf_idx]()]
-        var twf_index = (
-            Sc_twf(j) * Sc_twf(Sc(local_i) % next_offset) * Sc_twf(ratio)
-        ) % Sc_twf(length)
+        var base_idx = Sc_twf(j) * Sc_twf(Sc(local_i) % next_offset)
+        var twf_index = Sc(base_idx % Sc_twf(next_offset)) * ratio
 
         comptime if inline_twfs:
             comptime twfs = _get_twiddle_factors_inline[

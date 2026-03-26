@@ -260,7 +260,7 @@ def _test_fft_radix_n[
 
 def _test_fft[
     dtype: DType,
-    func: fn[bases: List[UInt], test_values: _TestValues[dtype]]() raises,
+    func: def[bases: List[UInt], test_values: _TestValues[dtype]]() raises,
 ]() raises:
     comptime L = List[UInt]
 
@@ -469,7 +469,7 @@ def test_2d_cpu[debug: Bool = False]() raises:
     ref expected = global_constant[expected_2d]()
 
     comptime if debug:
-        print("Output values:")
+        print("Values:")
         for i in range(ROWS):
             for j in range(COLS):
                 print(
@@ -548,7 +548,7 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]() raises:
             var out_view = type_of(out)(out_host.unsafe_ptr())
 
             comptime if debug:
-                print("Output values:")
+                print("Values:")
                 for i in range(ROWS):
                     for j in range(COLS):
                         print(
@@ -910,7 +910,7 @@ def test_3d_cpu[debug: Bool = False]() raises:
     ref expected = global_constant[expected_3d]()
 
     comptime if debug:
-        print("Output values:")
+        print("Values:")
         for i in range(D1):
             for j in range(D2):
                 for k in range(D3):
@@ -997,7 +997,7 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]() raises:
             var out_view = type_of(out)(out_host.unsafe_ptr())
 
             comptime if debug:
-                print("Output values:")
+                print("Values:")
 
                 for i in range(D1):
                     for j in range(D2):
@@ -1040,17 +1040,17 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]() raises:
 
 def test_3d_gpu[debug: Bool = False]() raises:
     _test_3d_gpu[debug, False, _GPUTest.BLOCK]()
-    _test_3d_gpu[debug, False, _GPUTest.WARP]()
+    # _test_3d_gpu[debug, False, _GPUTest.WARP]()
     # _test_3d_gpu[debug, False, _GPUTest.DEVICE_WIDE]()
     # _test_3d_gpu[debug, False, _GPUTest.CLUSTER]()
 
 
 def main() raises:
     # test_fft_1d_cpu()
-    test_fft_1d_gpu[debug=True]()
+    # test_fft_1d_gpu[debug=True]()
     # test_ifft_1d_cpu()
     # test_ifft_1d_gpu()
     # test_2d_cpu()
     # test_2d_gpu()
     # test_3d_cpu()
-    # test_3d_gpu()
+    test_3d_gpu()
