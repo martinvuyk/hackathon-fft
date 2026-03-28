@@ -565,7 +565,9 @@ def _run_gpu_nd_fft[
 
     comptime grid_dim = (Int(plan.config.num_blocks), plan.config.batch_size)
 
-    comptime run_cluster = plan.config.can_run_in_block_cluster and plan.config.num_blocks > 1
+    comptime run_cluster = plan.config.can_run_in_block_cluster and (
+        plan.config.num_blocks > 1
+    )
     comptime shared_mem = plan.config.buf_size_full_output if (
         plan.config.buf_size_full_output <= plan.config.max_shared_mem_size
     ) else plan.config.buf_size_max_dim

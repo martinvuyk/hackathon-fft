@@ -62,6 +62,67 @@ def _get_dims_twfs[
         twfs.append(_get_twiddle_factors[length, out_dtype, inverse]())
 
 
+@always_inline
+def transpose[
+    *, into_: Int, from_: Int
+](
+    dst: LayoutTensor[mut=True, ...],
+    src: LayoutTensor[mut=False, dst.dtype, dst.layout, ...],
+    num_workers: Int,
+):
+    comptime dims = src.layout.shape[: src.rank - 1]
+
+    @parameter
+    def _calc_sizes() -> Tuple[Int, Int, Int]:
+        # Always anchor the math to the outer-most index being swapped
+        var target_idx = min(into_, from_)
+
+        # 1. Batches: Product of all dimensions outside the swap zone
+        var batch_val = 1
+        for i in range(0, target_idx + 1):
+            batch_val *= dims[i].value()
+
+        # 2. M: The size of the specific dimension we are shifting
+        var m_val = dims[target_idx + 1].value()
+
+        # 3. N: Product of all inner dimensions inside the swap zone
+        var n_val = 1
+        for i in range(target_idx + 2, len(dims)):
+            n_val *= dims[i].value()
+
+        # If we are restoring the layout (from_ < into_), the source memory
+        # is already flipped [N, M], so we swap what M and N mean for the loop.
+        comptime if into_ < from_:
+            return batch_val, m_val, n_val
+        else:
+            return batch_val, n_val, m_val
+
+    comptime sizes = _calc_sizes()
+    comptime batches = sizes[0]
+    comptime M = sizes[1]
+    comptime N = sizes[2]
+    comptime TILE = simd_width_of[ComplexScalar[src.dtype]]()
+
+    @parameter
+    def _transpose_batch(b: Int):
+        var src_base = src.ptr + b * M * N * 2
+        var dst_base = dst.ptr + b * M * N * 2
+
+        for i in range(0, M, TILE):
+            for j in range(0, N, TILE):
+                var i_max = min(i + TILE, M)
+                var j_max = min(j + TILE, N)
+
+                for ii in range(i, i_max):
+                    for jj in range(j, j_max):
+                        var src_offset = (ii * N + jj) * 2
+                        var dst_offset = (jj * M + ii) * 2
+                        var val = src_base.load[2](src_offset)
+                        dst_base.store(dst_offset, val)
+
+    parallelize[_transpose_batch](batches, min(num_workers, batches, TILE))
+
+
 def _run_cpu_nd_fft[
     in_dtype: DType,
     out_dtype: DType,
@@ -79,6 +140,9 @@ def _run_cpu_nd_fft[
     plan: _CPUPlan[out_dtype, out_layout, inverse, bases],
     cpu_workers: Optional[UInt] = None,
 ):
+    # TODO: this should be dependent on the CPU cache architecture
+    comptime MAX_STACK_SEQ_LEN = 128
+    """Maximum length to fully unroll on the stack."""
     comptime rank = out_layout.rank()
     comptime dims = out_layout.shape[1 : rank - 1]
     comptime amnt_dims = len(dims)
@@ -92,22 +156,24 @@ def _run_cpu_nd_fft[
     var twfs_runtime_ptr = plan.twiddle_factors[].unsafe_ptr()
 
     @parameter
-    def _find_max_threads(out max_threads: UInt):
-        max_threads = 0
+    def _find_max_batch_prod(out max_batch_prod: UInt):
+        max_batch_prod = 0
 
         comptime for i, base_set in enumerate(bases):
             comptime val = _min(base_set)
             comptime dim = UInt(dims[i].value())
-            comptime threads = dim // val
-            max_threads = max(threads, max_threads)
+            max_batch_prod = max(dim // val, max_batch_prod)
 
-    comptime max_threads = _find_max_threads()
+    comptime max_batch_prod = _find_max_batch_prod()
 
     var threads = cpu_workers.or_else(UInt(parallelism_level()))
-    var per_batch_workers = min(threads, max_threads) if amnt_dims > 1 else 1
+    var per_batch_workers = min(threads, max_batch_prod) if amnt_dims > 1 else 1
     var parallel_batches = min(
         max(threads - (per_batch_workers - 1), 1), batches
     )
+    comptime total_stages = _num_stages_end_of[
+        bases, dims, 0
+    ]() + 2 * start_dim_idx
 
     @always_inline
     @parameter
@@ -130,17 +196,22 @@ def _run_cpu_nd_fft[
             twfs_runtime_ptr[dim_idx].unsafe_ptr().bitcast[Scalar[out_dtype]]()
         )
 
-        comptime num_stages = _num_stages_end_of[bases, dims, dim_idx + 1]()
+        comptime fft_stages = _num_stages_end_of[bases, dims, dim_idx + 1]()
+        comptime prev_stages = fft_stages + (start_dim_idx - dim_idx)
 
         comptime for b in range(len(ordered_bases)):
             comptime base = ordered_bases[b]
             comptime processed = processed_list[b]
-            # TODO: once we can stop this from fully unrolling we should use it
-            # for every length
-            comptime if length <= 128:
+            comptime do_rfft = x_complex_in == 1 and (
+                dim_idx == start_dim_idx
+            ) and b == 0
+            comptime s = prev_stages + b
+            comptime write_lhs = (total_stages - (s + 1)) % 2 == 0
+
+            comptime if length <= MAX_STACK_SEQ_LEN:
                 comptime func = _radix_n_fft_kernel_stockham_comptime[
                     ...,
-                    do_rfft=x_complex_in == 1 and dim_idx == start_dim_idx,
+                    do_rfft=do_rfft,
                     base=base,
                     length=length,
                     processed=processed,
@@ -149,55 +220,45 @@ def _run_cpu_nd_fft[
                 ]
 
                 comptime for local_i in range(length):
-                    comptime if _num_stages_end_of[bases, dims, 0]() % 2 == 0:
-                        comptime if b == 0 and dim_idx == start_dim_idx:
-                            func[local_i=local_i](shared_f_rhs, x_in)
-                        elif (num_stages + b) % 2 == 0:
-                            func[local_i=local_i](shared_f_rhs, shared_f_lhs)
-                        else:
-                            func[local_i=local_i](shared_f_lhs, shared_f_rhs)
-                    else:
-                        comptime if b == 0 and dim_idx == start_dim_idx:
+                    comptime if b == 0 and dim_idx == start_dim_idx:
+                        comptime if write_lhs:
                             func[local_i=local_i](shared_f_lhs, x_in)
-                        elif (num_stages + b) % 2 == 0:
+                        else:
+                            func[local_i=local_i](shared_f_rhs, x_in)
+                    else:
+                        comptime if write_lhs:
                             func[local_i=local_i](shared_f_lhs, shared_f_rhs)
                         else:
                             func[local_i=local_i](shared_f_rhs, shared_f_lhs)
             else:
                 comptime func = _radix_n_fft_kernel_stockham[
                     ...,
-                    do_rfft=x_complex_in == 1 and dim_idx == start_dim_idx,
+                    do_rfft=do_rfft,
                     base=base,
                     length=length,
                     processed=processed,
                     inverse=inverse,
                     ordered_bases=ordered_bases,
-                    inline_twfs=(
-                        Int(length) * size_of[out_dtype]() * 2 <= 64 * 1024
-                    ),
+                    inline_twfs=False,
                     runtime_twfs=False,
                 ]
 
                 @always_inline
                 def _run[width: Int](local_i: Int) unified {read}:
                     var idx = UInt(local_i)
-                    comptime if _num_stages_end_of[bases, dims, 0]() % 2 == 0:
-                        comptime if b == 0 and dim_idx == start_dim_idx:
-                            func(shared_f_rhs, x_in, idx, twfs)
-                        elif (num_stages + b) % 2 == 0:
-                            func(shared_f_rhs, shared_f_lhs, idx, twfs)
-                        else:
-                            func(shared_f_lhs, shared_f_rhs, idx, twfs)
-                    else:
-                        comptime if b == 0 and dim_idx == start_dim_idx:
+                    comptime if b == 0 and dim_idx == start_dim_idx:
+                        comptime if write_lhs:
                             func(shared_f_lhs, x_in, idx, twfs)
-                        elif (num_stages + b) % 2 == 0:
+                        else:
+                            func(shared_f_rhs, x_in, idx, twfs)
+                    else:
+                        comptime if write_lhs:
                             func(shared_f_lhs, shared_f_rhs, idx, twfs)
                         else:
                             func(shared_f_rhs, shared_f_lhs, idx, twfs)
 
                 # TODO: replace with unroll once we have it again
-                comptime width = simd_width_of[out_dtype]()
+                comptime width = max(simd_width_of[out_dtype](), Int(base))
                 vectorize[1, unroll_factor=width](Int(length), _run)
 
     # NOTE: extract the unsafe pointer to avoid the arcpointer refcount
@@ -229,30 +290,55 @@ def _run_cpu_nd_fft[
                 comptime dim = dim_tuple.value()
                 comptime batch_prod = UInt(prod // dim)
 
+                comptime if idx != start_dim_idx:
+                    comptime fft_stages = _num_stages_end_of[
+                        bases, dims, idx + 1
+                    ]()
+                    comptime s = fft_stages + (start_dim_idx - (idx + 1))
+                    comptime write_lhs = (total_stages - (s + 1)) % 2 == 0
+                    comptime if write_lhs:
+                        transpose[from_=idx + 1, into_=idx](
+                            base_out, base_calc, Int(per_batch_workers)
+                        )
+                    else:
+                        transpose[from_=idx + 1, into_=idx](
+                            base_calc, base_out, Int(per_batch_workers)
+                        )
+
+                comptime dim_x_layout = Layout.row_major(dim, x_complex_in)
+                comptime x_offset = dim * x_complex_in
+                comptime dim_out_layout = Layout.row_major(dim, 2)
+                comptime out_offset = dim * 2
+
                 @always_inline
                 @parameter
                 def _run_dim_batch(flat_idx: Int):
-                    comptime exclude = (idx, rank - 2)
-                    comptime exclude_t = IntTuple(idx, rank - 2)
-                    comptime dim_sl = Slice(0, dim)
-                    comptime o_comp = Slice(0, 2)
-                    comptime dims_comp = base_out.layout.shape
-                    var idxes = _get_cascade_idxes[dims_comp, exclude_t](
-                        flat_idx
+                    var dim_batch_x = LayoutTensor[_, dim_x_layout, ...](
+                        base_x.ptr + flat_idx * x_offset
                     )
-                    var dim_batch_x = base_x.slice[
-                        dim_sl, Slice(0, x_complex_in), exclude
-                    ](idxes)
-                    var dim_batch_out = base_out.slice[dim_sl, o_comp, exclude](
-                        idxes
+                    var dim_batch_out = LayoutTensor[_, dim_out_layout, ...](
+                        base_out.ptr + flat_idx * out_offset
                     )
-                    var dim_base_calc = base_calc.slice[
-                        dim_sl, o_comp, exclude
-                    ](idxes)
-                    _run_1d_fft[idx](dim_batch_out, dim_base_calc, dim_batch_x)
+                    var dim_batch_calc = LayoutTensor[_, dim_out_layout, ...](
+                        base_calc.ptr + flat_idx * out_offset
+                    )
+                    _run_1d_fft[idx](dim_batch_out, dim_batch_calc, dim_batch_x)
 
                 parallelize[func=_run_dim_batch](
                     Int(batch_prod), Int(per_batch_workers)
                 )
+
+            comptime fft_stages = _num_stages_end_of[bases, dims, 0]()
+            comptime for idx in range(amnt_dims - 1):
+                comptime s = fft_stages + start_dim_idx + idx
+                comptime write_lhs = (total_stages - (s + 1)) % 2 == 0
+                comptime if write_lhs:
+                    transpose[from_=idx, into_=idx + 1](
+                        base_out, base_calc, Int(per_batch_workers)
+                    )
+                else:
+                    transpose[from_=idx, into_=idx + 1](
+                        base_calc, base_out, Int(per_batch_workers)
+                    )
 
     parallelize[func=_run_batch](Int(batches), Int(parallel_batches))

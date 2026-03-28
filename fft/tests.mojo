@@ -1047,10 +1047,10 @@ def test_3d_gpu[debug: Bool = False]() raises:
 
 def main() raises:
     # test_fft_1d_cpu()
-    test_fft_1d_gpu()
+    # test_fft_1d_gpu()
     # test_ifft_1d_cpu()
     # test_ifft_1d_gpu()
-    # test_2d_cpu()
-    test_2d_gpu()
+    test_2d_cpu[debug=True]()
+    # test_2d_gpu()
     # test_3d_cpu()
-    test_3d_gpu()
+    # test_3d_gpu()
