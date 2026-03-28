@@ -61,7 +61,7 @@ def _radix_n_fft_kernel_cooley_tukey[
     ],
 ):
     """A generic Cooley-Tukey algorithm. It has most of the generalizable radix
-    optimizations."""
+    optimizations. Can run inplace by reordering the input."""
     comptime assert length >= base, "length must be >= base"
     comptime assert out_dtype.is_floating_point()
 
@@ -219,7 +219,7 @@ def _radix_n_fft_kernel_stockham[
     ],
 ):
     """A generic Stockham algorithm. It has most of the generalizable radix
-    optimizations."""
+    optimizations. Can't run inplace, but has better memory access patterns."""
     comptime assert length >= base, "length must be >= base"
     comptime assert out_dtype.is_floating_point()
 
@@ -263,6 +263,7 @@ def _radix_n_fft_kernel_stockham[
         comptime Sc_twf = Scalar[_get_dtype[max_twf_idx]()]
         var base_idx = Sc_twf(j) * Sc_twf(Sc(local_i) % next_offset)
         var twf_index = Sc(base_idx % Sc_twf(next_offset)) * ratio
+        var twf: Co
 
         comptime if inline_twfs:
             comptime twfs = _get_twiddle_factors_inline[
@@ -285,6 +286,101 @@ def _radix_n_fft_kernel_stockham[
             acc = x_out
 
         x_out = twf.fma(x_j, acc)
+
+    comptime if inverse and processed * base == length:  # last ifft stage
+        comptime `1 / N` = (1.0 / Float64(length)).cast[out_dtype]()
+        x_out *= `1 / N`
+
+    output.store(Int(local_i), 0, to_CoV(x_out))
+
+
+@always_inline
+def _radix_n_fft_kernel_stockham_comptime[
+    out_dtype: DType,
+    out_layout: Layout,
+    out_origin: MutOrigin,
+    out_address_space: AddressSpace,
+    in_dtype: DType,
+    in_layout: Layout,
+    in_origin: ImmutOrigin,
+    in_address_space: AddressSpace,
+    local_i: UInt,
+    *,
+    length: UInt,
+    do_rfft: Bool,
+    base: UInt,
+    processed: UInt,
+    inverse: Bool,
+    ordered_bases: List[UInt],
+](
+    output: LayoutTensor[
+        out_dtype, out_layout, out_origin, address_space=out_address_space, ...
+    ],
+    x: LayoutTensor[
+        in_dtype, in_layout, in_origin, address_space=in_address_space, ...
+    ],
+):
+    """A generic Stockham algorithm. It has most of the generalizable radix
+    optimizations. Can't run inplace, but has better memory access patterns."""
+    comptime assert length >= base, "length must be >= base"
+    comptime assert out_dtype.is_floating_point()
+
+    comptime Sc = Scalar[_get_dtype[length]()]
+    comptime offset = Sc(processed)
+    comptime next_offset = offset * Sc(base)
+    comptime ratio = Sc(length) // next_offset
+
+    comptime n = (Sc(local_i) // next_offset) * offset + (
+        Sc(local_i) % next_offset
+    ) % offset
+
+    comptime Co = ComplexScalar[out_dtype]
+    comptime CoV = SIMD[out_dtype, 2]
+
+    @always_inline
+    def to_Co(v: CoV) -> Co:
+        return UnsafePointer(to=v).bitcast[Co]()[]
+
+    @always_inline
+    def to_CoV(c: Co) -> CoV:
+        return UnsafePointer(to=c).bitcast[CoV]()[]
+
+    @always_inline
+    @parameter
+    def _get_x[i: UInt]() -> Co:
+        comptime step = Sc(i) * (Sc(length) // Sc(base))
+        var src_idx = Int(n + step)
+
+        comptime if processed == 1 and do_rfft:
+            return Co(x.load[1](src_idx, 0).cast[out_dtype](), 0)
+        else:
+            return to_Co(x.load[2](src_idx, 0).cast[out_dtype]())
+
+    var x_out = Co(0, 0)
+
+    comptime for j in range(UInt(1), base):
+        var x_j = _get_x[j]()
+
+        comptime max_twf_idx = (base - 1) * UInt(next_offset)
+        comptime Sc_twf = Scalar[_get_dtype[max_twf_idx]()]
+        comptime base_idx = Sc_twf(j) * Sc_twf(Sc(local_i) % next_offset)
+        comptime twf_index = Sc(base_idx % Sc_twf(next_offset)) * ratio
+        comptime twfs = _get_twiddle_factors_inline[
+            length, out_dtype, inverse
+        ]()
+        comptime twf = twfs[twf_index]
+
+        var acc: Co
+
+        comptime if j == 1:
+            acc = _get_x[0]()
+        else:
+            acc = x_out
+
+        comptime if processed == 1 and do_rfft:
+            x_out = _unit_phasor_fma[twf, accum_is_real=j == 1](x_j.re, acc)
+        else:
+            x_out = _unit_phasor_fma[twf](x_j, acc)
 
     comptime if inverse and processed * base == length:  # last ifft stage
         comptime `1 / N` = (1.0 / Float64(length)).cast[out_dtype]()

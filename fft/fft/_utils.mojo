@@ -370,3 +370,18 @@ def _unit_phasor_fma[
                 x_j.join(x_j), acc.re.join(acc.im)
             )
         }
+
+
+def _num_stages_end_of[
+    bases: List[List[UInt]], dims: IntTuple, dim_idx: Int
+]() -> Int:
+    comptime start_dim_idx = len(dims) - 1
+    var num_stages = 0
+    comptime for i in range(dim_idx, start_dim_idx + 1):
+        comptime length = UInt(dims[i].value())
+        comptime bases_processed = _get_ordered_bases_processed_list[
+            length, bases[i]
+        ]()
+        comptime stages = len(bases_processed[0])
+        num_stages += stages
+    return num_stages

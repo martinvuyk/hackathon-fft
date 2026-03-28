@@ -4,6 +4,7 @@ from layout import Layout, LayoutTensor, IntTuple
 from std.runtime.asyncrt import parallelism_level
 from std.sys.info import size_of, simd_width_of
 from std.memory import memcpy, ArcPointer
+from std.math import ceildiv
 
 from ._utils import (
     _get_dtype,
@@ -15,8 +16,12 @@ from ._utils import (
     _get_cascade_idxes,
     _max,
     _min,
+    _num_stages_end_of,
 )
-from ._fft import _radix_n_fft_kernel_cooley_tukey
+from ._fft import (
+    _radix_n_fft_kernel_stockham,
+    _radix_n_fft_kernel_stockham_comptime,
+)
 
 
 struct _CPUPlan[
@@ -25,21 +30,19 @@ struct _CPUPlan[
     inverse: Bool,
     bases: List[List[UInt]],
 ](Copyable):
-    comptime dims = Self.out_layout.shape[1 : Self.out_layout.rank() - 1]
     comptime L = List[ComplexScalar[Self.out_dtype]]
 
-    var inter_layer_buf: ArcPointer[Self.L]
     var twiddle_factors: ArcPointer[List[Self.L]]
+    var calc_buf: ArcPointer[Self.L]
 
     def __init__(out self):
-        comptime l_size = Self.out_layout.size()
-        comptime size = Self.out_layout.size() if len(Self.dims) > 1 else 0
-        self.inter_layer_buf = {Self.L(capacity=size)}
         self.twiddle_factors = {
             _get_dims_twfs[
                 Self.out_dtype, Self.out_layout, Self.inverse, Self.bases
             ]()
         }
+        comptime size = Self.out_layout.size() // 2  # Self.L is already complex
+        self.calc_buf = {Self.L(capacity=size)}
 
 
 def _get_dims_twfs[
@@ -78,6 +81,7 @@ def _run_cpu_nd_fft[
 ):
     comptime rank = out_layout.rank()
     comptime dims = out_layout.shape[1 : rank - 1]
+    comptime amnt_dims = len(dims)
     comptime prod = _product_of_dims(dims)
     comptime start_dim_idx = len(dims) - 1
     """We are running the ffts from right to left in the layout."""
@@ -100,25 +104,21 @@ def _run_cpu_nd_fft[
     comptime max_threads = _find_max_threads()
 
     var threads = cpu_workers.or_else(UInt(parallelism_level()))
-    var per_batch_workers = min(threads, max_threads)
-    threads = max(threads - per_batch_workers, 1)
-    var parallel_batches = min(threads, batches)
+    var per_batch_workers = min(threads, max_threads) if amnt_dims > 1 else 1
+    var parallel_batches = min(
+        max(threads - (per_batch_workers - 1), 1), batches
+    )
 
     @always_inline
     @parameter
     def _run_1d_fft[
-        dtype_in: DType,
-        layout_out: Layout,
-        layout_in: Layout,
-        shared_origin: MutOrigin,
-        x_in_origin: ImmutOrigin,
-        //,
-        dim_idx: Int,
+        dtype_in: DType, //, dim_idx: Int
     ](
-        shared_f: LayoutTensor[out_dtype, layout_out, shared_origin, ...],
-        x_in: LayoutTensor[dtype_in, layout_in, x_in_origin, ...],
+        shared_f_lhs: LayoutTensor[mut=True, out_dtype, ...],
+        shared_f_rhs: LayoutTensor[mut=True, out_dtype, ...],
+        x_in: LayoutTensor[mut=False, dtype_in, ...],
     ):
-        comptime length = UInt(layout_in.shape[0].value())
+        comptime length = UInt(x_in.layout.shape[0].value())
         comptime bases_idx = bases[dim_idx]
         comptime bases_processed = materialize[
             _get_ordered_bases_processed_list[length, bases_idx]()
@@ -130,49 +130,81 @@ def _run_cpu_nd_fft[
             twfs_runtime_ptr[dim_idx].unsafe_ptr().bitcast[Scalar[out_dtype]]()
         )
 
+        comptime num_stages = _num_stages_end_of[bases, dims, dim_idx + 1]()
+
         comptime for b in range(len(ordered_bases)):
             comptime base = ordered_bases[b]
             comptime processed = processed_list[b]
-            comptime func = _radix_n_fft_kernel_cooley_tukey[
-                ...,
-                do_rfft=x_complex_in == 1 and dim_idx == start_dim_idx,
-                base=base,
-                length=length,
-                processed=processed,
-                inverse=inverse,
-                ordered_bases=ordered_bases,
-                inline_twfs=(
-                    Int(length) * size_of[out_dtype]() * 2 <= 64 * 1024
-                ),
-                runtime_twfs=False,
-            ]
-            comptime num_iters = length // base
+            # TODO: once we can stop this from fully unrolling we should use it
+            # for every length
+            comptime if length <= 128:
+                comptime func = _radix_n_fft_kernel_stockham_comptime[
+                    ...,
+                    do_rfft=x_complex_in == 1 and dim_idx == start_dim_idx,
+                    base=base,
+                    length=length,
+                    processed=processed,
+                    inverse=inverse,
+                    ordered_bases=ordered_bases,
+                ]
 
-            # TODO: once we can stop this from fully unrolling. Measure perf
-            # @parameter
-            # for local_i in range(num_iters):
-            #     func[local_i](shared_f, x_in)
+                comptime for local_i in range(length):
+                    comptime if _num_stages_end_of[bases, dims, 0]() % 2 == 0:
+                        comptime if b == 0 and dim_idx == start_dim_idx:
+                            func[local_i=local_i](shared_f_rhs, x_in)
+                        elif (num_stages + b) % 2 == 0:
+                            func[local_i=local_i](shared_f_rhs, shared_f_lhs)
+                        else:
+                            func[local_i=local_i](shared_f_lhs, shared_f_rhs)
+                    else:
+                        comptime if b == 0 and dim_idx == start_dim_idx:
+                            func[local_i=local_i](shared_f_lhs, x_in)
+                        elif (num_stages + b) % 2 == 0:
+                            func[local_i=local_i](shared_f_lhs, shared_f_rhs)
+                        else:
+                            func[local_i=local_i](shared_f_rhs, shared_f_lhs)
+            else:
+                comptime func = _radix_n_fft_kernel_stockham[
+                    ...,
+                    do_rfft=x_complex_in == 1 and dim_idx == start_dim_idx,
+                    base=base,
+                    length=length,
+                    processed=processed,
+                    inverse=inverse,
+                    ordered_bases=ordered_bases,
+                    inline_twfs=(
+                        Int(length) * size_of[out_dtype]() * 2 <= 64 * 1024
+                    ),
+                    runtime_twfs=False,
+                ]
 
-            @always_inline
-            def _run[
-                width: Int
-            ](local_i: Int) unified {mut shared_f, read x_in, read twfs}:
-                var x_out = LayoutTensor[
-                    out_dtype, Layout.row_major(Int(base), 2), MutExternalOrigin
-                ].stack_allocation()
-                func(shared_f, x_in, UInt(local_i), twfs, x_out)
+                @always_inline
+                def _run[width: Int](local_i: Int) unified {read}:
+                    var idx = UInt(local_i)
+                    comptime if _num_stages_end_of[bases, dims, 0]() % 2 == 0:
+                        comptime if b == 0 and dim_idx == start_dim_idx:
+                            func(shared_f_rhs, x_in, idx, twfs)
+                        elif (num_stages + b) % 2 == 0:
+                            func(shared_f_rhs, shared_f_lhs, idx, twfs)
+                        else:
+                            func(shared_f_lhs, shared_f_rhs, idx, twfs)
+                    else:
+                        comptime if b == 0 and dim_idx == start_dim_idx:
+                            func(shared_f_lhs, x_in, idx, twfs)
+                        elif (num_stages + b) % 2 == 0:
+                            func(shared_f_lhs, shared_f_rhs, idx, twfs)
+                        else:
+                            func(shared_f_rhs, shared_f_lhs, idx, twfs)
 
-            # TODO: replace with unroll once we have it again
-            comptime factor = simd_width_of[out_dtype]()
-            vectorize[1, unroll_factor=factor](Int(num_iters), _run)
+                # TODO: replace with unroll once we have it again
+                comptime width = simd_width_of[out_dtype]()
+                vectorize[1, unroll_factor=width](Int(length), _run)
 
-    # When running ffts on multiple dimensions, we need to copy the output of
-    # each dimension into an intermediate buffer for reordering
     # NOTE: extract the unsafe pointer to avoid the arcpointer refcount
-    var inter_layer_buf_ptr = (
-        plan.inter_layer_buf[]
+    var calc_buf_ptr = (
+        plan.calc_buf[]
         .unsafe_ptr()
-        .mut_cast[True]()
+        .unsafe_mut_cast[True]()
         .bitcast[Scalar[out_dtype]]()
     )
     comptime o_layout = Layout.row_major(output.layout.shape[1:])
@@ -183,32 +215,19 @@ def _run_cpu_nd_fft[
     def _run_batch(block_num: Int):
         var block_offset = output.stride[0]() * block_num
         var base_out = out_t(output.ptr + block_offset)
+        var base_calc = out_t(calc_buf_ptr + block_offset)
         comptime x_out_layout = Layout.row_major(x.layout.shape[1:])
         var base_x = LayoutTensor[in_dtype, x_out_layout, address_space=_](
             x.ptr + x.stride[0]() * block_num
         )
 
-        comptime if len(dims) == 1:
-            _run_1d_fft[start_dim_idx](base_out, base_x)
+        comptime if amnt_dims == 1:
+            _run_1d_fft[start_dim_idx](base_out, base_calc, base_x)
         else:
-            var base_inter_out = out_t(inter_layer_buf_ptr + block_offset)
-
-            comptime for idx in reversed(range(len(dims))):
+            comptime for idx in reversed(range(amnt_dims)):
                 comptime dim_tuple = dims[idx]
                 comptime dim = dim_tuple.value()
                 comptime batch_prod = UInt(prod // dim)
-
-                comptime if idx != start_dim_idx:
-                    comptime G = AddressSpace.GENERIC
-                    var b_o = base_out.ptr.address_space_cast[G]()
-                    comptime count = prod * 2
-                    parallel_memcpy(
-                        dest=base_inter_out.ptr,
-                        src=b_o,
-                        count=count,
-                        count_per_task=count // Int(per_batch_workers),
-                        num_tasks=Int(per_batch_workers),
-                    )
 
                 @always_inline
                 @parameter
@@ -221,20 +240,16 @@ def _run_cpu_nd_fft[
                     var idxes = _get_cascade_idxes[dims_comp, exclude_t](
                         flat_idx
                     )
+                    var dim_batch_x = base_x.slice[
+                        dim_sl, Slice(0, x_complex_in), exclude
+                    ](idxes)
                     var dim_batch_out = base_out.slice[dim_sl, o_comp, exclude](
                         idxes
                     )
-
-                    comptime if idx == start_dim_idx:
-                        var dim_batch_x = base_x.slice[
-                            dim_sl, Slice(0, x_complex_in), exclude
-                        ](idxes)
-                        _run_1d_fft[idx](dim_batch_out, dim_batch_x)
-                    else:
-                        var dim_batch_inter_out = base_inter_out.slice[
-                            dim_sl, o_comp, exclude
-                        ](idxes).get_immutable()
-                        _run_1d_fft[idx](dim_batch_out, dim_batch_inter_out)
+                    var dim_base_calc = base_calc.slice[
+                        dim_sl, o_comp, exclude
+                    ](idxes)
+                    _run_1d_fft[idx](dim_batch_out, dim_base_calc, dim_batch_x)
 
                 parallelize[func=_run_dim_batch](
                     Int(batch_prod), Int(per_batch_workers)

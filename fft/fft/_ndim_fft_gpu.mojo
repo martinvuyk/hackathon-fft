@@ -29,12 +29,13 @@ from ._utils import (
     _product_of_dims,
     _get_cascade_idxes,
     _get_twiddle_factors,
+    _num_stages_end_of,
 )
 from ._fft import _radix_n_fft_kernel_cooley_tukey, _radix_n_fft_kernel_stockham
 
 
 @fieldwise_init
-struct _GPUPlan[
+struct _GPUExecConfig[
     out_dtype: DType,
     out_layout: Layout,
     inverse: Bool,
@@ -43,11 +44,13 @@ struct _GPUPlan[
     gpu_info: GPUInfo,
     max_cluster_size: UInt,
     runtime_twfs: Bool,
-](Copyable):
+]:
     comptime rank = Self.out_layout.rank()
     comptime dims = Self.out_layout.shape[1 : Self.rank - 1]
     comptime prod = _product_of_dims(Self.dims)
     """The product of the dimensions in the tensor."""
+    comptime start_dim_idx = len(Self.dims) - 1
+    """We are running the ffts from right to left in the layout."""
 
     comptime max_dim_base = _max(Self.dims)
     """The smallest base for the biggest dimension in the tensor."""
@@ -55,6 +58,8 @@ struct _GPUPlan[
     """The total number of threads per worload."""
     comptime max_dim = _max(Self.dims)
     """The biggest dimension in the tensor."""
+    comptime max_base = _max(Self.bases)
+    """The biggest radix base."""
 
     comptime batches = UInt(Self.out_layout.shape[0].value())
     """The total amount of batches in the workload."""
@@ -128,34 +133,84 @@ struct _GPUPlan[
         Self.gpu_info.max_registers_per_block // 2
     )
 
+    comptime max_shared_mem_size = (
+        Self.shared_mem_per_warp if (
+            Self.can_run_in_warp
+        ) else Self.shared_mem_per_block if (
+            Self.can_run_in_block
+        ) else Self.shared_mem_per_cluster
+    )
+    comptime shared_f_out_layout = Layout.row_major(
+        IntTuple(Self.out_layout.shape[1:]).flatten()
+    )
+    comptime out_size = UInt(
+        size_of[Self.out_dtype]() * Self.shared_f_out_layout.size()
+    )
+    comptime max_dim_layout = Layout.row_major(Int(Self.max_dim), 2)
+    comptime max_dim_size = UInt(
+        size_of[Self.out_dtype]() * Self.max_dim_layout.size()
+    )
+
+    comptime use_shared_f_total = 2 * Self.out_size <= Self.max_shared_mem_size
+    comptime use_shared_f_max_dim = 2 * Self.max_dim_size <= Self.max_shared_mem_size
+    comptime use_global_memory = not (
+        Self.use_shared_f_total or Self.use_shared_f_max_dim
+    )
+
+
+@fieldwise_init
+struct _GPUPlan[
+    out_dtype: DType,
+    out_layout: Layout,
+    inverse: Bool,
+    bases: List[List[UInt]],
+    test: Optional[_GPUTest],
+    gpu_info: GPUInfo,
+    max_cluster_size: UInt,
+    runtime_twfs: Bool,
+](Copyable):
+    comptime config = _GPUExecConfig[
+        Self.out_dtype,
+        Self.out_layout,
+        Self.inverse,
+        Self.bases,
+        Self.test,
+        Self.gpu_info,
+        Self.max_cluster_size,
+        Self.runtime_twfs,
+    ]()
+
     var twfs_buffer: InlineArray[
-        DeviceBuffer[Self.out_dtype], Int(not Self.inline_twfs)
+        DeviceBuffer[Self.out_dtype], Int(not Self.config.inline_twfs)
     ]
-    var calc_buf: DeviceBuffer[Self.out_dtype]
+    var calc_buf: InlineArray[
+        DeviceBuffer[Self.out_dtype], Int(Self.config.use_global_memory)
+    ]
 
     def __init__(out self, ctx: DeviceContext) raises:
-        comptime assert Self.threads_per_m > 0, (
+        comptime assert Self.config.threads_per_m > 0, (
             "Unknown number of threads per sm for the given device. "
             "It is needed in order to run the gpu implementation."
         )
 
-        comptime rank = Self.out_layout.rank()
-        comptime dims = Self.out_layout.shape[1 : rank - 1]
-        comptime prod = _product_of_dims(dims)
-
         comptime out_b_layout = Layout.row_major(Self.out_layout.shape[1:])
         comptime b_size = out_b_layout.size()
 
-        var calc_buf = ctx.enqueue_create_buffer[Self.out_dtype](b_size)
+        comptime if Self.config.inline_twfs and Self.config.use_global_memory:
+            return {
+                {uninitialized = True},
+                [ctx.enqueue_create_buffer[Self.out_dtype](b_size)],
+            }
+        elif Self.config.inline_twfs:
+            return {{uninitialized = True}, {uninitialized = True}}
 
-        comptime if Self.inline_twfs:
-            return {{uninitialized = True}, calc_buf^}
-
-        var twfs = ctx.enqueue_create_buffer[Self.out_dtype](2 * prod)
+        var twfs = ctx.enqueue_create_buffer[Self.out_dtype](
+            2 * Self.config.prod
+        )
         var offset = UInt(0)
 
         comptime for idx in range(len(Self.bases)):
-            comptime length = UInt(dims[idx].value())
+            comptime length = UInt(Self.config.dims[idx].value())
             comptime twfs_array = _get_twiddle_factors[
                 length, Self.out_dtype, Self.inverse
             ]()
@@ -170,7 +225,13 @@ struct _GPUPlan[
             ctx.enqueue_copy(view, ptr.bitcast[Scalar[Self.out_dtype]]())
             offset += complex_len
 
-        return {[twfs^], calc_buf^}
+        comptime if Self.config.use_global_memory:
+            return {
+                [twfs^],
+                [ctx.enqueue_create_buffer[Self.out_dtype](b_size)],
+            }
+        else:
+            return {[twfs^], {uninitialized = True}}
 
 
 def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
@@ -186,17 +247,10 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
     *,
     inverse: Bool,
     bases: List[List[UInt]],
-    max_base: UInt,
-    max_dim: UInt,
-    max_dim_base: UInt,
-    total_threads: UInt,
-    max_shared_mem_size: UInt,
+    config: _GPUExecConfig,
     shared_address_space: AddressSpace,
     stage_sync_fn: def(),
     runtime_twfs: Bool,
-    inline_twfs: Bool,
-    batches: UInt,
-    batch_size: UInt,
 ](
     output: LayoutTensor[out_dtype, out_layout, out_origin],
     x: LayoutTensor[in_dtype, in_layout, in_origin],
@@ -207,12 +261,8 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
     var global_i = block_dim.x * block_idx.x + thread_idx.x
     var block_num = block_dim.y * block_idx.y
 
-    comptime rank = out_layout.rank()
-    comptime dims = out_layout.shape[1 : rank - 1]
-    comptime prod = _product_of_dims(dims)
-    comptime start_dim_idx = len(dims) - 1
-    """We are running the ffts from right to left in the layout."""
-    comptime x_complex_in = in_layout.shape[rank - 1].value()
+    comptime total_threads = config.block_threads * config.num_blocks
+    comptime x_complex_in = in_layout.shape[config.rank - 1].value()
 
     comptime base_out_layout = Layout.row_major(output.layout.shape[1:])
     comptime out_t = LayoutTensor[out_dtype, base_out_layout, ...]
@@ -224,48 +274,25 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
         in_dtype, base_x_layout, x.origin, address_space=x.address_space
     ]
 
-    comptime shared_f_total_layout = Layout.row_major(
-        IntTuple(output.layout.shape[1:]).flatten()
-    )
-    comptime size = UInt(size_of[out_dtype]() * shared_f_total_layout.size())
-    comptime shared_f_total_t = type_of(
-        LayoutTensor[
-            out_dtype,
-            shared_f_total_layout,
-            MutExternalOrigin,
-            address_space=shared_address_space,
-        ].stack_allocation()
-    )
-    comptime max_dim_layout = Layout.row_major(Int(max_dim), 2)
-    comptime max_dim_size = UInt(size_of[out_dtype]() * max_dim_layout.size())
-
-    comptime use_shared_f_total = 2 * size <= max_shared_mem_size
-    comptime use_shared_f_max_dim = 2 * max_dim_size <= max_shared_mem_size
-    comptime use_global_memory = not (
-        use_shared_f_total or use_shared_f_max_dim
-    )
-
     comptime shared_f_t = type_of(
         LayoutTensor[
             out_dtype,
-            shared_f_total_layout if use_shared_f_total else max_dim_layout,
+            Layout.row_major(0) if config.use_global_memory else (
+                config.shared_f_out_layout if (
+                    config.use_shared_f_total
+                ) else config.max_dim_layout
+            ),
             MutExternalOrigin,
             address_space=shared_address_space,
         ].stack_allocation()
     )
-    var shared_f_lhs: shared_f_t
-    var shared_f_rhs: shared_f_t
 
-    comptime if use_global_memory:
-        shared_f_lhs = {unsafe_ptr = {}}
-        shared_f_rhs = {unsafe_ptr = {}}
-    else:
-        shared_f_lhs = shared_f_t.stack_allocation()
-        shared_f_rhs = shared_f_t.stack_allocation()
+    var shared_f_lhs = shared_f_t.stack_allocation()
+    var shared_f_rhs = shared_f_t.stack_allocation()
 
     @parameter
     def _run_1d_fft[
-        dim_idx: Int
+        dim_idx: Int, use_x: Bool = dim_idx == config.start_dim_idx
     ](
         shared_f_lhs: LayoutTensor[mut=True, out_dtype, ...],
         shared_f_rhs: LayoutTensor[mut=True, out_dtype, ...],
@@ -273,12 +300,15 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
     ):
         comptime assert shared_f_lhs.layout == shared_f_rhs.layout
         comptime length = UInt(x.layout.shape[0].value())
-        comptime do_rfft = dim_idx == start_dim_idx and x_complex_in == 1
+        comptime do_rfft = dim_idx == config.start_dim_idx and x_complex_in == 1
         comptime bases_processed = materialize[
             _get_ordered_bases_processed_list[length, bases[dim_idx]]()
         ]()
         comptime ordered_bases = bases_processed[0]
         comptime processed_list = bases_processed[1]
+        comptime num_stages = _num_stages_end_of[
+            bases, config.dims, dim_idx + 1
+        ]()
 
         comptime for b in range(len(ordered_bases)):
             comptime base = ordered_bases[b]
@@ -293,17 +323,28 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
                 inverse=inverse,
                 ordered_bases=ordered_bases,
                 runtime_twfs=runtime_twfs,
-                inline_twfs=inline_twfs,
+                inline_twfs=config.inline_twfs,
             ]
 
             @parameter
             def _run():
-                comptime if b == 0:
-                    func(shared_f_lhs, x, global_i, twiddle_factors)
-                elif b % 2 == 0:
-                    func(shared_f_lhs, shared_f_rhs, global_i, twiddle_factors)
+                var twfs = twiddle_factors
+                comptime if _num_stages_end_of[
+                    bases, config.dims, 0
+                ]() % 2 == 0:
+                    comptime if b == 0 and use_x:
+                        func(shared_f_rhs, x, global_i, twfs)
+                    elif (num_stages + b) % 2 == 0:
+                        func(shared_f_rhs, shared_f_lhs, global_i, twfs)
+                    else:
+                        func(shared_f_lhs, shared_f_rhs, global_i, twfs)
                 else:
-                    func(shared_f_rhs, shared_f_lhs, global_i, twiddle_factors)
+                    comptime if b == 0 and use_x:
+                        func(shared_f_lhs, x, global_i, twfs)
+                    elif (num_stages + b) % 2 == 0:
+                        func(shared_f_lhs, shared_f_rhs, global_i, twfs)
+                    else:
+                        func(shared_f_rhs, shared_f_lhs, global_i, twfs)
 
             comptime if threads_for_base == total_threads:
                 _run()
@@ -315,159 +356,103 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
 
     @parameter
     def _copy_to_output[
-        dim_idx: Int, copy_lhs: Bool = True
+        dim_idx: Int
     ](
         base_out: base_out_t,
         shared_f_lhs: LayoutTensor[mut=False, out_dtype, ...],
         shared_f_rhs: LayoutTensor[mut=False, out_dtype, ...],
     ):
-        comptime flat_layout = Layout.row_major(prod, 2)
+        comptime flat_layout = Layout.row_major(config.prod, 2)
         comptime flat_t = LayoutTensor[out_dtype, flat_layout, ...]
-        comptime batch_prod = UInt(prod) // max_dim
+        comptime batch_prod = UInt(config.prod) // config.max_dim
         comptime length = UInt(shared_f_lhs.layout.shape[dim_idx].value())
         comptime bases_processed = _get_ordered_bases_processed_list[
             length, bases[dim_idx]
         ]()
-        comptime is_in_lhs = len(bases_processed[0]) % 2 == 1
-        comptime if is_in_lhs and not copy_lhs:
-            return
 
-        comptime for i in range(batch_prod):
-            comptime batch_prod_offset = i * max_dim
-
-            if local_i < max_dim:
-                var b_idx = Int(batch_prod_offset + local_i)
-                var num: SIMD[out_dtype, 2]
-
-                comptime if is_in_lhs:
-                    num = flat_t(shared_f_lhs.ptr).load[width=2](b_idx, 0)
-                else:
-                    num = flat_t(shared_f_rhs.ptr).load[width=2](b_idx, 0)
-                flat_t(base_out.ptr).store(b_idx, 0, num)
+        for i in range(batch_prod):
+            var batch_prod_offset = i * config.max_dim
+            var b_idx = Int(batch_prod_offset + local_i)
+            var num = flat_t(shared_f_lhs.ptr).load[width=2](b_idx, 0)
+            flat_t(base_out.ptr).store(b_idx, 0, num)
 
     @parameter
     def _run_ndim_fft(
         base_out: base_out_t, base_calc: base_calc_t, base_x: base_x_t
     ):
-        comptime if len(dims) == 1:
-            comptime if use_shared_f_total:
-                _run_1d_fft[start_dim_idx](shared_f_lhs, shared_f_rhs, base_x)
-                _copy_to_output[start_dim_idx](
-                    base_out, shared_f_lhs, shared_f_rhs
-                )
+        comptime if len(config.dims) == 1:
+            comptime if config.use_shared_f_total:
+                _run_1d_fft[0](shared_f_lhs, shared_f_rhs, base_x)
+                _copy_to_output[0](base_out, shared_f_lhs, shared_f_rhs)
             else:
-                _run_1d_fft[start_dim_idx](base_out, base_calc, base_x)
-                _copy_to_output[start_dim_idx](base_out, base_calc, base_calc)
-
+                _run_1d_fft[0](base_out, base_calc, base_x)
         else:
-            comptime for idx in reversed(range(len(dims))):
-                comptime dim = dims[idx].value()
-                comptime batch_prod = prod // dim
+            comptime for idx in reversed(range(len(config.dims))):
+                comptime dim = config.dims[idx].value()
+                comptime batch_prod = config.prod // dim
 
-                comptime exclude = (idx, rank - 2)
-                comptime exclude_t = IntTuple(idx, rank - 2)
+                comptime exclude = (idx, config.rank - 2)
+                comptime exclude_t = IntTuple(idx, config.rank - 2)
                 comptime dim_sl = Slice(0, dim)
                 comptime o_comp = Slice(0, 2)
-                comptime _idx_fn = _get_cascade_idxes[
-                    base_out.layout.shape, exclude_t
-                ]
 
                 for batch_prod_idx in range(batch_prod):
-                    var idxes = _idx_fn(batch_prod_idx)
+                    comptime x_comp = Slice(0, x_complex_in)
+                    var idxes = _get_cascade_idxes[
+                        base_out.layout.shape, exclude_t
+                    ](batch_prod_idx)
+                    var dim_batch_x = base_x.slice[dim_sl, x_comp, exclude](
+                        idxes
+                    )
 
-                    @parameter
-                    def _run(
-                        dim_batch_out_lhs: LayoutTensor[
-                            mut=True, out_dtype, ...
-                        ],
-                        dim_batch_out_rhs: LayoutTensor[
-                            mut=True, out_dtype, ...
-                        ],
-                    ):
-                        comptime if idx == start_dim_idx:
-                            comptime x_comp = Slice(0, x_complex_in)
-                            var dim_batch_x = base_x.slice[
-                                dim_sl, x_comp, exclude
-                            ](idxes)
-                            _run_1d_fft[idx](
-                                dim_batch_out_lhs,
-                                dim_batch_out_rhs,
-                                dim_batch_x,
-                            )
-                        else:
-                            var dim_batch_inter_out = base_out.slice[
-                                dim_sl, o_comp, exclude
-                            ](idxes).get_immutable()
-                            _run_1d_fft[idx](
-                                dim_batch_out_lhs,
-                                dim_batch_out_rhs,
-                                dim_batch_inter_out,
-                            )
-
-                    comptime if use_shared_f_total:
+                    comptime if config.use_shared_f_total:
                         var lhs = shared_f_lhs.slice[dim_sl, o_comp, exclude](
                             idxes
                         )
                         var rhs = shared_f_rhs.slice[dim_sl, o_comp, exclude](
                             idxes
                         )
-                        _run(lhs, rhs)
-                    elif use_global_memory:
+                        _run_1d_fft[idx](lhs, rhs, dim_batch_x)
+                    elif config.use_global_memory:
                         var lhs = base_out.slice[dim_sl, o_comp, exclude](idxes)
                         var rhs = base_calc.slice[dim_sl, o_comp, exclude](
                             idxes
                         )
-                        _run(lhs, rhs)
+                        _run_1d_fft[idx](lhs, rhs, dim_batch_x)
                     else:
-                        _run(shared_f_lhs, shared_f_rhs)
-                        var dim_batch_inter_out = base_out.slice[
-                            dim_sl, o_comp, exclude
-                        ](idxes)
-
                         var local_idx = Int(local_i)
-                        comptime copy_idx = (total_threads - 1)
+                        if local_idx < dim:
+                            var dim_batch_out = base_out.slice[
+                                dim_sl, o_comp, exclude
+                            ](idxes)
+                            comptime if idx == config.start_dim_idx:
+                                _run_1d_fft[idx](
+                                    shared_f_lhs, shared_f_rhs, dim_batch_x
+                                )
+                            else:
+                                _run_1d_fft[idx, use_x=True](
+                                    shared_f_lhs, shared_f_rhs, dim_batch_out
+                                )
 
-                        comptime if copy_idx >= UInt(dim):
-                            if local_idx >= dim:
-                                break
-
-                        comptime length = UInt(
-                            shared_f_lhs.layout.shape[0].value()
-                        )
-                        comptime bases_processed = materialize[
-                            _get_ordered_bases_processed_list[
-                                length, bases[idx]
-                            ]()
-                        ]()
-                        comptime is_in_lhs = len(bases_processed[0]) % 2 == 1
-                        var c_num: SIMD[out_dtype, 2]
-
-                        comptime if is_in_lhs:
-                            c_num = shared_f_lhs.load[2](local_idx, 0)
-                        else:
-                            c_num = shared_f_rhs.load[2](local_idx, 0)
-                        dim_batch_inter_out.store(local_idx, 0, c_num)
+                            var c_num = shared_f_lhs.load[2](local_idx, 0)
+                            dim_batch_out.store(local_idx, 0, c_num)
                         stage_sync_fn()
 
-                comptime if use_shared_f_total:
-                    _copy_to_output[idx](base_out, shared_f_lhs, shared_f_rhs)
-                    stage_sync_fn()
-                elif use_global_memory:
-                    _copy_to_output[idx](base_out, base_calc, base_calc)
-                    stage_sync_fn()
+            comptime if config.use_shared_f_total:
+                _copy_to_output[0](base_out, shared_f_lhs, shared_f_rhs)
 
-    comptime batched_iters = max(batches // batch_size, 1)
+    comptime batched_iters = max(config.batches // config.batch_size, 1)
 
     comptime for i in range(batched_iters):
-        var offset = Int(block_num + i * batch_size)
+        var offset = Int(block_num + i * config.batch_size)
         var base_x = base_x_t(x.ptr + x.stride[0]() * offset)
         var base_out = out_t(output.ptr + output.stride[0]() * offset)
         var base_calc = out_t(calc_buf.ptr + calc_buf.stride[0]() * offset)
         _run_ndim_fft(base_out, base_calc, base_x)
         stage_sync_fn()
 
-    comptime full_iters = batched_iters * batch_size
-    comptime remainder = batches - full_iters
+    comptime full_iters = batched_iters * config.batch_size
+    comptime remainder = config.batches - full_iters
 
     comptime if remainder > 0:
         if block_num < remainder:
@@ -524,7 +509,7 @@ def _run_gpu_nd_fft[
     ), "The non-cpu implementation is for GPU only"
     var plan = plan_in^.or_else({ctx})
 
-    comptime run_warp = plan.can_run_in_warp
+    comptime run_warp = plan.config.can_run_in_warp
 
     @always_inline
     def cluster_stage_sync_fn():
@@ -537,32 +522,27 @@ def _run_gpu_nd_fft[
             barrier()
 
     comptime stage_sync_fn = block_or_warp_stage_sync_fn if (
-        plan.can_run_in_block or plan.can_run_in_warp
+        plan.config.can_run_in_block or plan.config.can_run_in_warp
     ) else cluster_stage_sync_fn
     comptime address_space = AddressSpace.SHARED if (
-        plan.can_run_in_block or plan.can_run_in_warp
+        plan.config.can_run_in_block or plan.config.can_run_in_warp
     ) else AddressSpace.SHARED_CLUSTER
-    comptime max_shared_mem_size = (
-        plan.shared_mem_per_warp if (
-            plan.can_run_in_warp
-        ) else plan.shared_mem_per_block if (
-            plan.can_run_in_block
-        ) else plan.shared_mem_per_cluster
-    )
 
-    comptime twf_layout = Layout.row_major(2 * plan.prod)
+    comptime twf_layout = Layout.row_major(2 * plan.config.prod)
     var twiddle_factors: LayoutTensor[
         mut=False, out_dtype, twf_layout, MutAnyOrigin
     ]
-    comptime if not plan.inline_twfs:
+    comptime if not plan.config.inline_twfs:
         twiddle_factors = {plan.twfs_buffer[0].unsafe_ptr()}
     else:
         twiddle_factors = {unsafe_ptr = {}}
 
-    var calc_buf_ptr = (
-        plan.calc_buf.unsafe_ptr().mut_cast[True]().bitcast[Scalar[out_dtype]]()
-    )
-    var calc_buf = LayoutTensor[out_dtype, output.layout](calc_buf_ptr)
+    comptime og = origin_of(plan.calc_buf[0])
+    var calc_buf: LayoutTensor[out_dtype, output.layout, og]
+    comptime if plan.config.use_global_memory:
+        calc_buf = {plan.calc_buf[0].unsafe_ptr().unsafe_origin_cast[og]()}
+    else:
+        calc_buf = {unsafe_ptr = {}}
 
     # TODO: this should get the ordered bases for all dims and iterate over them
     comptime block_func_batch = _intra_something_gpu_fft_kernel_radix_n_multi_dim[
@@ -577,34 +557,29 @@ def _run_gpu_nd_fft[
         calc_buf_origin=calc_buf.origin,
         inverse=inverse,
         bases=bases,
-        max_base=_max(bases),
-        max_dim=plan.max_dim,
-        max_dim_base=plan.max_dim_base,
-        max_shared_mem_size=max_shared_mem_size,
-        total_threads=plan.block_threads * plan.num_blocks,
+        config=plan.config,
         stage_sync_fn=stage_sync_fn,
         shared_address_space=address_space,
         runtime_twfs=runtime_twfs,
-        inline_twfs=plan.inline_twfs,
-        batches=plan.batches,
-        batch_size=plan.batch_size,
     ]
 
-    comptime grid_dim = (Int(plan.num_blocks), plan.batch_size)
+    comptime grid_dim = (Int(plan.config.num_blocks), plan.config.batch_size)
 
-    comptime run_cluster = plan.can_run_in_block_cluster and plan.num_blocks > 1
-    comptime shared_mem = plan.buf_size_full_output if (
-        plan.buf_size_full_output <= max_shared_mem_size
-    ) else plan.buf_size_max_dim
+    comptime run_cluster = plan.config.can_run_in_block_cluster and plan.config.num_blocks > 1
+    comptime shared_mem = plan.config.buf_size_full_output if (
+        plan.config.buf_size_full_output <= plan.config.max_shared_mem_size
+    ) else plan.config.buf_size_max_dim
     ctx.enqueue_function[block_func_batch, block_func_batch](
         output,
         x,
         twiddle_factors,
         calc_buf,
         grid_dim=grid_dim,
-        cluster_dim=OptionalReg[Dim](plan.num_blocks) if run_cluster else None,
+        cluster_dim=OptionalReg[Dim](
+            plan.config.num_blocks
+        ) if run_cluster else None,
         shared_mem_bytes=OptionalReg[Int](
             Int(shared_mem)
         ) if run_cluster else None,
-        block_dim=plan.block_threads,
+        block_dim=plan.config.block_threads,
     )
