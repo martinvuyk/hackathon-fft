@@ -17,6 +17,8 @@ from ._utils import (
 # ===-----------------------------------------------------------------------===#
 
 
+# TODO: we need to be able to catch failed allocations to be able to use this
+# as a fallback to stockham
 @always_inline
 def _radix_n_fft_kernel_cooley_tukey[
     out_dtype: DType,

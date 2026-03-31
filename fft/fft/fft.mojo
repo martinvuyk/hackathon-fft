@@ -12,7 +12,7 @@ from ._utils import (
     _times_divisible_by,
 )
 from ._ndim_fft_cpu import _run_cpu_nd_fft, _CPUPlan
-from ._ndim_fft_gpu import _run_gpu_nd_fft, _GPUPlan
+from ._ndim_fft_gpu import _run_gpu_nd_fft, _GPUPlan, _GPUTest
 
 comptime _DEFAULT_DEVICE = "cpu" if not has_accelerator() else "gpu"
 
@@ -133,6 +133,27 @@ def plan_fft[
 ](*, cpu_workers: Optional[UInt] = None) -> _CPUPlan[
     out_dtype, out_layout, inverse, bases
 ]:
+    """Plan the Fast Fourier Transform on CPU.
+
+    Parameters:
+        in_dtype: The `DType` of the input tensor.
+        out_dtype: The `DType` of the output tensor.
+        in_layout: The `Layout` of the input tensor.
+        out_layout: The `Layout` of the output tensor.
+        inverse: Whether to run the inverse fourier transform.
+        bases: The list of bases for which to build the mixed-radix algorithm.
+
+    Args:
+        output: The output tensor.
+        x: The input tensor.
+        plan: The execution plan, it is best to build it outside this function
+            if it is to be called repeatedly.
+        cpu_workers: The amount of workers to use when running on CPU.
+
+    Constraints:
+        The layout should match one of: `{(batches, dim_0 [, dim_1 [, ...]], 1),
+        (batches, dim_0 [, dim_1 [, ...]], 2)}`.
+    """
     return {}
 
 
@@ -143,22 +164,49 @@ def plan_fft[
     in_layout: Layout,
     out_layout: Layout,
     *,
-    runtime_twfs: Bool = True,
-    max_cluster_size: Int = 8,
-    inverse: Bool = False,
     bases: List[List[UInt]] = _estimate_best_bases_nd[
         in_layout, out_layout, "gpu"
     ](),
+    inverse: Bool = False,
+    runtime_twfs: Bool = True,
+    # TODO: we'd need to know the cudaOccupancyMaxPotentialClusterSize for
+    # every device to not use the portable 8
+    # https://docs.nvidia.com/cuda/cuda-c-programming-guide/#thread-block-clusters
+    max_cluster_size: UInt = 8,
+    _test: Optional[_GPUTest] = None,
 ](*, ctx: DeviceContext) raises -> _GPUPlan[
     out_dtype,
     out_layout,
     inverse,
     bases,
-    None,
+    _test,
     ctx.default_device_info,
-    max_cluster_size=UInt(max_cluster_size),
+    max_cluster_size=max_cluster_size,
     runtime_twfs=runtime_twfs,
 ]:
+    """Plan the Fast Fourier Transform on GPU.
+
+    Parameters:
+        in_dtype: The `DType` of the input tensor.
+        out_dtype: The `DType` of the output tensor.
+        in_layout: The `Layout` of the input tensor.
+        out_layout: The `Layout` of the output tensor.
+        bases: The list of bases for which to build the mixed-radix algorithm.
+        inverse: Whether to run the inverse fourier transform.
+        runtime_twfs: Whether to calculate the twiddle factors at runtime for
+            big dimensions (faster, no global memory allocation) at the cost of
+            lower precision.
+        max_cluster_size: In the case of NVIDIA GPUs, what the maximum cluster
+            size for the device is.
+        _test: Internal use only.
+
+    Args:
+        ctx: The `DeviceContext`.
+
+    Constraints:
+        The layout should match one of: `{(batches, dim_0 [, dim_1 [, ...]], 1),
+        (batches, dim_0 [, dim_1 [, ...]], 2)}`.
+    """
     return {ctx}
 
 
@@ -169,19 +217,17 @@ def fft[
     out_layout: Layout,
     in_origin: ImmutOrigin,
     out_origin: MutOrigin,
-    *,
-    inverse: Bool = False,
-    bases: List[List[UInt]] = _estimate_best_bases_nd[
-        in_layout, out_layout, "cpu"
-    ](),
+    inverse: Bool,
+    bases: List[List[UInt]],
+    //,
 ](
     output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
     x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
     *,
-    var plan: Optional[_CPUPlan[out_dtype, out_layout, inverse, bases]] = None,
+    plan: _CPUPlan[out_dtype, out_layout, inverse, bases],
     cpu_workers: Optional[UInt] = None,
 ) raises:
-    """Calculate the Fast Fourier Transform.
+    """Calculate the Fast Fourier Transform on CPU.
 
     Parameters:
         in_dtype: The `DType` of the input tensor.
@@ -202,15 +248,7 @@ def fft[
 
     Constraints:
         The layout should match one of: `{(batches, dim_0 [, dim_1 [, ...]], 1),
-        (batches, dim_0 [, dim_1 [, ...]], 2)}`
-
-    Notes:
-        - This function automatically runs the rfft if the input is real-valued.
-        - If the given bases list does not multiply together to equal the
-        length, the builtin algorithm duplicates the biggest (CPU) values that
-        can still divide the length until reaching it.
-        - The amount of threads that will be launched is equal to the
-        `sequence_length // smallest_base`.
+        (batches, dim_0 [, dim_1 [, ...]], 2)}`.
     """
     _check_layout_conditions_nd[in_layout, out_layout]()
     comptime assert len(bases) == out_layout.rank() - 2, (
@@ -218,10 +256,7 @@ def fft[
         " internal dimensions. e.g. (batches, dim_0, dim_1, dim_2, 2) ->"
         " len(bases) == 3"
     )
-
-    _run_cpu_nd_fft[inverse=inverse, bases=bases](
-        output, x, plan=plan^.or_else({}), cpu_workers=cpu_workers
-    )
+    _run_cpu_nd_fft(output, x, plan=plan, cpu_workers=cpu_workers)
 
 
 def fft[
@@ -231,35 +266,28 @@ def fft[
     out_layout: Layout,
     in_origin: ImmutOrigin,
     out_origin: MutOrigin,
-    *,
-    inverse: Bool = False,
-    bases: List[List[UInt]] = _estimate_best_bases_nd[
-        in_layout, out_layout, "gpu"
-    ](),
-    runtime_twfs: Bool = True,
-    # TODO: we'd need to know the cudaOccupancyMaxPotentialClusterSize for
-    # every device to not use the portable 8
-    # https://docs.nvidia.com/cuda/cuda-c-programming-guide/#thread-block-clusters
-    max_cluster_size: UInt = 8,
+    inverse: Bool,
+    bases: List[List[UInt]],
+    runtime_twfs: Bool,
+    max_cluster_size: UInt,
+    //,
 ](
-    output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
-    x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
+    output: LayoutTensor[out_dtype, out_layout, out_origin],
+    x: LayoutTensor[in_dtype, in_layout, in_origin],
     ctx: DeviceContext,
     *,
-    plan: Optional[
-        _GPUPlan[
-            out_dtype,
-            out_layout,
-            inverse,
-            bases,
-            None,
-            ctx.default_device_info,
-            max_cluster_size=max_cluster_size,
-            runtime_twfs=runtime_twfs,
-        ]
-    ] = None,
+    plan: _GPUPlan[
+        out_dtype,
+        out_layout,
+        inverse,
+        bases,
+        None,
+        ctx.default_device_info,
+        max_cluster_size=max_cluster_size,
+        runtime_twfs=runtime_twfs,
+    ],
 ) raises:
-    """Calculate the Fast Fourier Transform.
+    """Calculate the Fast Fourier Transform on GPU.
 
     Parameters:
         in_dtype: The `DType` of the input tensor.
@@ -284,17 +312,7 @@ def fft[
 
     Constraints:
         The layout should match one of: `{(batches, dim_0 [, dim_1 [, ...]], 1),
-        (batches, dim_0 [, dim_1 [, ...]], 2)}`
-
-    Notes:
-        - This function automatically runs the rfft if the input is real-valued.
-        - If the given bases list does not multiply together to equal the
-        length, the builtin algorithm duplicates the biggest (CPU) / smallest
-        (GPU) values that can still divide the length until reaching it.
-        - For very long sequences on GPUs, it is worth considering bigger radix
-        factors, due to the potential of being able to run the fft within a
-        single block. Keep in mind that the amount of threads that will be
-        launched is equal to the `sequence_length // smallest_base`.
+        (batches, dim_0 [, dim_1 [, ...]], 2)}`.
     """
     _check_layout_conditions_nd[in_layout, out_layout]()
     comptime assert len(bases) == out_layout.rank() - 2, (
@@ -302,9 +320,4 @@ def fft[
         " internal dimensions. e.g. (batches, dim_0, dim_1, dim_2, 2) ->"
         " len(bases) == 3"
     )
-    _run_gpu_nd_fft[
-        inverse=inverse,
-        bases=bases,
-        max_cluster_size=max_cluster_size,
-        runtime_twfs=runtime_twfs,
-    ](output, x, ctx)
+    _run_gpu_nd_fft(output, x, ctx, plan)

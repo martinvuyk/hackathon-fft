@@ -9,7 +9,7 @@ from threadpoolctl import threadpool_limits
 def run_batched_nd_benchmark(num_threads):
     shapes = [
         (1_000_000, 93),
-        (1_000_000, 128),
+        (500000, 128),
         (100_000, 1024),
         (100, 16384),
         (100, 640, 480),
@@ -25,7 +25,7 @@ def run_batched_nd_benchmark(num_threads):
     ]
 
     print(f"\n--- Running C2C Benchmark (Threads: {num_threads}) ---")
-    header = f"{'Shape':<25} | {'NumPy (ms)':<12} | {'SciPy (ms)':<12} | {'PyFFTW (ms)':<12}"
+    header = f"{'Shape':<25} | {'NumPy (ms)':<12} | {'SciPy (PocketFFT) (ms)':<12} | {'PyFFTW (ms)':<12}"
     print(header)
     print("-" * 70)
 

@@ -17,6 +17,7 @@ from ._utils import (
     _max,
     _min,
     _num_stages_end_of,
+    _calc_batches_M_N,
 )
 from ._fft import (
     _radix_n_fft_kernel_stockham,
@@ -25,45 +26,42 @@ from ._fft import (
 
 
 struct _CPUPlan[
-    out_dtype: DType,
-    out_layout: Layout,
-    inverse: Bool,
-    bases: List[List[UInt]],
+    out_dtype: DType, out_layout: Layout, inverse: Bool, bases: List[List[UInt]]
 ](Copyable):
+    comptime rank = Self.out_layout.rank()
+    comptime dims = Self.out_layout.shape[1 : Self.rank - 1]
+    # TODO: this should somehow be dependent on the CPU cache architecture
+    comptime MAX_STACK_SEQ_LEN = 128
+    """Maximum length to fully unroll on the stack."""
+
     comptime L = List[ComplexScalar[Self.out_dtype]]
 
-    var twiddle_factors: ArcPointer[List[Self.L]]
+    var twiddle_factors: ArcPointer[List[Optional[Self.L]]]
     var calc_buf: ArcPointer[Self.L]
 
     def __init__(out self):
-        self.twiddle_factors = {
-            _get_dims_twfs[
-                Self.out_dtype, Self.out_layout, Self.inverse, Self.bases
-            ]()
-        }
+        self.twiddle_factors = {Self._get_dims_twfs()}
         comptime size = Self.out_layout.size() // 2  # Self.L is already complex
         self.calc_buf = {Self.L(capacity=size)}
 
+    @staticmethod
+    def _get_dims_twfs(out twfs: List[Optional[Self.L]]):
+        comptime amnt_dims = len(Self.dims)
 
-def _get_dims_twfs[
-    out_dtype: DType,
-    out_layout: Layout,
-    inverse: Bool,
-    bases: List[List[UInt]],
-](out twfs: List[List[ComplexScalar[out_dtype]]]):
-    comptime rank = out_layout.rank()
-    comptime dims = out_layout.shape[1 : rank - 1]
-    comptime amnt_dims = len(dims)
+        twfs = {capacity = amnt_dims}
 
-    twfs = {capacity = amnt_dims}
-
-    comptime for dim_idx in range(amnt_dims):
-        comptime length = UInt(out_layout.shape[dim_idx + 1].value())
-        twfs.append(_get_twiddle_factors[length, out_dtype, inverse]())
+        comptime for dim_idx in range(amnt_dims):
+            comptime length = UInt(Self.dims[dim_idx].value())
+            comptime if length <= Self.MAX_STACK_SEQ_LEN:
+                twfs.append(None)
+                continue
+            twfs.append(
+                _get_twiddle_factors[length, Self.out_dtype, Self.inverse]()
+            )
 
 
 @always_inline
-def transpose[
+def _transpose[
     *, into_: Int, from_: Int
 ](
     dst: LayoutTensor[mut=True, ...],
@@ -72,36 +70,11 @@ def transpose[
 ):
     comptime dims = src.layout.shape[: src.rank - 1]
 
-    @parameter
-    def _calc_sizes() -> Tuple[Int, Int, Int]:
-        # Always anchor the math to the outer-most index being swapped
-        var target_idx = min(into_, from_)
-
-        # 1. Batches: Product of all dimensions outside the swap zone
-        var batch_val = 1
-        for i in range(0, target_idx + 1):
-            batch_val *= dims[i].value()
-
-        # 2. M: The size of the specific dimension we are shifting
-        var m_val = dims[target_idx + 1].value()
-
-        # 3. N: Product of all inner dimensions inside the swap zone
-        var n_val = 1
-        for i in range(target_idx + 2, len(dims)):
-            n_val *= dims[i].value()
-
-        # If we are restoring the layout (from_ < into_), the source memory
-        # is already flipped [N, M], so we swap what M and N mean for the loop.
-        comptime if into_ < from_:
-            return batch_val, m_val, n_val
-        else:
-            return batch_val, n_val, m_val
-
-    comptime sizes = _calc_sizes()
-    comptime batches = sizes[0]
-    comptime M = sizes[1]
-    comptime N = sizes[2]
-    comptime TILE = simd_width_of[ComplexScalar[src.dtype]]()
+    comptime sizes = _calc_batches_M_N[dims, into_, from_]()
+    comptime intra_fft_batches = Int(sizes[0])
+    comptime M = Int(sizes[1])
+    comptime N = Int(sizes[2])
+    comptime TILE = simd_width_of[Scalar[src.dtype]]()
 
     @parameter
     def _transpose_batch(b: Int):
@@ -110,17 +83,14 @@ def transpose[
 
         for i in range(0, M, TILE):
             for j in range(0, N, TILE):
-                var i_max = min(i + TILE, M)
-                var j_max = min(j + TILE, N)
+                for ii in range(i, min(i + TILE, M)):
+                    for jj in range(j, min(j + TILE, N)):
+                        var val = src_base.load[2]((ii * N + jj) * 2)
+                        dst_base.store((jj * M + ii) * 2, val)
 
-                for ii in range(i, i_max):
-                    for jj in range(j, j_max):
-                        var src_offset = (ii * N + jj) * 2
-                        var dst_offset = (jj * M + ii) * 2
-                        var val = src_base.load[2](src_offset)
-                        dst_base.store(dst_offset, val)
-
-    parallelize[_transpose_batch](batches, min(num_workers, batches, TILE))
+    parallelize[_transpose_batch](
+        intra_fft_batches, min(num_workers, intra_fft_batches, TILE)
+    )
 
 
 def _run_cpu_nd_fft[
@@ -140,9 +110,6 @@ def _run_cpu_nd_fft[
     plan: _CPUPlan[out_dtype, out_layout, inverse, bases],
     cpu_workers: Optional[UInt] = None,
 ):
-    # TODO: this should be dependent on the CPU cache architecture
-    comptime MAX_STACK_SEQ_LEN = 128
-    """Maximum length to fully unroll on the stack."""
     comptime rank = out_layout.rank()
     comptime dims = out_layout.shape[1 : rank - 1]
     comptime amnt_dims = len(dims)
@@ -192,9 +159,21 @@ def _run_cpu_nd_fft[
         comptime ordered_bases = bases_processed[0]
         comptime processed_list = bases_processed[1]
         comptime twfs_layout = Layout.row_major(Int(length), 2)
-        var twfs = LayoutTensor[mut=False, out_dtype, twfs_layout](
-            twfs_runtime_ptr[dim_idx].unsafe_ptr().bitcast[Scalar[out_dtype]]()
-        )
+
+        var twfs: LayoutTensor[
+            mut=False, out_dtype, twfs_layout, origin_of(plan)
+        ]
+        comptime if length <= plan.MAX_STACK_SEQ_LEN:
+            twfs = {unsafe_ptr = {}}
+        else:
+            twfs = {
+                twfs_runtime_ptr[dim_idx]
+                .value()
+                .unsafe_ptr()
+                .bitcast[Scalar[out_dtype]]()
+                .mut_cast[False]()
+                .unsafe_origin_cast[origin_of(plan)]()
+            }
 
         comptime fft_stages = _num_stages_end_of[bases, dims, dim_idx + 1]()
         comptime prev_stages = fft_stages + (start_dim_idx - dim_idx)
@@ -208,7 +187,7 @@ def _run_cpu_nd_fft[
             comptime s = prev_stages + b
             comptime write_lhs = (total_stages - (s + 1)) % 2 == 0
 
-            comptime if length <= MAX_STACK_SEQ_LEN:
+            comptime if length <= plan.MAX_STACK_SEQ_LEN:
                 comptime func = _radix_n_fft_kernel_stockham_comptime[
                     ...,
                     do_rfft=do_rfft,
@@ -297,11 +276,11 @@ def _run_cpu_nd_fft[
                     comptime s = fft_stages + (start_dim_idx - (idx + 1))
                     comptime write_lhs = (total_stages - (s + 1)) % 2 == 0
                     comptime if write_lhs:
-                        transpose[from_=idx + 1, into_=idx](
+                        _transpose[from_=idx + 1, into_=idx](
                             base_out, base_calc, Int(per_batch_workers)
                         )
                     else:
-                        transpose[from_=idx + 1, into_=idx](
+                        _transpose[from_=idx + 1, into_=idx](
                             base_calc, base_out, Int(per_batch_workers)
                         )
 
@@ -333,11 +312,11 @@ def _run_cpu_nd_fft[
                 comptime s = fft_stages + start_dim_idx + idx
                 comptime write_lhs = (total_stages - (s + 1)) % 2 == 0
                 comptime if write_lhs:
-                    transpose[from_=idx, into_=idx + 1](
+                    _transpose[from_=idx, into_=idx + 1](
                         base_out, base_calc, Int(per_batch_workers)
                     )
                 else:
-                    transpose[from_=idx, into_=idx + 1](
+                    _transpose[from_=idx, into_=idx + 1](
                         base_calc, base_out, Int(per_batch_workers)
                     )
 

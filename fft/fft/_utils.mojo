@@ -372,12 +372,22 @@ def _unit_phasor_fma[
         }
 
 
+def asd[a: Int]() -> Bool:
+    return False
+
+
 def _num_stages_end_of[
-    bases: List[List[UInt]], dims: IntTuple, dim_idx: Int
+    bases: List[List[UInt]],
+    dims: IntTuple,
+    dim_idx: Int,
+    use_scratch_buffer: def[Int]() -> Bool = asd,
 ]() -> Int:
     comptime start_dim_idx = len(dims) - 1
     var num_stages = 0
     comptime for i in range(dim_idx, start_dim_idx + 1):
+        comptime if use_scratch_buffer[i]():
+            num_stages += 1
+            continue
         comptime length = UInt(dims[i].value())
         comptime bases_processed = _get_ordered_bases_processed_list[
             length, bases[i]
@@ -385,3 +395,25 @@ def _num_stages_end_of[
         comptime stages = len(bases_processed[0])
         num_stages += stages
     return num_stages
+
+
+def _calc_batches_M_N[
+    dims: IntTuple, into_: Int, from_: Int
+]() -> Tuple[UInt, UInt, UInt]:
+    var target_idx = min(into_, from_)
+    var is_forward = into_ < from_
+
+    var batch_val = UInt(1)
+    for i in range(0, target_idx):
+        batch_val *= UInt(dims[i].value())
+
+    var m_val = UInt(dims[target_idx].value())
+
+    var n_val = UInt(1)
+    for i in range(target_idx + 1, len(dims)):
+        n_val *= UInt(dims[i].value())
+
+    if is_forward:
+        return batch_val, m_val, n_val
+    else:
+        return batch_val, n_val, m_val

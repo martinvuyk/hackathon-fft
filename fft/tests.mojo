@@ -9,7 +9,7 @@ from std.utils.numerics import nan
 
 from std.testing import assert_almost_equal
 
-from fft.fft.fft import fft, _estimate_best_bases_nd
+from fft.fft.fft import fft, plan_fft, _estimate_best_bases_nd
 from fft.fft._ndim_fft_gpu import _run_gpu_nd_fft, _GPUTest
 from fft._test_values import (
     _TestValues,
@@ -194,8 +194,16 @@ def _test_fft_radix_n[
                 else:
                     x[i, 0] = Scalar[in_dtype](test[0][i])
 
+        var plan = plan_fft[
+            in_dtype,
+            out_dtype,
+            in_layout,
+            out_layout,
+            bases=[bases],
+            inverse=inverse,
+        ]()
         fft[bases=[bases], inverse=inverse](
-            batch_output, batch_x.get_immutable()
+            batch_output, batch_x.get_immutable(), plan=plan
         )
 
         for idx, test in enumerate(materialize[test_values]()):
@@ -235,12 +243,17 @@ def _test_fft_radix_n[
                             x[i, 0] = Scalar[in_dtype](test[0][i])
 
             ctx.synchronize()
-            _run_gpu_nd_fft[
-                inverse=inverse,
+            var plan = plan_fft[
+                in_dtype,
+                out_dtype,
+                in_layout,
+                out_layout,
                 bases=[bases],
-                test=gpu_test,
+                inverse=inverse,
                 runtime_twfs=True,
-            ](batch_output, batch_x, ctx)
+                _test=gpu_test,
+            ](ctx=ctx)
+            _run_gpu_nd_fft(batch_output, batch_x, ctx, plan=plan)
             ctx.synchronize()
             with out_data.map_to_host() as out_host:
                 for idx, test in enumerate(materialize[test_values]()):
@@ -463,8 +476,8 @@ def test_2d_cpu[debug: Bool = False]() raises:
     var out = LayoutTensor[mut=True, out_dtype, out_layout](
         out_buf.unsafe_ptr().bitcast[Float64]()
     )
-
-    fft(out, x)
+    var plan = plan_fft[DType.uint8, out_dtype, x_layout, out_layout]()
+    fft(out, x, plan=plan)
 
     ref expected = global_constant[expected_2d]()
 
@@ -536,10 +549,16 @@ def _test_2d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]() raises:
                     x_view[0, i, j, 0] = Scalar[in_dtype](input_2d_v[i][j])
 
         ctx.synchronize()
-        comptime bases = _estimate_best_bases_nd[in_layout, out_layout, "gpu"]()
-        _run_gpu_nd_fft[
-            inverse=inverse, bases=bases, test=gpu_test, runtime_twfs=True
-        ](out, x.get_immutable(), ctx)
+        var plan = plan_fft[
+            in_dtype,
+            out_dtype,
+            in_layout,
+            out_layout,
+            inverse=inverse,
+            _test=gpu_test,
+            runtime_twfs=True,
+        ](ctx=ctx)
+        _run_gpu_nd_fft(out, x.get_immutable(), ctx, plan)
         ctx.synchronize()
 
         ref expected = global_constant[expected_2d]()
@@ -905,7 +924,8 @@ def test_3d_cpu[debug: Bool = False]() raises:
         out_buf.unsafe_ptr().bitcast[Float64]()
     )
 
-    fft(out, x)
+    var plan = plan_fft[DType.uint8, out_dtype, x_layout, out_layout]()
+    fft(out, x, plan=plan)
 
     ref expected = global_constant[expected_3d]()
 
@@ -985,10 +1005,16 @@ def _test_3d_gpu[debug: Bool, inverse: Bool, gpu_test: _GPUTest]() raises:
                         )
 
         ctx.synchronize()
-        comptime bases = _estimate_best_bases_nd[in_layout, out_layout, "gpu"]()
-        _run_gpu_nd_fft[
-            inverse=inverse, bases=bases, test=gpu_test, runtime_twfs=True
-        ](out, x.get_immutable(), ctx)
+        var plan = plan_fft[
+            in_dtype,
+            out_dtype,
+            in_layout,
+            out_layout,
+            inverse=inverse,
+            _test=gpu_test,
+            runtime_twfs=True,
+        ](ctx=ctx)
+        _run_gpu_nd_fft(out, x.get_immutable(), ctx, plan)
         ctx.synchronize()
 
         ref expected = global_constant[expected_3d]()
@@ -1047,10 +1073,10 @@ def test_3d_gpu[debug: Bool = False]() raises:
 
 def main() raises:
     # test_fft_1d_cpu()
-    # test_fft_1d_gpu()
+    test_fft_1d_gpu()
     # test_ifft_1d_cpu()
     # test_ifft_1d_gpu()
-    test_2d_cpu[debug=True]()
+    # test_2d_cpu()
     # test_2d_gpu()
     # test_3d_cpu()
     # test_3d_gpu()
