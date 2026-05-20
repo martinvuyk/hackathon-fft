@@ -99,41 +99,41 @@ def bench_cpu_radix_n_rfft[
 def main() raises:
     seed()
     var m = Bench(
-        BenchConfig(num_repetitions=1, num_warmup_iters=400, max_iters=400)
+        # BenchConfig(num_repetitions=1, num_warmup_iters=400, max_iters=400)
         # BenchConfig(num_repetitions=1)
         # BenchConfig(num_repetitions=1, num_warmup_iters=20, max_iters=20)
-        # BenchConfig(num_repetitions=1, num_warmup_iters=2, max_iters=2)
+        BenchConfig(num_repetitions=1, num_warmup_iters=2, max_iters=2)
     )
     comptime shapes: List[IntTuple] = [
-        {250_000, 93},
-        {250_000, 128},
-        {100_000, 2**10},
-        # {100, 2**14},
-        {100, 640, 480},
+        # {1_000_000, 93},
+        # {500_000, 128},
+        # {100_000, 2**10},
+        {100, 2**14},
+        # {100, 640, 480},
         # {10, 1920, 1080},
         # {1, 3840, 2160},
         # {1, 7680, 4320},
-        {100, 64, 64, 64},
-        {10, 128, 128, 128},
-        {1, 256, 256, 256},
+        # {100, 64, 64, 64},
+        # {10, 128, 128, 128},
+        # {1, 256, 256, 256},
         # {1, 512, 512, 512},
         # {1, 64, 64, 64, 64},
         # {1, 25, 160, 160, 48},
     ]
 
-    comptime for shape in shapes:
-        m.bench_function[bench_gpu_radix_n_rfft[DType.float32, shape]](
-            BenchId(String("bench_gpu_radix_n_rfft[", shape, "]"))
-        )
-
     # comptime for shape in shapes:
-    #     m.bench_function[
-    #         bench_cpu_radix_n_rfft[DType.float32, shape, cpu_workers={1}]
-    #     ](BenchId(String("bench_cpu_radix_n_rfft[", shape, ", workers=1]")))
-
-    # comptime for shape in shapes:
-    #     m.bench_function[bench_cpu_radix_n_rfft[DType.float32, shape]](
-    #         BenchId(String("bench_cpu_radix_n_rfft[", shape, ", workers=n]"))
+    #     m.bench_function[bench_gpu_radix_n_rfft[DType.float32, shape]](
+    #         BenchId(String("bench_gpu_radix_n_rfft[", shape, "]"))
     #     )
+
+    comptime for shape in shapes:
+        m.bench_function[
+            bench_cpu_radix_n_rfft[DType.float32, shape, cpu_workers={1}]
+        ](BenchId(String("bench_cpu_radix_n_rfft[", shape, ", workers=1]")))
+
+    comptime for shape in shapes:
+        m.bench_function[bench_cpu_radix_n_rfft[DType.float32, shape]](
+            BenchId(String("bench_cpu_radix_n_rfft[", shape, ", workers=n]"))
+        )
 
     print(m)

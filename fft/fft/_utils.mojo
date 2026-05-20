@@ -1,9 +1,11 @@
-from std.sys.info import is_64bit, is_nvidia_gpu
+from std.sys.info import is_64bit, is_nvidia_gpu, is_gpu
 from std.complex import ComplexScalar, ComplexSIMD
 from std.math import exp, pi, sin, cos, log2
 from std.bit import count_trailing_zeros
 from layout import IntTuple
 from std.utils.index import IndexList
+
+comptime EPSILON = 1e-9
 
 
 def _get_dtype[length: UInt]() -> DType:
@@ -72,13 +74,13 @@ def _get_twiddle_factor[
 
     if __is_run_in_comptime_interpreter:
         var factor = 2 * n.cast[dtype]() / N.cast[dtype]()
-        if factor < 1e-9:  # approx. 0
+        if factor < EPSILON:  # approx. 0
             num = {1, 0}
-        elif factor == 0.5:
+        elif abs(factor - 0.5) < EPSILON:
             num = {0, -1}
-        elif factor == 1:
+        elif abs(factor - 1) < EPSILON:
             num = {-1, 0}
-        elif factor == 1.5:
+        elif abs(factor - 1.5) < EPSILON:
             num = {0, 1}
         else:
             # FIXME: remove once comptime branch and comptime assert don't short circuit
@@ -259,6 +261,7 @@ def _product_of_dims(dims: IntTuple) -> Int:
     return prod
 
 
+# NOTE: currently unused, but needed for future inplace variant
 def _get_cascade_idxes[
     shape: IntTuple, excluded: IntTuple
 ](var flat_idx: Int, out idxes: IndexList[len(shape) - len(excluded)]):
@@ -289,47 +292,45 @@ def _get_cascade_idxes[
 
 
 @always_inline
-def _unit_phasor_mul[
-    phasor: ComplexSIMD
-](twf: type_of(phasor)) -> type_of(phasor):
-    """Optimizes `phasor * twf`."""
+def _unit_phasor_mul[twf: ComplexSIMD](val: type_of(twf)) -> type_of(twf):
+    """Optimizes `twf * val`."""
 
-    comptime if phasor.re == 1:  # Co(1, 0)
-        return twf
-    elif phasor.im == -1:  # Co(0, -1)
-        return {twf.im, -twf.re}
-    elif phasor.re == -1:  # Co(-1, 0)
-        return -twf
-    elif phasor.im == 1:  # Co(0, 1)
-        return {-twf.im, twf.re}
-    elif abs(phasor.re) == abs(phasor.im):  # Co(1/√2, 1/√2)
-        comptime factor = abs(phasor.re)
+    comptime if abs(twf.re - (1)) < EPSILON:  # Co(1, 0)
+        return val
+    elif abs(twf.im - (-1)) < EPSILON:  # Co(0, -1)
+        return {val.im, -val.re}
+    elif abs(twf.re - (-1)) < EPSILON:  # Co(-1, 0)
+        return -val
+    elif abs(twf.im - (1)) < EPSILON:  # Co(0, 1)
+        return {-val.im, val.re}
+    elif abs(abs(twf.re) - abs(twf.im)) < EPSILON:  # Co(1/√2, 1/√2)
+        comptime factor = abs(twf.re)
 
-        comptime if phasor.re > 0 and phasor.im > 0:  # Q1
-            return {factor * (twf.re - twf.im), factor * (twf.re + twf.im)}
-        elif phasor.re < 0 and phasor.im > 0:  # Q2
-            return {factor * (-twf.re - twf.im), factor * (twf.re - twf.im)}
-        elif phasor.re < 0 and phasor.im < 0:  # Q3
-            return {factor * (-twf.re + twf.im), factor * (-twf.re - twf.im)}
+        comptime if twf.re > 0 and twf.im > 0:  # Q1
+            return {factor * (val.re - val.im), factor * (val.re + val.im)}
+        elif twf.re < 0 and twf.im > 0:  # Q2
+            return {factor * (-val.re - val.im), factor * (val.re - val.im)}
+        elif twf.re < 0 and twf.im < 0:  # Q3
+            return {factor * (-val.re + val.im), factor * (-val.re - val.im)}
         else:  # Q4
-            return {factor * (twf.re + twf.im), factor * (-twf.re + twf.im)}
+            return {factor * (val.re + val.im), factor * (-val.re + val.im)}
     else:
-        return twf * phasor
+        return val * twf
 
 
 @always_inline
 def _unit_phasor_fma[
     twf: ComplexSIMD
 ](x_j: type_of(twf), acc: type_of(twf)) -> type_of(twf):
-    comptime if twf.re == 1:  # Co(1, 0)
+    comptime if abs(twf.re - (1)) < EPSILON:  # Co(1, 0)
         return acc + x_j
-    elif twf.im == -1:  # Co(0, -1)
+    elif abs(twf.im - (-1)) < EPSILON:  # Co(0, -1)
         return {acc.re + x_j.im, acc.im - x_j.re}
-    elif twf.re == -1:  # Co(-1, 0)
+    elif abs(twf.re - (-1)) < EPSILON:  # Co(-1, 0)
         return acc - x_j
-    elif twf.im == 1:  # Co(0, 1)
+    elif abs(twf.im - (1)) < EPSILON:  # Co(0, 1)
         return {acc.re - x_j.im, acc.im + x_j.re}
-    elif abs(twf.re) == abs(twf.im):  # Co(1/√2, 1/√2)
+    elif abs(abs(twf.re) - abs(twf.im)) < EPSILON:  # Co(1/√2, 1/√2)
         comptime factor = abs(twf.re)
         var re = x_j.re
         var im = x_j.im
@@ -350,17 +351,17 @@ def _unit_phasor_fma[
 def _unit_phasor_fma[
     twf: ComplexSIMD, accum_is_real: Bool
 ](x_j: SIMD[twf.dtype, twf.size], acc: type_of(twf)) -> type_of(twf):
-    comptime if twf.re == 1:  # Co(1, 0)
+    comptime if abs(twf.re - 1) < EPSILON:  # Co(1, 0)
         return {acc.re + x_j, acc.im}
-    elif twf.im == -1 and accum_is_real:  # Co(0, -1)
+    elif abs(twf.im - (-1)) < EPSILON and accum_is_real:  # Co(0, -1)
         return {acc.re, -x_j}
-    elif twf.im == -1:  # Co(0, -1)
+    elif abs(twf.im - (-1)) < EPSILON:  # Co(0, -1)
         return {acc.re, acc.im - x_j}
-    elif twf.re == -1:  # Co(-1, 0)
+    elif abs(twf.re - (-1)) < EPSILON:  # Co(-1, 0)
         return {acc.re - x_j, acc.im}
-    elif twf.im == 1 and accum_is_real:  # Co(0, 1)
+    elif abs(twf.im - (1)) < EPSILON and accum_is_real:  # Co(0, 1)
         return {acc.re, x_j}
-    elif twf.im == 1:  # Co(0, 1)
+    elif abs(twf.im - (1)) < EPSILON:  # Co(0, 1)
         return {acc.re, acc.im + x_j}
     elif accum_is_real:
         return {twf.re.fma(x_j, acc.re), twf.im * x_j}
@@ -372,7 +373,7 @@ def _unit_phasor_fma[
         }
 
 
-def asd[a: Int]() -> Bool:
+def _false[a: Int]() -> Bool:
     return False
 
 
@@ -380,7 +381,7 @@ def _num_stages_end_of[
     bases: List[List[UInt]],
     dims: IntTuple,
     dim_idx: Int,
-    use_scratch_buffer: def[Int]() -> Bool = asd,
+    use_scratch_buffer: def[Int]() -> Bool = _false,
 ]() -> Int:
     comptime start_dim_idx = len(dims) - 1
     var num_stages = 0

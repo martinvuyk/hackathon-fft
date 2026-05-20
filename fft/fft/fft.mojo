@@ -221,8 +221,8 @@ def fft[
     bases: List[List[UInt]],
     //,
 ](
-    output: LayoutTensor[out_dtype, out_layout, out_origin, ...],
-    x: LayoutTensor[in_dtype, in_layout, in_origin, ...],
+    output: LayoutTensor[out_dtype, out_layout, out_origin],
+    x: LayoutTensor[in_dtype, in_layout, in_origin],
     *,
     plan: _CPUPlan[out_dtype, out_layout, inverse, bases],
     cpu_workers: Optional[UInt] = None,

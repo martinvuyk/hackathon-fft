@@ -27,12 +27,11 @@ from ._utils import (
     _max,
     _min,
     _product_of_dims,
-    _get_cascade_idxes,
     _get_twiddle_factors,
     _num_stages_end_of,
     _calc_batches_M_N,
 )
-from ._fft import _radix_n_fft_kernel_cooley_tukey, _radix_n_fft_kernel_stockham
+from ._fft import _radix_n_fft_kernel_elem_per_thread
 
 
 @fieldwise_init
@@ -359,7 +358,7 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
         comptime for b in range(len(ordered_bases)):
             comptime base = ordered_bases[b]
             comptime processed = processed_list[b]
-            comptime func = _radix_n_fft_kernel_stockham[
+            comptime func = _radix_n_fft_kernel_elem_per_thread[
                 ...,
                 do_rfft=do_rfft,
                 base=base,

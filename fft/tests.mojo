@@ -202,9 +202,7 @@ def _test_fft_radix_n[
             bases=[bases],
             inverse=inverse,
         ]()
-        fft[bases=[bases], inverse=inverse](
-            batch_output, batch_x.get_immutable(), plan=plan
-        )
+        fft(batch_output, batch_x.get_immutable(), plan=plan)
 
         for idx, test in enumerate(materialize[test_values]()):
             comptime output_layout = Layout.row_major(
@@ -1071,12 +1069,38 @@ def test_3d_gpu[debug: Bool = False]() raises:
     # _test_3d_gpu[debug, False, _GPUTest.CLUSTER]()
 
 
+# def main() raises:
+#     # test_fft_1d_cpu[debug=True]()
+#     # test_fft_1d_gpu()
+#     # test_ifft_1d_cpu()
+#     # test_ifft_1d_gpu()
+#     test_2d_cpu()
+#     # test_2d_gpu()
+#     test_3d_cpu()
+#     # test_3d_gpu()
+
+
+def run_fft():
+    from fft.fft._ndim_fft_cpu import _run_cpu_nd_fft, _CPUPlan
+
+    comptime SIZE = 2**14
+    comptime in_layout = Layout.row_major(1, SIZE, 2)
+    comptime in_size = in_layout.size()
+    comptime out_layout = Layout.row_major(1, SIZE, 2)
+    comptime out_size = out_layout.size()
+    comptime in_dtype = DType.float32
+    comptime out_dtype = DType.float32
+
+    var out_data = List[Scalar[in_dtype]](length=out_size, fill=0)
+    var x_data = List[Scalar[out_dtype]](length=in_size, fill=0)
+    var output = LayoutTensor[mut=True, out_dtype, out_layout](Span(out_data))
+    var x = LayoutTensor[mut=False, in_dtype, in_layout](Span(x_data))
+    var plan = _CPUPlan[out_dtype, out_layout, False, [[2]]]()
+    _run_cpu_nd_fft(output, x, plan=plan)
+
+
 def main() raises:
-    # test_fft_1d_cpu()
-    test_fft_1d_gpu()
-    # test_ifft_1d_cpu()
-    # test_ifft_1d_gpu()
-    # test_2d_cpu()
-    # test_2d_gpu()
-    # test_3d_cpu()
-    # test_3d_gpu()
+    from std.compile import compile_info
+
+    with open("dump.ll", "w") as f:
+        f.write(compile_info[run_fft, emission_kind="llvm-opt"]())
