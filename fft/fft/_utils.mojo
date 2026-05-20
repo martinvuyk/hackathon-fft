@@ -381,7 +381,7 @@ def _num_stages_end_of[
     bases: List[List[UInt]],
     dims: IntTuple,
     dim_idx: Int,
-    use_scratch_buffer: def[Int]() -> Bool = _false,
+    use_scratch_buffer: def[Int]() thin -> Bool = _false,
 ]() -> Int:
     comptime start_dim_idx = len(dims) - 1
     var num_stages = 0

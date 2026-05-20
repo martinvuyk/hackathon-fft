@@ -246,7 +246,7 @@ def _radix_n_fft_kernel_butterfly[
                     comptime twf = _unit_phasor_mul[_base_phasor[i, j]()](
                         i0_j_twf_comptime
                     )
-                    res = _unit_phasor_mul[twf](x_j)
+                    res = _unit_phasor_fma[twf](x_j, acc)
                 else:
                     res = _unit_phasor_fma[_base_phasor[i, j]()](x_j_i0, acc)
                 x_out.store(Int(i), 0, to_CoV(res))
@@ -271,150 +271,150 @@ def _radix_n_fft_kernel_butterfly[
             output.store(Int(n + step), 0, x_out.load[CoV.size](Int(i), 0))
 
 
-# @always_inline
-# def _radix_n_fft_kernel_butterfly_comptime[
-#     out_dtype: DType,
-#     out_layout: Layout,
-#     out_origin: MutOrigin,
-#     out_address_space: AddressSpace,
-#     in_dtype: DType,
-#     in_layout: Layout,
-#     in_origin: ImmutOrigin,
-#     in_address_space: AddressSpace,
-#     x_out_layout: Layout,
-#     x_out_address_space: AddressSpace,
-#     *,
-#     length: UInt,
-#     do_rfft: Bool,
-#     base: UInt,
-#     processed: UInt,
-#     inverse: Bool,
-#     ordered_bases: List[UInt],
-#     run_inplace: Bool,
-#     local_i: UInt,
-# ](
-#     output: LayoutTensor[
-#         out_dtype, out_layout, out_origin, address_space=out_address_space, ...
-#     ],
-#     x: LayoutTensor[
-#         in_dtype, in_layout, in_origin, address_space=in_address_space, ...
-#     ],
-#     x_out: LayoutTensor[
-#         mut=True,
-#         out_dtype,
-#         x_out_layout,
-#         address_space=x_out_address_space,
-#         ...,
-#     ],
-# ):
-#     """A generic Butterfly algorithm. It has most of the generalizable radix
-#     optimizations. Can run inplace by reordering the input (Cooley Tukey) or
-#     out of place (Stockham)."""
-#     comptime assert length >= base, "length must be >= base"
-#     comptime assert out_dtype.is_floating_point()
+@always_inline
+def _radix_n_fft_kernel_butterfly_comptime[
+    out_dtype: DType,
+    out_layout: Layout,
+    out_origin: MutOrigin,
+    out_address_space: AddressSpace,
+    in_dtype: DType,
+    in_layout: Layout,
+    in_origin: ImmutOrigin,
+    in_address_space: AddressSpace,
+    x_out_layout: Layout,
+    x_out_address_space: AddressSpace,
+    *,
+    length: UInt,
+    do_rfft: Bool,
+    base: UInt,
+    processed: UInt,
+    inverse: Bool,
+    ordered_bases: List[UInt],
+    run_inplace: Bool,
+    local_i: UInt,
+](
+    output: LayoutTensor[
+        out_dtype, out_layout, out_origin, address_space=out_address_space, ...
+    ],
+    x: LayoutTensor[
+        in_dtype, in_layout, in_origin, address_space=in_address_space, ...
+    ],
+    x_out: LayoutTensor[
+        mut=True,
+        out_dtype,
+        x_out_layout,
+        address_space=x_out_address_space,
+        ...,
+    ],
+):
+    """A generic Butterfly algorithm. It has most of the generalizable radix
+    optimizations. Can run inplace by reordering the input (Cooley Tukey) or
+    out of place (Stockham)."""
+    comptime assert length >= base, "length must be >= base"
+    comptime assert out_dtype.is_floating_point()
 
-#     comptime Sc = Scalar[_get_dtype[length]()]
-#     comptime offset = Sc(processed)
-#     comptime next_offset = offset * Sc(base)
-#     comptime ratio = Sc(length) // next_offset
+    comptime Sc = Scalar[_get_dtype[length]()]
+    comptime offset = Sc(processed)
+    comptime next_offset = offset * Sc(base)
+    comptime ratio = Sc(length) // next_offset
 
-#     comptime n = (
-#         Sc(local_i) % offset + (Sc(local_i) // offset) * next_offset
-#     ) if run_inplace else Sc(local_i)
+    comptime n = (
+        Sc(local_i) % offset + (Sc(local_i) // offset) * next_offset
+    ) if run_inplace else Sc(local_i)
 
-#     comptime Co = ComplexScalar[out_dtype]
-#     comptime CoV = SIMD[out_dtype, 2]
+    comptime Co = ComplexScalar[out_dtype]
+    comptime CoV = SIMD[out_dtype, 2]
 
-#     @always_inline
-#     @parameter
-#     def _base_phasor[i: UInt, j: UInt](out res: Co):
-#         comptime base_twf = _get_twiddle_factor[
-#             out_dtype, inverse=inverse, N=base
-#         ](j)
-#         res = {1, 0}
+    @always_inline
+    @parameter
+    def _base_phasor[i: UInt, j: UInt](out res: Co):
+        comptime base_twf = _get_twiddle_factor[
+            out_dtype, inverse=inverse, N=base
+        ](j)
+        res = {1, 0}
 
-#         for _ in range(i):
-#             res *= base_twf
+        for _ in range(i):
+            res *= base_twf
 
-#     comptime get[i: UInt] = _get_x[
-#         i,
-#         out_dtype,
-#         length,
-#         base,
-#         processed,
-#         do_rfft,
-#         ordered_bases,
-#         run_inplace,
-#     ]
-#     var x_0 = get[0](output, x, n, local_i)
+    comptime get[i: UInt] = _get_x[
+        i,
+        out_dtype,
+        length,
+        base,
+        processed,
+        do_rfft,
+        ordered_bases,
+        run_inplace,
+    ]
+    var x_0 = get[0](output, x, n, local_i)
 
-#     comptime for j in range(UInt(1), base):
-#         var x_j = get[j](output, x, n, local_i)
+    comptime for j in range(UInt(1), base):
+        var x_j = get[j](output, x, n, local_i)
 
-#         comptime twf_index = Sc(j) * (Sc(local_i) % offset) * ratio
-#         comptime i0_j_twf = _get_twiddle_factor[
-#             out_dtype, inverse=inverse, N=Sc(length)
-#         ](twf_index)
+        comptime twf_index = Sc(j) * (Sc(local_i) % offset) * ratio
+        comptime i0_j_twf = _get_twiddle_factor[
+            out_dtype, inverse=inverse, N=Sc(length)
+        ](twf_index)
 
-#         comptime if base % 2 == 0:
-#             comptime for i in range(base // 2):
-#                 comptime twf = _unit_phasor_mul[_base_phasor[i, j]()](i0_j_twf)
-#                 var acc_top: Co
-#                 var acc_bot: Co
+        comptime if base % 2 == 0:
+            comptime for i in range(base // 2):
+                comptime twf = _unit_phasor_mul[_base_phasor[i, j]()](i0_j_twf)
+                var acc_top: Co
+                var acc_bot: Co
 
-#                 comptime complement = i + base // 2
-#                 comptime if j == 1:
-#                     acc_top = x_0
-#                     acc_bot = x_0
-#                 else:
-#                     acc_top = to_Co(x_out.load[CoV.size](Int(i), 0))
-#                     acc_bot = to_Co(x_out.load[CoV.size](Int(complement), 0))
+                comptime complement = i + base // 2
+                comptime if j == 1:
+                    acc_top = x_0
+                    acc_bot = x_0
+                else:
+                    acc_top = to_Co(x_out.load[CoV.size](Int(i), 0))
+                    acc_bot = to_Co(x_out.load[CoV.size](Int(complement), 0))
 
-#                 var term = _unit_phasor_mul[twf](x_j)
-#                 x_out.store(Int(i), 0, to_CoV(acc_top + term))
-#                 comptime if j % 2 == 0:
-#                     x_out.store(Int(complement), 0, to_CoV(acc_bot + term))
-#                 else:
-#                     x_out.store(Int(complement), 0, to_CoV(acc_bot - term))
-#         else:
-#             comptime for i in range(base):
-#                 comptime twf = _unit_phasor_mul[_base_phasor[i, j]()](i0_j_twf)
+                var term = _unit_phasor_mul[twf](x_j)
+                x_out.store(Int(i), 0, to_CoV(acc_top + term))
+                comptime if j % 2 == 0:
+                    x_out.store(Int(complement), 0, to_CoV(acc_bot + term))
+                else:
+                    x_out.store(Int(complement), 0, to_CoV(acc_bot - term))
+        else:
+            comptime for i in range(base):
+                comptime twf = _unit_phasor_mul[_base_phasor[i, j]()](i0_j_twf)
 
-#                 var acc: Co
+                var acc: Co
 
-#                 comptime if j == 1:
-#                     acc = x_0
-#                 else:
-#                     acc = to_Co(x_out.load[CoV.size](Int(i), 0))
+                comptime if j == 1:
+                    acc = x_0
+                else:
+                    acc = to_Co(x_out.load[CoV.size](Int(i), 0))
 
-#                 comptime if processed == 1 and do_rfft:
-#                     var res = _unit_phasor_fma[twf, j == 1](x_j.re, acc)
-#                     x_out.store(Int(i), 0, to_CoV(res))
-#                 else:
-#                     var res = _unit_phasor_fma[twf](x_j, acc)
-#                     x_out.store(Int(i), 0, to_CoV(res))
+                comptime if processed == 1 and do_rfft:
+                    var res = _unit_phasor_fma[twf, j == 1](x_j.re, acc)
+                    x_out.store(Int(i), 0, to_CoV(res))
+                else:
+                    var res = _unit_phasor_fma[twf](x_j, acc)
+                    x_out.store(Int(i), 0, to_CoV(res))
 
-#     comptime base_is_pow2 = Bool(UInt64(base).is_power_of_two())
+    comptime base_is_pow2 = Bool(UInt64(base).is_power_of_two())
 
-#     comptime if inverse and processed * base == length:  # last ifft stage
-#         comptime `1 / N` = (1.0 / Float64(length)).cast[out_dtype]()
+    comptime if inverse and processed * base == length:  # last ifft stage
+        comptime `1 / N` = (1.0 / Float64(length)).cast[out_dtype]()
 
-#         comptime if base_is_pow2:
-#             x_out.ptr.store(x_out.ptr.load[Int(base) * CoV.size]() * `1 / N`)
-#         else:
-#             comptime for i in range(base):
-#                 var res = x_out.load[CoV.size](Int(i), 0) * `1 / N`
-#                 x_out.store(Int(i), 0, res)
+        comptime if base_is_pow2:
+            x_out.ptr.store(x_out.ptr.load[Int(base) * CoV.size]() * `1 / N`)
+        else:
+            comptime for i in range(base):
+                var res = x_out.load[CoV.size](Int(i), 0) * `1 / N`
+                x_out.store(Int(i), 0, res)
 
-#     comptime if run_inplace and base_is_pow2 and processed == 1:
-#         output.store(Int(n), 0, x_out.load[Int(base) * 2](0, 0))
-#     else:
-#         comptime out_n = n if run_inplace else (
-#             (Sc(local_i) // offset) * next_offset + (Sc(local_i) % offset)
-#         )
-#         comptime for i in range(base):
-#             comptime step = Sc(i) * offset
-#             output.store(Int(out_n + step), 0, x_out.load[CoV.size](Int(i), 0))
+    comptime if run_inplace and base_is_pow2 and processed == 1:
+        output.store(Int(n), 0, x_out.load[Int(base) * 2](0, 0))
+    else:
+        comptime out_n = n if run_inplace else (
+            (Sc(local_i) // offset) * next_offset + (Sc(local_i) % offset)
+        )
+        comptime for i in range(base):
+            comptime step = Sc(i) * offset
+            output.store(Int(out_n + step), 0, x_out.load[CoV.size](Int(i), 0))
 
 
 @always_inline

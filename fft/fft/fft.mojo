@@ -144,10 +144,6 @@ def plan_fft[
         bases: The list of bases for which to build the mixed-radix algorithm.
 
     Args:
-        output: The output tensor.
-        x: The input tensor.
-        plan: The execution plan, it is best to build it outside this function
-            if it is to be called repeatedly.
         cpu_workers: The amount of workers to use when running on CPU.
 
     Constraints:

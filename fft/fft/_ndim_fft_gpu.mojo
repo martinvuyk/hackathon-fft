@@ -230,11 +230,11 @@ def _transpose[
     comptime TILE = 32
 
     # x maps to N (columns), y maps to M (rows), z maps to Batches
-    var tx = thread_idx.x
-    var ty = thread_idx.y
-    var bx = block_idx.x * TILE
-    var by = block_idx.y * TILE
-    var b = block_idx.z
+    var tx = UInt(thread_idx.x)
+    var ty = UInt(thread_idx.y)
+    var bx = UInt(block_idx.x) * TILE
+    var by = UInt(block_idx.y) * TILE
+    var b = UInt(block_idx.z)
 
     comptime tile_layout = Layout.row_major(TILE, TILE, 2)
     var shared_tile = LayoutTensor[
@@ -291,7 +291,7 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
     bases: List[List[UInt]],
     config: _GPUExecConfig,
     shared_address_space: AddressSpace,
-    stage_sync_fn: def(),
+    stage_sync_fn: def() thin,
     runtime_twfs: Bool,
     dim_idx: Int,
 ](
@@ -300,8 +300,8 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
     twiddle_factors: LayoutTensor[out_dtype, twf_layout, twf_origin],
     calc_buf: LayoutTensor[out_dtype, out_layout, calc_buf_origin],
 ):
-    var global_i = block_dim.x * block_idx.x + thread_idx.x
-    var block_num = block_dim.y * block_idx.y
+    var global_i = UInt(block_dim.x * block_idx.x + thread_idx.x)
+    var block_num = UInt(block_dim.y * block_idx.y)
 
     comptime total_threads = config.block_threads * config.num_blocks
     comptime x_complex_in = in_layout.shape[config.rank - 1].value()
@@ -550,7 +550,7 @@ def _run_gpu_nd_fft[
             config.num_blocks > 1
         )
 
-        ctx.enqueue_function[block_func_batch, block_func_batch](
+        ctx.enqueue_function[block_func_batch](
             output,
             x,
             twiddle_factors,
@@ -613,7 +613,7 @@ def _run_gpu_nd_fft[
                 from_=from_,
                 scheduled_batches=scheduled_batches,
             ]
-            ctx.enqueue_function[func, func](
+            ctx.enqueue_function[func](
                 output, calc_buf, grid_dim=grid_dim, block_dim=block_dim
             )
         else:
@@ -626,7 +626,7 @@ def _run_gpu_nd_fft[
                 from_=from_,
                 scheduled_batches=scheduled_batches,
             ]
-            ctx.enqueue_function[func, func](
+            ctx.enqueue_function[func](
                 calc_buf, output, grid_dim=grid_dim, block_dim=block_dim
             )
 

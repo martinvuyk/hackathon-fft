@@ -232,38 +232,37 @@ def _run_cpu_nd_fft[
             comptime write_lhs = (total_stages - (s + 1)) % 2 == 0
             comptime x_out_layout = Layout.row_major(Int(base), 2)
 
-            # comptime if run_butterfly and length <= plan.max_stack_seq_len:
-            #     comptime func = _radix_n_fft_kernel_butterfly_comptime[
-            #         ...,
-            #         do_rfft=do_rfft,
-            #         base=base,
-            #         length=length,
-            #         processed=processed,
-            #         inverse=inverse,
-            #         ordered_bases=ordered_bases,
-            #         run_inplace=False,
-            #     ]
+            comptime if run_butterfly and length <= plan.max_stack_seq_len:
+                comptime func = _radix_n_fft_kernel_butterfly_comptime[
+                    ...,
+                    do_rfft=do_rfft,
+                    base=base,
+                    length=length,
+                    processed=processed,
+                    inverse=inverse,
+                    ordered_bases=ordered_bases,
+                    run_inplace=False,
+                ]
 
-            #     comptime for local_i in range(length // base):
-            #         var x_out = LayoutTensor[
-            #             out_dtype, x_out_layout, MutExternalOrigin
-            #         ].stack_allocation()
-            #         comptime if b == 0 and dim_idx == start_dim_idx:
-            #             comptime if write_lhs:
-            #                 func[local_i=local_i](shared_f_lhs, x_in, x_out)
-            #             else:
-            #                 func[local_i=local_i](shared_f_rhs, x_in, x_out)
-            #         else:
-            #             comptime if write_lhs:
-            #                 func[local_i=local_i](
-            #                     shared_f_lhs, shared_f_rhs, x_out
-            #                 )
-            #             else:
-            #                 func[local_i=local_i](
-            #                     shared_f_rhs, shared_f_lhs, x_out
-            #                 )
-            # elif run_butterfly:
-            comptime if run_butterfly:
+                comptime for local_i in range(length // base):
+                    var x_out = LayoutTensor[
+                        out_dtype, x_out_layout, MutExternalOrigin
+                    ].stack_allocation()
+                    comptime if b == 0 and dim_idx == start_dim_idx:
+                        comptime if write_lhs:
+                            func[local_i=local_i](shared_f_lhs, x_in, x_out)
+                        else:
+                            func[local_i=local_i](shared_f_rhs, x_in, x_out)
+                    else:
+                        comptime if write_lhs:
+                            func[local_i=local_i](
+                                shared_f_lhs, shared_f_rhs, x_out
+                            )
+                        else:
+                            func[local_i=local_i](
+                                shared_f_rhs, shared_f_lhs, x_out
+                            )
+            elif run_butterfly:
                 comptime iters = length // base
                 comptime num_blocks = iters // processed
 
@@ -285,11 +284,11 @@ def _run_cpu_nd_fft[
                     ]
 
                     @always_inline
-                    def _run_butterfly[width: Int](local_i: Int) unified {read}:
+                    def _run_butterfly[width: Int](local_i: Int) {read}:
                         var x_out = LayoutTensor[
                             out_dtype, x_out_layout, MutExternalOrigin
                         ].stack_allocation()
-                        var idx = UInt(local_i) + runtime_phase * num_blocks
+                        var idx = UInt(local_i) * processed + runtime_phase
                         comptime if b == 0 and dim_idx == start_dim_idx:
                             comptime if write_lhs:
                                 func(shared_f_lhs, x_in, idx, twfs, x_out)
@@ -341,7 +340,7 @@ def _run_cpu_nd_fft[
             else:
 
                 @always_inline
-                def _run_elem[width: Int](local_i: Int) unified {read}:
+                def _run_elem[width: Int](local_i: Int) {read}:
                     comptime func = _radix_n_fft_kernel_elem_per_thread[
                         ...,
                         do_rfft=do_rfft,
