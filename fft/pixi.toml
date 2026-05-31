@@ -6,8 +6,9 @@ version = "0.1.0"
 
 [tasks]
 tests = "mojo run -D ASSERT=warn tests.mojo"
-bench = "mkdir -p build && mojo build bench.mojo -o build/bench && ./build/bench"
-package = "mkdir -p build && mojo package fft -o build/fft.mojopkg"
+package = "mkdir -p build && mojo precompile fft -o build/fft.mojoc"
+# mkdir -p build && mojo build -O3 bench.mojo -o build/bench -I build/ && ./build/bench
+bench = "mojo run -O3 bench.mojo"
 upgrade = "pixi update && pixi upgrade && pixi install"
 profile-nsys = """mojo build --debug-level=full -o build/profile profile.mojo && \
     nsys profile \
@@ -47,5 +48,5 @@ profile-ncu = """mojo build --debug-level=full -o build/profile profile.mojo && 
 """
 
 [dependencies]
-mojo = ">=1.0.0b2.dev2026052006,<2"
-modular = ">=26.4.0.dev2026052006,<27"
+mojo = ">=1.0.0b2.dev2026053106,<2"
+modular = ">=26.4.0.dev2026053106,<27"

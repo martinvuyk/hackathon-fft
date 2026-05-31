@@ -392,7 +392,7 @@ def test_fft_1d_cpu(debug: Bool = False) raises:
     _test[dtype, False, "cpu"](debug)
 
 
-def test_fft_1d_gpu[debug: Bool = False]() raises:
+def test_fft_1d_gpu(debug: Bool = False) raises:
     comptime dtype = DType.float64
     _test[dtype, False, "gpu", gpu_test=_GPUTest.BLOCK](debug)
     # _test[dtype, False, "gpu", gpu_test = _GPUTest.WARP](debug)
@@ -602,7 +602,7 @@ def _test_2d_gpu[inverse: Bool, gpu_test: _GPUTest](debug: Bool) raises:
 
 def test_2d_gpu(debug: Bool = False) raises:
     _test_2d_gpu[False, _GPUTest.BLOCK](debug)
-    _test_2d_gpu[False, _GPUTest.WARP](debug)
+    # _test_2d_gpu[False, _GPUTest.WARP](debug)
     # _test_2d_gpu[False, _GPUTest.DEVICE_WIDE](debug)
     # _test_2d_gpu[False, _GPUTest.CLUSTER](debug)
 
@@ -1069,37 +1069,11 @@ def test_3d_gpu(debug: Bool = False) raises:
 
 
 def main() raises:
-    test_fft_1d_cpu()
-    # test_fft_1d_gpu()
+    # test_fft_1d_cpu()
+    test_fft_1d_gpu(debug=True)
     # test_ifft_1d_cpu()
     # test_ifft_1d_gpu()
-    test_2d_cpu()
-    # test_2d_gpu()
-    test_3d_cpu()
-    # test_3d_gpu()
-
-
-# def run_fft():
-#     from fft.fft._ndim_fft_cpu import _run_cpu_nd_fft, _CPUPlan
-
-#     comptime SIZE = 2**14
-#     comptime in_layout = Layout.row_major(1, SIZE, 2)
-#     comptime in_size = in_layout.size()
-#     comptime out_layout = Layout.row_major(1, SIZE, 2)
-#     comptime out_size = out_layout.size()
-#     comptime in_dtype = DType.float32
-#     comptime out_dtype = DType.float32
-
-#     var out_data = List[Scalar[in_dtype]](length=out_size, fill=0)
-#     var x_data = List[Scalar[out_dtype]](length=in_size, fill=0)
-#     var output = LayoutTensor[mut=True, out_dtype, out_layout](Span(out_data))
-#     var x = LayoutTensor[mut=False, in_dtype, in_layout](Span(x_data))
-#     var plan = _CPUPlan[out_dtype, out_layout, False, [[2]]]()
-#     _run_cpu_nd_fft(output, x, plan=plan)
-
-
-# def main() raises:
-#     from std.compile import compile_info
-
-#     with open("dump.ll", "w") as f:
-#         f.write(compile_info[run_fft, emission_kind="llvm-opt"]())
+    # test_2d_cpu()
+    test_2d_gpu(debug=True)
+    # test_3d_cpu()
+    test_3d_gpu(debug=True)
