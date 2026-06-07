@@ -8,7 +8,9 @@ from std.benchmark import (
     ThroughputMeasure,
     BenchMetric,
 )
-from layout import Layout, LayoutTensor, IntTuple
+from layout import RowMajorLayout, TileTensor, IntTuple
+from layout.int_tuple import _IntTupleToCoordLike
+
 from std.gpu.host import DeviceContext
 from std.random import seed, randn, random_ui64
 from std.sys.info import size_of
@@ -22,10 +24,13 @@ def bench_gpu_radix_n_rfft[
 ](mut b: Bencher) raises:
     comptime in_dtype = dtype
     comptime out_dtype = dtype
-    comptime in_layout = Layout.row_major(IntTuple(shape, 2).flatten())
-    comptime out_layout = Layout.row_major(IntTuple(shape, 2).flatten())
-    comptime in_size = in_layout.size()
-    comptime out_size = out_layout.size()
+    comptime shape_flat = IntTuple(shape, 2).flatten()
+    comptime in_layout = RowMajorLayout[
+        *_IntTupleToCoordLike[DType.int64, shape_flat]
+    ]()
+    comptime out_layout = in_layout
+    comptime in_size = in_layout.static_cosize
+    comptime out_size = out_layout.static_cosize
 
     with DeviceContext() as ctx:
         var out = ctx.enqueue_create_buffer[out_dtype](out_size)
@@ -34,14 +39,14 @@ def bench_gpu_radix_n_rfft[
         with x.map_to_host() as x_host:
             randn(x_host.unsafe_ptr(), in_size)
 
-        var out_tensor = LayoutTensor[mut=True, out_dtype, out_layout](
-            out.unsafe_ptr()
-        )
-        var x_tensor = LayoutTensor[mut=False, in_dtype, in_layout](
-            x.unsafe_ptr()
-        )
+        var out_tensor = TileTensor(out, layout=out_layout)
+        var x_tensor = TileTensor(x, layout=in_layout)
         var plan = plan_fft[
-            in_dtype, out_dtype, in_layout, out_layout, runtime_twfs=True
+            in_dtype,
+            out_dtype,
+            type_of(in_layout),
+            type_of(out_layout),
+            runtime_twfs=True,
         ](ctx=ctx)
         ctx.synchronize()
 
@@ -66,23 +71,24 @@ def bench_cpu_radix_n_rfft[
 ](mut b: Bencher) raises:
     comptime in_dtype = dtype
     comptime out_dtype = dtype
-    comptime in_layout = Layout.row_major(IntTuple(shape, 2).flatten())
-    comptime out_layout = Layout.row_major(IntTuple(shape, 2).flatten())
-    comptime in_size = in_layout.size()
-    comptime out_size = out_layout.size()
+    comptime shape_flat = IntTuple(shape, 2).flatten()
+    comptime in_layout = RowMajorLayout[
+        *_IntTupleToCoordLike[DType.int64, shape_flat]
+    ]()
+    comptime out_layout = in_layout
+    comptime in_size = in_layout.static_cosize
+    comptime out_size = out_layout.static_cosize
 
     var out = List[Scalar[out_dtype]](capacity=out_size)
     var x = List[Scalar[in_dtype]](capacity=in_size)
     randn(x.unsafe_ptr(), in_size)
 
-    var out_tensor = LayoutTensor[mut=True, out_dtype, out_layout](
-        out.unsafe_ptr()
-    )
-    var x_tensor = LayoutTensor[mut=False, in_dtype, in_layout](x.unsafe_ptr())
+    var out_tensor = TileTensor(ptr=out.unsafe_ptr(), layout=out_layout)
+    var x_tensor = TileTensor(ptr=x.unsafe_ptr(), layout=in_layout)
 
-    var plan = plan_fft[in_dtype, out_dtype, in_layout, out_layout](
-        cpu_workers=cpu_workers
-    )
+    var plan = plan_fft[
+        in_dtype, out_dtype, type_of(in_layout), type_of(out_layout)
+    ](cpu_workers=cpu_workers)
 
     @always_inline
     @parameter
@@ -99,10 +105,10 @@ def bench_cpu_radix_n_rfft[
 def main() raises:
     seed()
     var m = Bench(
-        BenchConfig(num_repetitions=1, num_warmup_iters=400, max_iters=400)
+        # BenchConfig(num_repetitions=1, num_warmup_iters=400, max_iters=400)
         # BenchConfig(num_repetitions=1)
         # BenchConfig(num_repetitions=1, num_warmup_iters=20, max_iters=20)
-        # BenchConfig(num_repetitions=1, num_warmup_iters=2, max_iters=2)
+        BenchConfig(num_repetitions=1, num_warmup_iters=2, max_iters=2)
     )
     comptime shapes: List[IntTuple] = [
         # {1_000_000, 93},
@@ -126,14 +132,14 @@ def main() raises:
             BenchId(String("bench_gpu_radix_n_rfft[", shape, "]"))
         )
 
-    # comptime for shape in shapes:
-    #     m.bench_function[
-    #         bench_cpu_radix_n_rfft[DType.float32, shape, cpu_workers={1}]
-    #     ](BenchId(String("bench_cpu_radix_n_rfft[", shape, ", workers=1]")))
+    comptime for shape in shapes:
+        m.bench_function[
+            bench_cpu_radix_n_rfft[DType.float32, shape, cpu_workers={1}]
+        ](BenchId(String("bench_cpu_radix_n_rfft[", shape, ", workers=1]")))
 
-    # comptime for shape in shapes:
-    #     m.bench_function[bench_cpu_radix_n_rfft[DType.float32, shape]](
-    #         BenchId(String("bench_cpu_radix_n_rfft[", shape, ", workers=n]"))
-    #     )
+    comptime for shape in shapes:
+        m.bench_function[bench_cpu_radix_n_rfft[DType.float32, shape]](
+            BenchId(String("bench_cpu_radix_n_rfft[", shape, ", workers=n]"))
+        )
 
     print(m)

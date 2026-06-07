@@ -1,6 +1,6 @@
 from std.builtin.globals import global_constant
 from std.complex import ComplexScalar
-from layout import Layout, LayoutTensor
+from layout import TileTensor
 
 from ._utils import (
     _get_dtype,
@@ -38,8 +38,8 @@ def _get_x[
     ordered_bases: List[UInt],
     run_inplace: Bool = False,
 ](
-    output: LayoutTensor[out_dtype, ...],
-    x: LayoutTensor,
+    output: TileTensor[out_dtype, ...],
+    x: TileTensor,
     n: Scalar,
     local_i: UInt,
 ) -> ComplexScalar[out_dtype]:
@@ -49,9 +49,9 @@ def _get_x[
         var src_idx = Int(n + step)
 
         comptime if processed == 1 and do_rfft:
-            return {x.load[1](src_idx, 0).cast[out_dtype](), 0}
+            return {x.raw_load[1](src_idx).cast[out_dtype](), 0}
         else:
-            return to_Co(x.load[2](src_idx, 0).cast[out_dtype]())
+            return to_Co(x.raw_load[2](src_idx * 2).cast[out_dtype]())
     elif processed == 1:
         # Reorder input x(local_i) items to match F(current_item) layout.
         var idx = Sc(local_i) * Sc(base) + Sc(i)
@@ -64,29 +64,17 @@ def _get_x[
             copy_from = _mixed_radix_digit_reverse[length, ordered_bases](idx)
 
         comptime if do_rfft:
-            return {x.load[1](Int(copy_from), 0).cast[out_dtype](), 0}
+            return {x.raw_load[1](Int(copy_from)).cast[out_dtype](), 0}
         else:
-            return to_Co(x.load[2](Int(copy_from), 0).cast[out_dtype]())
+            return to_Co(x.raw_load[2](Int(copy_from) * 2).cast[out_dtype]())
     else:
         comptime step = Sc(i * processed)
-        return to_Co(output.load[2](Int(n + step), 0))
+        return to_Co(output.raw_load[2](Int(n + step) * 2))
 
 
 @always_inline
 def _radix_n_fft_kernel_butterfly[
     out_dtype: DType,
-    out_layout: Layout,
-    out_origin: MutOrigin,
-    out_address_space: AddressSpace,
-    in_dtype: DType,
-    in_layout: Layout,
-    in_origin: ImmutOrigin,
-    in_address_space: AddressSpace,
-    twf_layout: Layout,
-    twf_origin: ImmutOrigin,
-    twf_address_space: AddressSpace,
-    x_out_layout: Layout,
-    x_out_address_space: AddressSpace,
     *,
     length: UInt,
     do_rfft: Bool,
@@ -99,23 +87,11 @@ def _radix_n_fft_kernel_butterfly[
     run_inplace: Bool,
     phase: Optional[UInt] = None,
 ](
-    output: LayoutTensor[
-        out_dtype, out_layout, out_origin, address_space=out_address_space, ...
-    ],
-    x: LayoutTensor[
-        in_dtype, in_layout, in_origin, address_space=in_address_space, ...
-    ],
+    output: TileTensor[mut=True, out_dtype, _, _, ...],
+    x: TileTensor[_, _, _, ...],
     local_i: UInt,
-    twiddle_factors: LayoutTensor[
-        out_dtype, twf_layout, twf_origin, address_space=twf_address_space, ...
-    ],
-    x_out: LayoutTensor[
-        mut=True,
-        out_dtype,
-        x_out_layout,
-        address_space=x_out_address_space,
-        ...,
-    ],
+    twiddle_factors: TileTensor[mut=False, out_dtype, _, _, ...],
+    x_out: TileTensor[mut=True, out_dtype, _, _, ...],
 ):
     """A generic Butterfly algorithm. It has most of the generalizable radix
     optimizations. Can run inplace by reordering the input (Cooley Tukey) or
@@ -169,14 +145,14 @@ def _radix_n_fft_kernel_butterfly[
                 comptime if j == 1:
                     acc = x_0
                 else:
-                    acc = to_Co(x_out.load[CoV.size](Int(i), 0))
+                    acc = to_Co(x_out.raw_load[CoV.size](Int(i) * 2))
 
                 comptime if do_rfft:
                     var res = _unit_phasor_fma[base_phasor, j == 1](x_j.re, acc)
-                    x_out.store(Int(i), 0, to_CoV(res))
+                    x_out.raw_store(Int(i) * 2, to_CoV(res))
                 else:
                     var res = _unit_phasor_fma[base_phasor](x_j, acc)
-                    x_out.store(Int(i), 0, to_CoV(res))
+                    x_out.raw_store(Int(i) * 2, to_CoV(res))
             continue
 
         comptime i0_j_twf_comptime = _get_twiddle_factor[
@@ -198,7 +174,9 @@ def _radix_n_fft_kernel_butterfly[
                     out_dtype, inverse=inverse, N=Sc(length)
                 ](twf_index)
             else:
-                i0_j_twf = to_Co(twiddle_factors.load[2](Int(twf_index), 0))
+                i0_j_twf = to_Co(
+                    twiddle_factors.raw_load[2](Int(twf_index) * 2)
+                )
 
         var x_j_i0: Co
         comptime if phase:
@@ -216,8 +194,10 @@ def _radix_n_fft_kernel_butterfly[
                     acc_top = x_0
                     acc_bot = x_0
                 else:
-                    acc_top = to_Co(x_out.load[CoV.size](Int(i), 0))
-                    acc_bot = to_Co(x_out.load[CoV.size](Int(complement), 0))
+                    acc_top = to_Co(x_out.raw_load[CoV.size](Int(i) * 2))
+                    acc_bot = to_Co(
+                        x_out.raw_load[CoV.size](Int(complement) * 2)
+                    )
 
                 var term: Co
                 comptime if phase:
@@ -227,11 +207,11 @@ def _radix_n_fft_kernel_butterfly[
                     term = _unit_phasor_mul[twf](x_j)
                 else:
                     term = _unit_phasor_mul[_base_phasor[i, j]()](x_j_i0)
-                x_out.store(Int(i), 0, to_CoV(acc_top + term))
+                x_out.raw_store(Int(i) * 2, to_CoV(acc_top + term))
                 comptime if j % 2 == 0:
-                    x_out.store(Int(complement), 0, to_CoV(acc_bot + term))
+                    x_out.raw_store(Int(complement) * 2, to_CoV(acc_bot + term))
                 else:
-                    x_out.store(Int(complement), 0, to_CoV(acc_bot - term))
+                    x_out.raw_store(Int(complement) * 2, to_CoV(acc_bot - term))
         else:
             comptime for i in range(base):
                 var acc: Co
@@ -239,7 +219,7 @@ def _radix_n_fft_kernel_butterfly[
                 comptime if j == 1:
                     acc = x_0
                 else:
-                    acc = to_Co(x_out.load[CoV.size](Int(i), 0))
+                    acc = to_Co(x_out.raw_load[CoV.size](Int(i) * 2))
 
                 var res: Co
                 comptime if phase:
@@ -249,7 +229,7 @@ def _radix_n_fft_kernel_butterfly[
                     res = _unit_phasor_fma[twf](x_j, acc)
                 else:
                     res = _unit_phasor_fma[_base_phasor[i, j]()](x_j_i0, acc)
-                x_out.store(Int(i), 0, to_CoV(res))
+                x_out.raw_store(Int(i) * 2, to_CoV(res))
 
     comptime base_is_pow2 = Bool(UInt64(base).is_power_of_two())
 
@@ -260,29 +240,20 @@ def _radix_n_fft_kernel_butterfly[
             x_out.ptr.store(x_out.ptr.load[Int(base) * CoV.size]() * `1 / N`)
         else:
             comptime for i in range(base):
-                var res = x_out.load[CoV.size](Int(i), 0) * `1 / N`
-                x_out.store(Int(i), 0, res)
+                var res = x_out.raw_load[CoV.size](Int(i) * 2) * `1 / N`
+                x_out.raw_store(Int(i) * 2, res)
 
     comptime if run_inplace and base_is_pow2 and processed == 1:
-        output.store(Int(n), 0, x_out.load[Int(base) * 2](0, 0))
+        output.raw_store(Int(n) * 2, x_out.raw_load[Int(base) * 2](0))
     else:
         comptime for i in range(base):
             comptime step = Sc(i) * offset
-            output.store(Int(n + step), 0, x_out.load[CoV.size](Int(i), 0))
+            output.raw_store(Int(n + step) * 2, x_out.raw_load[CoV.size](Int(i) * 2))
 
 
 @always_inline
 def _radix_n_fft_kernel_butterfly_comptime[
     out_dtype: DType,
-    out_layout: Layout,
-    out_origin: MutOrigin,
-    out_address_space: AddressSpace,
-    in_dtype: DType,
-    in_layout: Layout,
-    in_origin: ImmutOrigin,
-    in_address_space: AddressSpace,
-    x_out_layout: Layout,
-    x_out_address_space: AddressSpace,
     *,
     length: UInt,
     do_rfft: Bool,
@@ -293,19 +264,9 @@ def _radix_n_fft_kernel_butterfly_comptime[
     run_inplace: Bool,
     local_i: UInt,
 ](
-    output: LayoutTensor[
-        out_dtype, out_layout, out_origin, address_space=out_address_space, ...
-    ],
-    x: LayoutTensor[
-        in_dtype, in_layout, in_origin, address_space=in_address_space, ...
-    ],
-    x_out: LayoutTensor[
-        mut=True,
-        out_dtype,
-        x_out_layout,
-        address_space=x_out_address_space,
-        ...,
-    ],
+    output: TileTensor[mut=True, out_dtype, _, _, ...],
+    x: TileTensor[_, _, _, ...],
+    x_out: TileTensor[mut=True, out_dtype, _, _, ...],
 ):
     """A generic Butterfly algorithm. It has most of the generalizable radix
     optimizations. Can run inplace by reordering the input (Cooley Tukey) or
@@ -367,15 +328,17 @@ def _radix_n_fft_kernel_butterfly_comptime[
                     acc_top = x_0
                     acc_bot = x_0
                 else:
-                    acc_top = to_Co(x_out.load[CoV.size](Int(i), 0))
-                    acc_bot = to_Co(x_out.load[CoV.size](Int(complement), 0))
+                    acc_top = to_Co(x_out.raw_load[CoV.size](Int(i) * 2))
+                    acc_bot = to_Co(
+                        x_out.raw_load[CoV.size](Int(complement) * 2)
+                    )
 
                 var term = _unit_phasor_mul[twf](x_j)
-                x_out.store(Int(i), 0, to_CoV(acc_top + term))
+                x_out.raw_store(Int(i) * 2, to_CoV(acc_top + term))
                 comptime if j % 2 == 0:
-                    x_out.store(Int(complement), 0, to_CoV(acc_bot + term))
+                    x_out.raw_store(Int(complement) * 2, to_CoV(acc_bot + term))
                 else:
-                    x_out.store(Int(complement), 0, to_CoV(acc_bot - term))
+                    x_out.raw_store(Int(complement) * 2, to_CoV(acc_bot - term))
         else:
             comptime for i in range(base):
                 comptime twf = _unit_phasor_mul[_base_phasor[i, j]()](i0_j_twf)
@@ -385,14 +348,14 @@ def _radix_n_fft_kernel_butterfly_comptime[
                 comptime if j == 1:
                     acc = x_0
                 else:
-                    acc = to_Co(x_out.load[CoV.size](Int(i), 0))
+                    acc = to_Co(x_out.raw_load[CoV.size](Int(i) * 2))
 
                 comptime if processed == 1 and do_rfft:
                     var res = _unit_phasor_fma[twf, j == 1](x_j.re, acc)
-                    x_out.store(Int(i), 0, to_CoV(res))
+                    x_out.raw_store(Int(i) * 2, to_CoV(res))
                 else:
                     var res = _unit_phasor_fma[twf](x_j, acc)
-                    x_out.store(Int(i), 0, to_CoV(res))
+                    x_out.raw_store(Int(i) * 2, to_CoV(res))
 
     comptime base_is_pow2 = Bool(UInt64(base).is_power_of_two())
 
@@ -403,33 +366,23 @@ def _radix_n_fft_kernel_butterfly_comptime[
             x_out.ptr.store(x_out.ptr.load[Int(base) * CoV.size]() * `1 / N`)
         else:
             comptime for i in range(base):
-                var res = x_out.load[CoV.size](Int(i), 0) * `1 / N`
-                x_out.store(Int(i), 0, res)
+                var res = x_out.raw_load[CoV.size](Int(i) * 2) * `1 / N`
+                x_out.raw_store(Int(i) * 2, res)
 
     comptime if run_inplace and base_is_pow2 and processed == 1:
-        output.store(Int(n), 0, x_out.load[Int(base) * 2](0, 0))
+        output.raw_store(Int(n) * 2, x_out.raw_load[Int(base) * 2](0))
     else:
         comptime out_n = n if run_inplace else (
             (Sc(local_i) // offset) * next_offset + (Sc(local_i) % offset)
         )
         comptime for i in range(base):
             comptime step = Sc(i) * offset
-            output.store(Int(out_n + step), 0, x_out.load[CoV.size](Int(i), 0))
+            output.raw_store(Int(out_n + step) * 2, x_out.raw_load[CoV.size](Int(i) * 2))
 
 
 @always_inline
 def _radix_n_fft_kernel_elem_per_thread[
     out_dtype: DType,
-    out_layout: Layout,
-    out_origin: MutOrigin,
-    out_address_space: AddressSpace,
-    in_dtype: DType,
-    in_layout: Layout,
-    in_origin: ImmutOrigin,
-    in_address_space: AddressSpace,
-    twf_layout: Layout,
-    twf_origin: ImmutOrigin,
-    twf_address_space: AddressSpace,
     *,
     length: UInt,
     do_rfft: Bool,
@@ -440,16 +393,10 @@ def _radix_n_fft_kernel_elem_per_thread[
     inline_twfs: Bool,
     runtime_twfs: Bool,
 ](
-    output: LayoutTensor[
-        out_dtype, out_layout, out_origin, address_space=out_address_space, ...
-    ],
-    x: LayoutTensor[
-        in_dtype, in_layout, in_origin, address_space=in_address_space, ...
-    ],
+    output: TileTensor[mut=True, out_dtype, _, _, ...],
+    x: TileTensor[_, _, _, ...],
     local_i: UInt,
-    twiddle_factors: LayoutTensor[
-        out_dtype, twf_layout, twf_origin, address_space=twf_address_space, ...
-    ],
+    twiddle_factors: TileTensor[mut=False, out_dtype, _, _, ...],
 ):
     """A generic Stockham algorithm. It has most of the generalizable radix
     optimizations. Can't run inplace, but has better memory access patterns."""
@@ -501,7 +448,7 @@ def _radix_n_fft_kernel_elem_per_thread[
                 twf_index
             )
         else:
-            twf = to_Co(twiddle_factors.load[2](Int(twf_index), 0))
+            twf = to_Co(twiddle_factors.raw_load[2](Int(twf_index) * 2))
 
         x_out = twf.fma(x_j, x_out)
 
@@ -509,20 +456,12 @@ def _radix_n_fft_kernel_elem_per_thread[
         comptime `1 / N` = (1.0 / Float64(length)).cast[out_dtype]()
         x_out *= `1 / N`
 
-    output.store(Int(local_i), 0, to_CoV(x_out))
+    output.raw_store(Int(local_i) * 2, to_CoV(x_out))
 
 
 @always_inline
 def _radix_n_fft_kernel_elem_per_thread_comptime[
     out_dtype: DType,
-    out_layout: Layout,
-    out_origin: MutOrigin,
-    out_address_space: AddressSpace,
-    in_dtype: DType,
-    in_layout: Layout,
-    in_origin: ImmutOrigin,
-    in_address_space: AddressSpace,
-    local_i: UInt,
     *,
     length: UInt,
     do_rfft: Bool,
@@ -530,13 +469,10 @@ def _radix_n_fft_kernel_elem_per_thread_comptime[
     processed: UInt,
     inverse: Bool,
     ordered_bases: List[UInt],
+    local_i: UInt,
 ](
-    output: LayoutTensor[
-        out_dtype, out_layout, out_origin, address_space=out_address_space, ...
-    ],
-    x: LayoutTensor[
-        in_dtype, in_layout, in_origin, address_space=in_address_space, ...
-    ],
+    output: TileTensor[mut=True, out_dtype, _, _, ...],
+    x: TileTensor[_, _, _, ...],
 ):
     """A generic Stockham algorithm. It has most of the generalizable radix
     optimizations. Can't run inplace, but has better memory access patterns."""
@@ -586,4 +522,4 @@ def _radix_n_fft_kernel_elem_per_thread_comptime[
         comptime `1 / N` = (1.0 / Float64(length)).cast[out_dtype]()
         x_out *= `1 / N`
 
-    output.store(Int(local_i), 0, to_CoV(x_out))
+    output.raw_store(Int(local_i) * 2, to_CoV(x_out))

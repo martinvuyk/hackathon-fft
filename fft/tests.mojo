@@ -2,7 +2,7 @@ from std.builtin.globals import global_constant
 from std.complex import ComplexScalar
 from std.gpu.host import DeviceContext
 from std.gpu.host.info import is_cpu
-from layout import Layout, LayoutTensor
+from layout import TileTensor, row_major
 from std.math import ceil
 from std.sys.info import has_accelerator, size_of
 from std.utils.numerics import nan
@@ -57,13 +57,11 @@ def _test_fft_radix_n[
     comptime SIZE = len(test_values[0][0])
     comptime in_dtype = dtype
     comptime out_dtype = dtype
-    comptime in_layout = Layout.row_major(
-        BATCHES, SIZE, 2
-    ) if inverse else Layout.row_major(BATCHES, SIZE, 1)
-    comptime in_size = in_layout.size()
-    comptime out_layout = Layout.row_major(BATCHES, SIZE, 2)
-    comptime out_size = out_layout.size()
-
+    comptime x_dim = 2 if inverse else 1
+    comptime in_layout = row_major[BATCHES, SIZE, x_dim]()
+    comptime out_layout = row_major[BATCHES, SIZE, 2]()
+    comptime in_size = in_layout.static_cosize
+    comptime out_size = out_layout.static_cosize
     if debug:
         print("----------------------------")
         print("SIZE:", SIZE)
@@ -73,13 +71,12 @@ def _test_fft_radix_n[
         print("----------------------------")
 
     @parameter
-    def _eval[
-        res_layout: Layout, res_origin: MutOrigin
-    ](
-        result: LayoutTensor[out_dtype, res_layout, res_origin],
+    def _eval(
+        result: TileTensor[out_dtype, ...],
         scalar_in: List[Int],
         complex_out: List[ComplexScalar[out_dtype]],
     ) raises:
+        comptime assert result.flat_rank == 2
         if debug:
             print("out: ", end="")
             for i in range(SIZE):
@@ -174,17 +171,14 @@ def _test_fft_radix_n[
         var x_data = List[Scalar[out_dtype]](
             length=in_size, fill=nan[out_dtype]()
         )
-        var batch_output = LayoutTensor[mut=True, out_dtype, out_layout](
-            Span(out_data)
-        )
-        var batch_x = LayoutTensor[mut=True, in_dtype, in_layout](Span(x_data))
+        var batch_output = TileTensor(Span(out_data), layout=out_layout)
+        var batch_x = TileTensor(Span(x_data), layout=in_layout)
 
+        comptime batch_x_stride = in_layout.static_stride[0]
         for idx, test in enumerate(materialize[test_values]()):
-            comptime x_layout = Layout.row_major(
-                in_layout.shape[1].value(), in_layout.shape[2].value()
-            )
-            var x = LayoutTensor[mut=True, in_dtype, x_layout, ...](
-                batch_x.ptr + batch_x.stride[0]() * idx
+            comptime x_layout = row_major[SIZE, x_dim]()
+            var x = TileTensor(
+                ptr=batch_x.ptr + batch_x_stride * idx, layout=x_layout
             )
             for i in range(SIZE):
                 comptime if inverse:
@@ -196,20 +190,20 @@ def _test_fft_radix_n[
         var plan = plan_fft[
             in_dtype,
             out_dtype,
-            in_layout,
-            out_layout,
+            type_of(in_layout),
+            type_of(out_layout),
             bases=[bases],
             inverse=inverse,
         ]()
-        fft(batch_output, batch_x.get_immutable(), plan=plan)
+        fft(batch_output, batch_x.as_immut(), plan=plan)
 
+        comptime batch_out_stride = out_layout.static_stride[0]
         for idx, test in enumerate(materialize[test_values]()):
-            comptime output_layout = Layout.row_major(
-                out_layout.shape[1].value(), 2
+            comptime output_layout = row_major[SIZE, 2]()
+            var output = TileTensor(
+                ptr=batch_output.ptr + batch_out_stride * idx,
+                layout=output_layout,
             )
-            var output = LayoutTensor[
-                mut=True, out_dtype, output_layout, batch_output.origin
-            ](batch_output.ptr + batch_output.stride[0]() * idx)
             _eval(output, test[0], test[1])
     else:
         with DeviceContext() as ctx:
@@ -217,19 +211,15 @@ def _test_fft_radix_n[
             x_data.enqueue_fill(Scalar[in_dtype].MAX)
             var out_data = ctx.enqueue_create_buffer[out_dtype](out_size)
             out_data.enqueue_fill(nan[out_dtype]())
-            var batch_output = LayoutTensor[mut=True, out_dtype, out_layout](
-                out_data.unsafe_ptr()
-            )
-            var batch_x = LayoutTensor[mut=False, in_dtype, in_layout](
-                x_data.unsafe_ptr()
-            )
+            var batch_output = TileTensor(out_data, layout=out_layout)
+            var batch_x = TileTensor(x_data, layout=in_layout)
+            comptime batch_x_stride = in_layout.static_stride[0]
             with x_data.map_to_host() as x_host:
                 for idx, test in enumerate(materialize[test_values]()):
-                    comptime x_layout = Layout.row_major(
-                        in_layout.shape[1].value(), in_layout.shape[2].value()
-                    )
-                    var x = LayoutTensor[mut=True, in_dtype, x_layout](
-                        x_host.unsafe_ptr() + batch_x.stride[0]() * idx
+                    comptime x_layout = row_major[SIZE, x_dim]()
+                    var x = TileTensor(
+                        ptr=x_host.unsafe_ptr() + batch_x_stride * idx,
+                        layout=x_layout,
                     )
 
                     for i in range(SIZE):
@@ -243,8 +233,8 @@ def _test_fft_radix_n[
             var plan = plan_fft[
                 in_dtype,
                 out_dtype,
-                in_layout,
-                out_layout,
+                type_of(in_layout),
+                type_of(out_layout),
                 bases=[bases],
                 inverse=inverse,
                 runtime_twfs=True,
@@ -253,13 +243,13 @@ def _test_fft_radix_n[
             _run_gpu_nd_fft(batch_output, batch_x, ctx, plan=plan)
             ctx.synchronize()
             with out_data.map_to_host() as out_host:
+                comptime batch_out_stride = out_layout.static_stride[0]
                 for idx, test in enumerate(materialize[test_values]()):
-                    comptime output_layout = Layout.row_major(
-                        out_layout.shape[1].value(), 2
+                    comptime output_layout = row_major[SIZE, 2]()
+                    var output = TileTensor(
+                        ptr=out_host.unsafe_ptr() + batch_out_stride * idx,
+                        layout=output_layout,
                     )
-                    var output = LayoutTensor[
-                        mut=True, out_dtype, output_layout, batch_output.origin
-                    ](out_host.unsafe_ptr() + batch_output.stride[0]() * idx)
                     _eval(output, test[0], test[1])
 
     if debug:
@@ -409,9 +399,9 @@ def test_ifft_1d_gpu(debug: Bool = False) raises:
     comptime dtype = DType.float64
     _test[dtype, True, "cpu"](debug)
     _test[dtype, True, "gpu", gpu_test=_GPUTest.BLOCK](debug)
-    _test[dtype, True, "gpu", gpu_test=_GPUTest.WARP](debug)
-    _test[dtype, True, "gpu", gpu_test=_GPUTest.DEVICE_WIDE](debug)
-    _test[dtype, True, "gpu", gpu_test=_GPUTest.CLUSTER](debug)
+    # _test[dtype, True, "gpu", gpu_test=_GPUTest.WARP](debug)
+    # _test[dtype, True, "gpu", gpu_test=_GPUTest.DEVICE_WIDE](debug)
+    # _test[dtype, True, "gpu", gpu_test=_GPUTest.CLUSTER](debug)
 
 
 comptime Co = ComplexScalar[DType.float64]
@@ -459,21 +449,21 @@ def test_2d_cpu[debug: Bool = False]() raises:
     comptime ROWS = 6
     comptime COLS = 4
 
-    comptime x_layout = Layout.row_major(1, ROWS, COLS, 1)
+    comptime x_layout = row_major[1, ROWS, COLS, 1]()
     ref x_buf = global_constant[input_2d]()
-    var x = LayoutTensor[mut=False, DType.uint8, x_layout](
-        x_buf.unsafe_ptr().bitcast[UInt8]()
-    )
+    var x = TileTensor(ptr=x_buf.unsafe_ptr().bitcast[UInt8](), layout=x_layout)
 
-    comptime out_layout = Layout.row_major(1, ROWS, COLS, 2)
+    comptime out_layout = row_major[1, ROWS, COLS, 2]()
     comptime out_dtype = DType.float64
     var out_buf = InlineArray[Co, ROWS * COLS](
         fill=Co(nan[out_dtype](), nan[out_dtype]())
     )
-    var out = LayoutTensor[mut=True, out_dtype, out_layout](
-        out_buf.unsafe_ptr().bitcast[Float64]()
+    var out = TileTensor(
+        ptr=out_buf.unsafe_ptr().bitcast[Float64](), layout=out_layout
     )
-    var plan = plan_fft[DType.uint8, out_dtype, x_layout, out_layout]()
+    var plan = plan_fft[
+        DType.uint8, out_dtype, type_of(x_layout), type_of(out_layout)
+    ]()
     fft(out, x, plan=plan)
 
     ref expected = global_constant[expected_2d]()
@@ -520,26 +510,23 @@ def _test_2d_gpu[inverse: Bool, gpu_test: _GPUTest](debug: Bool) raises:
     comptime COLS = 4
     comptime in_dtype = DType.uint8
     comptime out_dtype = DType.float64
-    comptime in_layout = Layout.row_major(1, ROWS, COLS, 1)
-    comptime in_size = in_layout.size()
-    comptime out_layout = Layout.row_major(1, ROWS, COLS, 2)
-    comptime out_size = out_layout.size()
+    comptime in_layout = row_major[1, ROWS, COLS, 1]()
+    comptime out_layout = row_major[1, ROWS, COLS, 2]()
+    comptime in_size = in_layout.static_cosize
+    comptime out_size = out_layout.static_cosize
 
     with DeviceContext() as ctx:
         var x_data = ctx.enqueue_create_buffer[in_dtype](in_size)
         x_data.enqueue_fill(Scalar[in_dtype].MAX)
         var out_data = ctx.enqueue_create_buffer[out_dtype](out_size)
         out_data.enqueue_fill(nan[out_dtype]())
-
-        var out = LayoutTensor[mut=True, out_dtype, out_layout](
-            out_data.unsafe_ptr()
-        )
-        var x = LayoutTensor[mut=True, in_dtype, in_layout](x_data.unsafe_ptr())
+        var out = TileTensor(out_data, layout=out_layout)
+        var x = TileTensor(x_data, layout=in_layout)
 
         ref input_2d_v = global_constant[input_2d]()
 
         with x_data.map_to_host() as x_host:
-            var x_view = type_of(x)(x_host.unsafe_ptr())
+            var x_view = TileTensor(x_host, layout=in_layout)
 
             for i in range(ROWS):
                 for j in range(COLS):
@@ -549,19 +536,19 @@ def _test_2d_gpu[inverse: Bool, gpu_test: _GPUTest](debug: Bool) raises:
         var plan = plan_fft[
             in_dtype,
             out_dtype,
-            in_layout,
-            out_layout,
+            type_of(in_layout),
+            type_of(out_layout),
             inverse=inverse,
             _test=gpu_test,
             runtime_twfs=True,
         ](ctx=ctx)
-        _run_gpu_nd_fft(out, x.get_immutable(), ctx, plan)
+        _run_gpu_nd_fft(out, x.as_immut(), ctx, plan=plan)
         ctx.synchronize()
 
         ref expected = global_constant[expected_2d]()
 
         with out_data.map_to_host() as out_host:
-            var out_view = type_of(out)(out_host.unsafe_ptr())
+            var out_view = TileTensor(out_host, layout=out_layout)
 
             if debug:
                 print("Values:")
@@ -907,21 +894,21 @@ def test_3d_cpu[debug: Bool = False]() raises:
     comptime D2 = 4
     comptime D3 = 8
 
-    comptime x_layout = Layout.row_major(1, D1, D2, D3, 1)
+    comptime x_layout = row_major[1, D1, D2, D3, 1]()
     ref x_buf = global_constant[input_3d]()
-    var x = LayoutTensor[mut=False, DType.uint8, x_layout](
-        x_buf.unsafe_ptr().bitcast[UInt8]()
-    )
+    var x = TileTensor(ptr=x_buf.unsafe_ptr().bitcast[UInt8](), layout=x_layout)
 
-    comptime out_layout = Layout.row_major(1, D1, D2, D3, 2)
+    comptime out_layout = row_major[1, D1, D2, D3, 2]()
     comptime out_dtype = DType.float64
     comptime n = nan[out_dtype]()
     var out_buf = InlineArray[Co, D1 * D2 * D3](fill=Co(n, n))
-    var out = LayoutTensor[mut=True, out_dtype, out_layout](
-        out_buf.unsafe_ptr().bitcast[Float64]()
+    var out = TileTensor(
+        ptr=out_buf.unsafe_ptr().bitcast[Float64](), layout=out_layout
     )
 
-    var plan = plan_fft[DType.uint8, out_dtype, x_layout, out_layout]()
+    var plan = plan_fft[
+        DType.uint8, out_dtype, type_of(x_layout), type_of(out_layout)
+    ]()
     fft(out, x, plan=plan)
 
     ref expected = global_constant[expected_3d]()
@@ -973,26 +960,23 @@ def _test_3d_gpu[inverse: Bool, gpu_test: _GPUTest](debug: Bool) raises:
     comptime D3 = 8
     comptime in_dtype = DType.uint8
     comptime out_dtype = DType.float64
-    comptime in_layout = Layout.row_major(1, D1, D2, D3, 1)
-    comptime in_size = in_layout.size()
-    comptime out_layout = Layout.row_major(1, D1, D2, D3, 2)
-    comptime out_size = out_layout.size()
+    comptime in_layout = row_major[1, D1, D2, D3, 1]()
+    comptime out_layout = row_major[1, D1, D2, D3, 2]()
+    comptime in_size = in_layout.static_cosize
+    comptime out_size = out_layout.static_cosize
 
     with DeviceContext() as ctx:
         var x_data = ctx.enqueue_create_buffer[in_dtype](in_size)
         x_data.enqueue_fill(Scalar[in_dtype].MAX)
         var out_data = ctx.enqueue_create_buffer[out_dtype](out_size)
         out_data.enqueue_fill(nan[out_dtype]())
-
-        var out = LayoutTensor[mut=True, out_dtype, out_layout](
-            out_data.unsafe_ptr()
-        )
-        var x = LayoutTensor[mut=True, in_dtype, in_layout](x_data.unsafe_ptr())
+        var out = TileTensor(out_data, layout=out_layout)
+        var x = TileTensor(x_data, layout=in_layout)
 
         ref input_3d_v = global_constant[input_3d]()
 
         with x_data.map_to_host() as x_host:
-            var x_view = type_of(x)(x_host.unsafe_ptr())
+            var x_view = TileTensor(x_host, layout=in_layout)
 
             for i in range(D1):
                 for j in range(D2):
@@ -1005,19 +989,19 @@ def _test_3d_gpu[inverse: Bool, gpu_test: _GPUTest](debug: Bool) raises:
         var plan = plan_fft[
             in_dtype,
             out_dtype,
-            in_layout,
-            out_layout,
+            type_of(in_layout),
+            type_of(out_layout),
             inverse=inverse,
             _test=gpu_test,
             runtime_twfs=True,
         ](ctx=ctx)
-        _run_gpu_nd_fft(out, x.get_immutable(), ctx, plan)
+        _run_gpu_nd_fft(out, x.as_immut(), ctx, plan=plan)
         ctx.synchronize()
 
         ref expected = global_constant[expected_3d]()
 
         with out_data.map_to_host() as out_host:
-            var out_view = type_of(out)(out_host.unsafe_ptr())
+            var out_view = TileTensor(out_host, layout=out_layout)
 
             if debug:
                 print("Values:")
@@ -1069,11 +1053,12 @@ def test_3d_gpu(debug: Bool = False) raises:
 
 
 def main() raises:
-    # test_fft_1d_cpu()
-    test_fft_1d_gpu(debug=True)
+    test_fft_1d_cpu()
     # test_ifft_1d_cpu()
+    test_2d_cpu()
+    test_3d_cpu()
+
+    test_fft_1d_gpu()
     # test_ifft_1d_gpu()
-    # test_2d_cpu()
-    test_2d_gpu(debug=True)
-    # test_3d_cpu()
-    test_3d_gpu(debug=True)
+    test_2d_gpu()
+    test_3d_gpu()

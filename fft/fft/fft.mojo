@@ -1,6 +1,6 @@
 from std.gpu.host import DeviceContext
 from std.gpu.host.info import is_cpu
-from layout import Layout, LayoutTensor
+from layout import TileTensor, TensorLayout, row_major
 from std.math import ceil, log2
 from std.sys.info import has_accelerator, size_of, is_64bit
 from std.bit import count_trailing_zeros
@@ -17,40 +17,43 @@ from ._ndim_fft_gpu import _run_gpu_nd_fft, _GPUPlan, _GPUTest
 comptime _DEFAULT_DEVICE = "cpu" if not has_accelerator() else "gpu"
 
 
-def _check_layout_conditions_nd[in_layout: Layout, out_layout: Layout]():
-    comptime rank = out_layout.rank()
+@always_inline
+def _check_layout_conditions[
+    in_layout_type: TensorLayout, out_layout_type: TensorLayout
+]():
+    comptime rank = out_layout_type.rank
     comptime assert rank > 2, (
         "The rank should be bigger than 2. The first"
         " dimension represents the amount of batches, and the last the complex"
         " dimension."
     )
     comptime assert (
-        in_layout.rank() == rank
+        in_layout_type.rank == rank
     ), "in_layout and out_layout must have equal rank"
     comptime assert (
-        1 <= in_layout.shape[rank - 1].value() <= 2
+        1 <= in_layout_type.static_shape[rank - 1] <= 2
     ), "The last dimension of in_layout should be 1 or 2"
     comptime assert (
-        out_layout.shape[rank - 1].value() == 2
+        out_layout_type.static_shape[rank - 1] == 2
     ), "out_layout must have the last dimension equal to 2"
-    comptime assert (
-        out_layout.shape[: rank - 2] == in_layout.shape[: rank - 2]
-    ), (
-        "out_layout and in_layout should have the same shape before"
-        " the last dimension"
-    )
-
     comptime for i in range(rank - 2):
         comptime assert (
-            out_layout.shape[i + 1] != 1
+            in_layout_type.static_shape[i] == out_layout_type.static_shape[i]
+        ), (
+            "out_layout and in_layout should have the same shape before"
+            " the last dimension"
+        )
+    comptime for i in range(rank - 2):
+        comptime assert (
+            out_layout_type.static_shape[i + 1] != 1
         ), "no inner dimension should be of size 1"
 
 
 def _estimate_best_bases[
-    out_layout: Layout, target: StaticString
+    out_layout_type: TensorLayout, target: StaticString
 ](out bases: List[UInt]):
-    comptime assert out_layout.rank() > 1, "output rank must be > 1"
-    comptime length = out_layout.shape[1].value()
+    comptime assert out_layout_type.rank > 1, "output rank must be > 1"
+    comptime length = out_layout_type.static_shape[1]
     comptime max_radix_number = 32
 
     # NOTE: The smaller the base the better, but estimate the best ranges such
@@ -105,41 +108,41 @@ def _estimate_best_bases[
 
 
 def _estimate_best_bases_nd[
-    in_layout: Layout, out_layout: Layout, target: StaticString
+    in_layout_type: TensorLayout,
+    out_layout_type: TensorLayout,
+    target: StaticString,
 ](out bases: List[List[UInt]]):
-    _check_layout_conditions_nd[in_layout, out_layout]()
-    comptime dims = out_layout.shape[1 : out_layout.rank() - 1]
-    comptime amnt_dims = len(dims)
+    _check_layout_conditions[in_layout_type, out_layout_type]()
+    comptime amnt_dims = out_layout_type.rank - 2
     bases = {capacity = amnt_dims}
 
     comptime for i in range(amnt_dims):
-        comptime dim = dims[i].value()
-        bases.append(
-            _estimate_best_bases[Layout.row_major(1, dim, 2), target]()
-        )
+        comptime dim = out_layout_type.static_shape[i + 1]
+        comptime radix_layout_type = type_of(row_major[1, dim, 2]())
+        bases.append(_estimate_best_bases[radix_layout_type, target]())
 
 
 @always_inline
 def plan_fft[
     in_dtype: DType,
     out_dtype: DType,
-    in_layout: Layout,
-    out_layout: Layout,
+    in_layout_type: TensorLayout,
+    out_layout_type: TensorLayout,
     *,
     inverse: Bool = False,
     bases: List[List[UInt]] = _estimate_best_bases_nd[
-        in_layout, out_layout, "cpu"
+        in_layout_type, out_layout_type, "cpu"
     ](),
 ](*, cpu_workers: Optional[UInt] = None) -> _CPUPlan[
-    out_dtype, out_layout, inverse, bases
+    out_dtype, out_layout_type, inverse, bases
 ]:
     """Plan the Fast Fourier Transform on CPU.
 
     Parameters:
         in_dtype: The `DType` of the input tensor.
         out_dtype: The `DType` of the output tensor.
-        in_layout: The `Layout` of the input tensor.
-        out_layout: The `Layout` of the output tensor.
+        in_layout_type: The `TensorLayout` of the input.
+        out_layout_type: The `TensorLayout` of the output.
         inverse: Whether to run the inverse fourier transform.
         bases: The list of bases for which to build the mixed-radix algorithm.
 
@@ -157,11 +160,11 @@ def plan_fft[
 def plan_fft[
     in_dtype: DType,
     out_dtype: DType,
-    in_layout: Layout,
-    out_layout: Layout,
+    in_layout_type: TensorLayout,
+    out_layout_type: TensorLayout,
     *,
     bases: List[List[UInt]] = _estimate_best_bases_nd[
-        in_layout, out_layout, "gpu"
+        in_layout_type, out_layout_type, "gpu"
     ](),
     inverse: Bool = False,
     runtime_twfs: Bool = True,
@@ -172,7 +175,7 @@ def plan_fft[
     _test: Optional[_GPUTest] = None,
 ](*, ctx: DeviceContext) raises -> _GPUPlan[
     out_dtype,
-    out_layout,
+    out_layout_type,
     inverse,
     bases,
     _test,
@@ -185,8 +188,8 @@ def plan_fft[
     Parameters:
         in_dtype: The `DType` of the input tensor.
         out_dtype: The `DType` of the output tensor.
-        in_layout: The `Layout` of the input tensor.
-        out_layout: The `Layout` of the output tensor.
+        in_layout_type: The `TensorLayout` of the input.
+        out_layout_type: The `TensorLayout` of the output.
         bases: The list of bases for which to build the mixed-radix algorithm.
         inverse: Whether to run the inverse fourier transform.
         runtime_twfs: Whether to calculate the twiddle factors at runtime for
@@ -206,21 +209,22 @@ def plan_fft[
     return {ctx}
 
 
+@always_inline
 def fft[
     in_dtype: DType,
     out_dtype: DType,
-    in_layout: Layout,
-    out_layout: Layout,
+    in_layout_type: TensorLayout,
+    out_layout_type: TensorLayout,
     in_origin: ImmutOrigin,
     out_origin: MutOrigin,
     inverse: Bool,
     bases: List[List[UInt]],
     //,
 ](
-    output: LayoutTensor[out_dtype, out_layout, out_origin],
-    x: LayoutTensor[in_dtype, in_layout, in_origin],
+    output: TileTensor[out_dtype, out_layout_type, out_origin, ...],
+    x: TileTensor[in_dtype, in_layout_type, in_origin, ...],
     *,
-    plan: _CPUPlan[out_dtype, out_layout, inverse, bases],
+    plan: _CPUPlan[out_dtype, out_layout_type, inverse, bases],
     cpu_workers: Optional[UInt] = None,
 ) raises:
     """Calculate the Fast Fourier Transform on CPU.
@@ -228,8 +232,8 @@ def fft[
     Parameters:
         in_dtype: The `DType` of the input tensor.
         out_dtype: The `DType` of the output tensor.
-        in_layout: The `Layout` of the input tensor.
-        out_layout: The `Layout` of the output tensor.
+        in_layout_type: The `TensorLayout` of the input.
+        out_layout_type: The `TensorLayout` of the output.
         in_origin: The `Origin` of the input tensor.
         out_origin: The `Origin` of the output tensor.
         inverse: Whether to run the inverse fourier transform.
@@ -246,8 +250,8 @@ def fft[
         The layout should match one of: `{(batches, dim_0 [, dim_1 [, ...]], 1),
         (batches, dim_0 [, dim_1 [, ...]], 2)}`.
     """
-    _check_layout_conditions_nd[in_layout, out_layout]()
-    comptime assert len(bases) == out_layout.rank() - 2, (
+    _check_layout_conditions[in_layout_type, out_layout_type]()
+    comptime assert len(bases) == out_layout_type.rank - 2, (
         "The bases list should have the same outer size as the amount of"
         " internal dimensions. e.g. (batches, dim_0, dim_1, dim_2, 2) ->"
         " len(bases) == 3"
@@ -255,11 +259,12 @@ def fft[
     _run_cpu_nd_fft(output, x, plan=plan, cpu_workers=cpu_workers)
 
 
+@always_inline
 def fft[
     in_dtype: DType,
     out_dtype: DType,
-    in_layout: Layout,
-    out_layout: Layout,
+    in_layout_type: TensorLayout,
+    out_layout_type: TensorLayout,
     in_origin: ImmutOrigin,
     out_origin: MutOrigin,
     inverse: Bool,
@@ -268,13 +273,13 @@ def fft[
     max_cluster_size: UInt,
     //,
 ](
-    output: LayoutTensor[out_dtype, out_layout, out_origin],
-    x: LayoutTensor[in_dtype, in_layout, in_origin],
+    output: TileTensor[out_dtype, out_layout_type, out_origin, ...],
+    x: TileTensor[in_dtype, in_layout_type, in_origin, ...],
     ctx: DeviceContext,
     *,
     plan: _GPUPlan[
         out_dtype,
-        out_layout,
+        out_layout_type,
         inverse,
         bases,
         None,
@@ -288,8 +293,8 @@ def fft[
     Parameters:
         in_dtype: The `DType` of the input tensor.
         out_dtype: The `DType` of the output tensor.
-        in_layout: The `Layout` of the input tensor.
-        out_layout: The `Layout` of the output tensor.
+        in_layout_type: The `TensorLayout` of the input.
+        out_layout_type: The `TensorLayout` of the output.
         in_origin: The `Origin` of the input tensor.
         out_origin: The `Origin` of the output tensor.
         inverse: Whether to run the inverse fourier transform.
@@ -310,10 +315,10 @@ def fft[
         The layout should match one of: `{(batches, dim_0 [, dim_1 [, ...]], 1),
         (batches, dim_0 [, dim_1 [, ...]], 2)}`.
     """
-    _check_layout_conditions_nd[in_layout, out_layout]()
-    comptime assert len(bases) == out_layout.rank() - 2, (
+    _check_layout_conditions[in_layout_type, out_layout_type]()
+    comptime assert len(bases) == out_layout_type.rank - 2, (
         "The bases list should have the same outer size as the amount of"
         " internal dimensions. e.g. (batches, dim_0, dim_1, dim_2, 2) ->"
         " len(bases) == 3"
     )
-    _run_gpu_nd_fft(output, x, ctx, plan)
+    _run_gpu_nd_fft(output, x, ctx, plan=plan)

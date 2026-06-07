@@ -1,6 +1,12 @@
 from std.algorithm import parallelize, vectorize
 from std.complex import ComplexScalar
-from layout import Layout, LayoutTensor, IntTuple
+from layout import (
+    TileTensor,
+    IntTuple,
+    TensorLayout,
+    row_major,
+    stack_allocation,
+)
 from std.runtime.asyncrt import parallelism_level
 from std.sys.info import size_of, simd_width_of
 from std.memory import memcpy, ArcPointer
@@ -16,6 +22,9 @@ from ._utils import (
     _min,
     _num_stages_end_of,
     _calc_batches_M_N,
+    _dims,
+    _dims_from_tail,
+    _tail_tile_layout,
 )
 from ._fft import (
     _radix_n_fft_kernel_elem_per_thread,
@@ -26,10 +35,14 @@ from ._fft import (
 
 
 struct _CPUPlan[
-    out_dtype: DType, out_layout: Layout, inverse: Bool, bases: List[List[UInt]]
+    out_dtype: DType,
+    out_layout_type: TensorLayout,
+    inverse: Bool,
+    bases: List[List[UInt]],
 ](Copyable):
-    comptime rank = Self.out_layout.rank()
-    comptime dims = Self.out_layout.shape[1 : Self.rank - 1]
+    comptime rank = Self.out_layout_type.rank
+    comptime dims = _dims[Self.out_layout_type]
+    comptime amnt_dims = Self.dims.rank
     # TODO: this should somehow be dependent on the CPU register size
     comptime max_stack_seq_len = 128
     """Maximum sequence length to fully unroll on the stack."""
@@ -44,17 +57,15 @@ struct _CPUPlan[
 
     def __init__(out self):
         self.twiddle_factors = {Self._get_dims_twfs()}
-        comptime size = Self.out_layout.size() // 2  # Self.L is already complex
+        comptime size = Self.out_layout_type.static_cosize // 2  # Self.L is complex
         self.calc_buf = {Self.L(capacity=size)}
 
     @staticmethod
     def _get_dims_twfs(out twfs: List[Optional[Self.L]]):
-        comptime amnt_dims = len(Self.dims)
+        twfs = {capacity = Self.amnt_dims}
 
-        twfs = {capacity = amnt_dims}
-
-        comptime for dim_idx in range(amnt_dims):
-            comptime length = UInt(Self.dims[dim_idx].value())
+        comptime for dim_idx in range(Self.amnt_dims):
+            comptime length = UInt(Self.dims.static_shape[dim_idx])
             comptime if length <= Self.max_stack_seq_len:
                 twfs.append(None)
                 continue
@@ -82,13 +93,13 @@ def _complex_transpose_mask[TILE: Int]() -> IndexList[TILE * TILE * 2]:
 def _transpose[
     *, into_: Int, from_: Int
 ](
-    dst: LayoutTensor[mut=True, ...],
-    src: LayoutTensor[mut=False, dst.dtype, dst.layout, ...],
+    dst: TileTensor[mut=True, ...],
+    src: TileTensor[mut=False, dst.dtype, dst.LayoutType, ...],
     num_workers: Int,
 ):
-    comptime dims = src.layout.shape[: src.rank - 1]
-
-    comptime sizes = _calc_batches_M_N[dims, into_, from_]()
+    comptime sizes = _calc_batches_M_N[
+        _dims_from_tail[src.LayoutType], into_=into_, from_=from_
+    ]()
     comptime intra_fft_batches = Int(sizes[0])
     comptime M = Int(sizes[1])
     comptime N = Int(sizes[2])
@@ -139,29 +150,31 @@ def _transpose[
 def _run_cpu_nd_fft[
     in_dtype: DType,
     out_dtype: DType,
-    in_layout: Layout,
-    out_layout: Layout,
+    in_layout_type: TensorLayout,
+    out_layout_type: TensorLayout,
     in_origin: ImmutOrigin,
     out_origin: MutOrigin,
     *,
     inverse: Bool,
     bases: List[List[UInt]],
 ](
-    output: LayoutTensor[out_dtype, out_layout, out_origin],
-    x: LayoutTensor[in_dtype, in_layout, in_origin],
+    output: TileTensor[out_dtype, out_layout_type, out_origin, ...],
+    x: TileTensor[in_dtype, in_layout_type, in_origin, ...],
     *,
-    plan: _CPUPlan[out_dtype, out_layout, inverse, bases],
+    plan: _CPUPlan[out_dtype, out_layout_type, inverse, bases],
     cpu_workers: Optional[UInt] = None,
 ):
-    comptime rank = out_layout.rank()
-    comptime dims = out_layout.shape[1 : rank - 1]
-    comptime amnt_dims = len(dims)
-    comptime prod = _product_of_dims(dims)
-    comptime start_dim_idx = len(dims) - 1
+    comptime rank = out_layout_type.rank
+    comptime dims = _dims[out_layout_type]
+    comptime amnt_dims = dims.rank
+    comptime prod = _product_of_dims[dims]()
+    comptime start_dim_idx = amnt_dims - 1
     """We are running the ffts from right to left in the layout."""
 
-    comptime batches = UInt(out_layout.shape[0].value())
-    comptime x_complex_in = in_layout.shape[rank - 1].value()
+    comptime batches = UInt(out_layout_type.static_shape[0])
+    comptime x_complex_in = in_layout_type.static_shape[rank - 1]
+    comptime batch_stride = out_layout_type.static_stride[0]
+    comptime in_batch_stride = in_layout_type.static_stride[0]
     # NOTE: extract the unsafe pointer to avoid the arcpointer refcount
     var twfs_runtime_ptr = plan.twiddle_factors[].unsafe_ptr()
 
@@ -171,7 +184,7 @@ def _run_cpu_nd_fft[
 
         comptime for i, base_set in enumerate(bases):
             comptime val = _min(base_set)
-            comptime dim = UInt(dims[i].value())
+            comptime dim = UInt(dims.static_shape[i])
             max_batch_prod = max(dim // val, max_batch_prod)
 
     comptime max_batch_prod = _find_max_batch_prod()
@@ -181,42 +194,43 @@ def _run_cpu_nd_fft[
     var parallel_batches = min(
         max(threads - (per_batch_workers - 1), 1), batches
     )
-    comptime total_stages = _num_stages_end_of[
-        bases, dims, 0
-    ]() + 2 * start_dim_idx
+    comptime total_stages = _num_stages_end_of[bases, dims, 0]() + (
+        2 * start_dim_idx
+    )
 
     @always_inline
     @parameter
     def _run_1d_fft[
         dtype_in: DType, //, dim_idx: Int
     ](
-        shared_f_lhs: LayoutTensor[mut=True, out_dtype, ...],
-        shared_f_rhs: LayoutTensor[mut=True, out_dtype, ...],
-        x_in: LayoutTensor[mut=False, dtype_in, ...],
+        shared_f_lhs: TileTensor[mut=True, out_dtype, ...],
+        shared_f_rhs: TileTensor[mut=True, out_dtype, ...],
+        x_in: TileTensor[mut=False, dtype_in, ...],
     ):
-        comptime length = UInt(x_in.layout.shape[0].value())
+        comptime length = UInt(dims.static_shape[dim_idx])
         comptime bases_idx = bases[dim_idx]
         comptime bases_processed = materialize[
             _get_ordered_bases_processed_list[length, bases_idx]()
         ]()
         comptime ordered_bases = bases_processed[0]
         comptime processed_list = bases_processed[1]
-        comptime twfs_layout = Layout.row_major(Int(length), 2)
+        comptime twfs_layout = row_major[Int(length), 2]()
 
-        var twfs: LayoutTensor[
-            mut=False, out_dtype, twfs_layout, origin_of(plan)
+        var twfs: TileTensor[
+            mut=False, out_dtype, type_of(twfs_layout), ImmutExternalOrigin
         ]
         comptime if length <= plan.max_stack_seq_len:
-            twfs = {unsafe_ptr = {}}
+            twfs = stack_allocation[out_dtype](twfs_layout).as_immut()
         else:
-            twfs = {
+            twfs = TileTensor(
                 twfs_runtime_ptr[dim_idx]
                 .value()
                 .unsafe_ptr()
                 .bitcast[Scalar[out_dtype]]()
                 .mut_cast[False]()
-                .unsafe_origin_cast[origin_of(plan)]()
-            }
+                .unsafe_origin_cast[ImmutExternalOrigin](),
+                twfs_layout,
+            )
 
         comptime fft_stages = _num_stages_end_of[bases, dims, dim_idx + 1]()
         comptime prev_stages = fft_stages + (start_dim_idx - dim_idx)
@@ -230,7 +244,7 @@ def _run_cpu_nd_fft[
             ) and b == 0
             comptime s = prev_stages + b
             comptime write_lhs = (total_stages - (s + 1)) % 2 == 0
-            comptime x_out_layout = Layout.row_major(Int(base), 2)
+            comptime x_out_layout = row_major[Int(base), 2]()
 
             comptime if run_butterfly and length <= plan.max_stack_seq_len:
                 comptime func = _radix_n_fft_kernel_butterfly_comptime[
@@ -245,9 +259,7 @@ def _run_cpu_nd_fft[
                 ]
 
                 comptime for local_i in range(length // base):
-                    var x_out = LayoutTensor[
-                        out_dtype, x_out_layout, MutExternalOrigin
-                    ].stack_allocation()
+                    var x_out = stack_allocation[out_dtype](x_out_layout)
                     comptime if b == 0 and dim_idx == start_dim_idx:
                         comptime if write_lhs:
                             func[local_i=local_i](shared_f_lhs, x_in, x_out)
@@ -285,9 +297,7 @@ def _run_cpu_nd_fft[
 
                     @always_inline
                     def _run_butterfly[width: Int](local_i: Int) {read}:
-                        var x_out = LayoutTensor[
-                            out_dtype, x_out_layout, MutExternalOrigin
-                        ].stack_allocation()
+                        var x_out = stack_allocation[out_dtype](x_out_layout)
                         var idx = UInt(local_i) * processed + runtime_phase
                         comptime if b == 0 and dim_idx == start_dim_idx:
                             comptime if write_lhs:
@@ -376,26 +386,24 @@ def _run_cpu_nd_fft[
         .unsafe_mut_cast[True]()
         .bitcast[Scalar[out_dtype]]()
     )
-    comptime o_layout = Layout.row_major(output.layout.shape[1:])
-    comptime out_t = LayoutTensor[out_dtype, o_layout, ...]
+    comptime o_layout = _tail_tile_layout[out_layout_type]()
+    comptime x_tail_layout = _tail_tile_layout[in_layout_type]()
 
     @always_inline
     @parameter
     def _run_batch(block_num: Int):
-        var block_offset = output.stride[0]() * block_num
-        var base_out = out_t(output.ptr + block_offset)
-        var base_calc = out_t(calc_buf_ptr + block_offset)
-        comptime x_out_layout = Layout.row_major(x.layout.shape[1:])
-        var base_x = LayoutTensor[in_dtype, x_out_layout, address_space=_](
-            x.ptr + x.stride[0]() * block_num
+        var block_offset = batch_stride * block_num
+        var base_out = TileTensor(output.ptr + block_offset, o_layout)
+        var base_calc = TileTensor(calc_buf_ptr + block_offset, o_layout)
+        var base_x = TileTensor(
+            x.ptr + in_batch_stride * block_num, x_tail_layout
         )
 
         comptime if amnt_dims == 1:
             _run_1d_fft[start_dim_idx](base_out, base_calc, base_x)
         else:
             comptime for idx in reversed(range(amnt_dims)):
-                comptime dim_tuple = dims[idx]
-                comptime dim = dim_tuple.value()
+                comptime dim = Int(dims.static_shape[idx])
                 comptime batch_prod = UInt(prod // dim)
 
                 comptime if idx != start_dim_idx:
@@ -413,22 +421,22 @@ def _run_cpu_nd_fft[
                             base_calc, base_out, Int(per_batch_workers)
                         )
 
-                comptime dim_x_layout = Layout.row_major(dim, x_complex_in)
+                comptime dim_x_layout = row_major[dim, x_complex_in]()
                 comptime x_offset = dim * x_complex_in
-                comptime dim_out_layout = Layout.row_major(dim, 2)
+                comptime dim_out_layout = row_major[dim, 2]()
                 comptime out_offset = dim * 2
 
                 @always_inline
                 @parameter
                 def _run_dim_batch(flat_idx: Int):
-                    var dim_batch_x = LayoutTensor[_, dim_x_layout, ...](
-                        base_x.ptr + flat_idx * x_offset
+                    var dim_batch_x = TileTensor(
+                        base_x.ptr + flat_idx * x_offset, dim_x_layout
                     )
-                    var dim_batch_out = LayoutTensor[_, dim_out_layout, ...](
-                        base_out.ptr + flat_idx * out_offset
+                    var dim_batch_out = TileTensor(
+                        base_out.ptr + flat_idx * out_offset, dim_out_layout
                     )
-                    var dim_batch_calc = LayoutTensor[_, dim_out_layout, ...](
-                        base_calc.ptr + flat_idx * out_offset
+                    var dim_batch_calc = TileTensor(
+                        base_calc.ptr + flat_idx * out_offset, dim_out_layout
                     )
                     _run_1d_fft[idx](dim_batch_out, dim_batch_calc, dim_batch_x)
 

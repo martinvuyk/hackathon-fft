@@ -3,4 +3,4 @@
 .pixi
 *.egg-info
 build/*
-dump.ll
+run_compile_info_cpu.ll

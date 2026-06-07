@@ -2,7 +2,7 @@ from std.sys.info import is_64bit, is_nvidia_gpu, is_gpu
 from std.complex import ComplexScalar, ComplexSIMD
 from std.math import exp, pi, sin, cos, log2
 from std.bit import count_trailing_zeros
-from layout import IntTuple
+from layout import CoordLike, IntTuple, RowMajorLayout, TensorLayout, row_major
 from std.utils.index import IndexList
 
 comptime EPSILON = 1e-9
@@ -252,12 +252,29 @@ def _max(elems: List[List[UInt]], out biggest: UInt):
             biggest = max(elem, biggest)
 
 
+comptime _KeepSpatialDim[L: TensorLayout, T: CoordLike, idx: Int]: Bool = (
+    idx >= 1 and idx < L.rank - 1
+)
+
+comptime _KeepBeforeLastDim[L: TensorLayout, T: CoordLike, idx: Int]: Bool = (
+    idx < L.rank - 1
+)
+
+comptime _dims[L: TensorLayout] = RowMajorLayout[
+    *L._shape_types.filter_idx[_KeepSpatialDim[L, _, _]]()
+]
+
+comptime _dims_from_tail[L: TensorLayout] = RowMajorLayout[
+    *L._shape_types.filter_idx[_KeepBeforeLastDim[L, _, _]]()
+]
+
+
 @always_inline
-def _product_of_dims(dims: IntTuple) -> Int:
-    """Calculates the product of a tuple of dimensions."""
+def _product_of_dims[dims: TensorLayout]() -> Int:
+    """Product of spatial axes in ``dims``."""
     var prod = 1
-    for i in range(len(dims)):
-        prod *= dims[i].value()
+    comptime for i in range(dims.rank):
+        prod *= dims.static_shape[i]
     return prod
 
 
@@ -379,17 +396,17 @@ def _false[a: Int]() -> Bool:
 
 def _num_stages_end_of[
     bases: List[List[UInt]],
-    dims: IntTuple,
+    dims: TensorLayout,
     dim_idx: Int,
     use_scratch_buffer: def[Int]() thin -> Bool = _false,
 ]() -> Int:
-    comptime start_dim_idx = len(dims) - 1
+    comptime start_dim_idx = dims.rank - 1
     var num_stages = 0
     comptime for i in range(dim_idx, start_dim_idx + 1):
         comptime if use_scratch_buffer[i]():
             num_stages += 1
             continue
-        comptime length = UInt(dims[i].value())
+        comptime length = UInt(dims.static_shape[i])
         comptime bases_processed = _get_ordered_bases_processed_list[
             length, bases[i]
         ]()
@@ -398,23 +415,29 @@ def _num_stages_end_of[
     return num_stages
 
 
-def _calc_batches_M_N[
-    dims: IntTuple, into_: Int, from_: Int
-]() -> Tuple[UInt, UInt, UInt]:
-    var target_idx = min(into_, from_)
-    var is_forward = into_ < from_
+comptime _KeepTailDim[T: CoordLike, idx: Int]: Bool = idx >= 1
+
+comptime _tail_tile_layout[L: TensorLayout] = RowMajorLayout[
+    *L._shape_types.filter_idx[_KeepTailDim]()
+]
+
+
+def _calc_batches_M_N[dims: TensorLayout, into_: Int, from_: Int]() -> Tuple[UInt, UInt, UInt]:
+    """Transpose batch geometry from spatial ``dims`` layout."""
+    comptime target_idx = min(into_, from_)
+    comptime is_forward = into_ < from_
 
     var batch_val = UInt(1)
-    for i in range(0, target_idx):
-        batch_val *= UInt(dims[i].value())
+    comptime for i in range(target_idx):
+        batch_val *= UInt(dims.static_shape[i])
 
-    var m_val = UInt(dims[target_idx].value())
+    var m_val = UInt(dims.static_shape[target_idx])
 
     var n_val = UInt(1)
-    for i in range(target_idx + 1, len(dims)):
-        n_val *= UInt(dims[i].value())
+    comptime for i in range(target_idx + 1, dims.rank):
+        n_val *= UInt(dims.static_shape[i])
 
-    if is_forward:
+    comptime if is_forward:
         return batch_val, m_val, n_val
     else:
         return batch_val, n_val, m_val

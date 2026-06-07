@@ -1,1 +1,4 @@
 kgen.trace.*
+
+.cursor/*
+scratchpad/*

@@ -1,12 +1,12 @@
 from std.complex import ComplexSIMD
 from std.benchmark import Bench, BenchConfig, Bencher, BenchId, keep
-from layout import Layout, LayoutTensor
+from layout import TileTensor, row_major
 from std.gpu.host import DeviceContext
 from std.random import seed
 
 from fft._test_values import _get_test_values_128
 from fft.tests import _TestValues
-from fft.fft.fft import fft
+from fft.fft.fft import fft, plan_fft
 
 
 @parameter
@@ -20,10 +20,10 @@ def profile_intra_block_radix_n[
     comptime BATCHES = max_threads_available // (SIZE // Int(smallest_base))
     comptime in_dtype = dtype
     comptime out_dtype = dtype
-    comptime in_layout = Layout.row_major(BATCHES, SIZE, 1)
-    comptime out_layout = Layout.row_major(BATCHES, SIZE, 2)
-    comptime in_size = in_layout.size()
-    comptime out_size = out_layout.size()
+    comptime in_layout = row_major[BATCHES, SIZE, 1]()
+    comptime out_layout = row_major[BATCHES, SIZE, 2]()
+    comptime in_size = in_layout.static_cosize
+    comptime out_size = out_layout.static_cosize
     comptime calc_dtype = dtype
     comptime Complex = ComplexSIMD[calc_dtype, 1]
 
@@ -38,17 +38,23 @@ def profile_intra_block_radix_n[
                     x_host[idx] = {series[i]}
                     idx += 1
 
-        var out_tensor = LayoutTensor[mut=True, out_dtype, out_layout](
-            out.unsafe_ptr()
-        )
-        var x_tensor = LayoutTensor[mut=False, in_dtype, in_layout](
-            x.unsafe_ptr()
-        )
+        var out_tensor = TileTensor(out, layout=out_layout)
+        var x_tensor = TileTensor(x, layout=in_layout)
+        comptime bases: List[List[UInt]] = [[UInt(2)]]
+        var plan = plan_fft[
+            in_dtype,
+            out_dtype,
+            type_of(in_layout),
+            type_of(out_layout),
+            bases=bases,
+            runtime_twfs=True,
+        ](ctx=ctx)
+        ctx.synchronize()
 
         @always_inline
         @parameter
         def call_fn(ctx: DeviceContext) raises:
-            fft(out_tensor, x_tensor, ctx)
+            fft(out_tensor, x_tensor, ctx, plan=plan)
             ctx.synchronize()
 
         b.iter_custom[call_fn](ctx)
