@@ -451,7 +451,7 @@ def test_2d_cpu[debug: Bool = False]() raises:
 
     comptime x_layout = row_major[1, ROWS, COLS, 1]()
     ref x_buf = global_constant[input_2d]()
-    var x = TileTensor(ptr=x_buf.unsafe_ptr().bitcast[UInt8](), layout=x_layout)
+    var x = TileTensor(ptr=x_buf.unsafe_ptr().unsafe_bitcast[UInt8](), layout=x_layout)
 
     comptime out_layout = row_major[1, ROWS, COLS, 2]()
     comptime out_dtype = DType.float64
@@ -459,7 +459,8 @@ def test_2d_cpu[debug: Bool = False]() raises:
         fill=Co(nan[out_dtype](), nan[out_dtype]())
     )
     var out = TileTensor(
-        ptr=out_buf.unsafe_ptr().bitcast[Float64](), layout=out_layout
+        ptr=UnsafePointer(to=out_buf[0]).unsafe_bitcast[Float64](),
+        layout=out_layout,
     )
     var plan = plan_fft[
         DType.uint8, out_dtype, type_of(x_layout), type_of(out_layout)
@@ -896,14 +897,15 @@ def test_3d_cpu[debug: Bool = False]() raises:
 
     comptime x_layout = row_major[1, D1, D2, D3, 1]()
     ref x_buf = global_constant[input_3d]()
-    var x = TileTensor(ptr=x_buf.unsafe_ptr().bitcast[UInt8](), layout=x_layout)
+    var x = TileTensor(ptr=x_buf.unsafe_ptr().unsafe_bitcast[UInt8](), layout=x_layout)
 
     comptime out_layout = row_major[1, D1, D2, D3, 2]()
     comptime out_dtype = DType.float64
     comptime n = nan[out_dtype]()
     var out_buf = InlineArray[Co, D1 * D2 * D3](fill=Co(n, n))
     var out = TileTensor(
-        ptr=out_buf.unsafe_ptr().bitcast[Float64](), layout=out_layout
+        ptr=UnsafePointer(to=out_buf[0]).unsafe_bitcast[Float64](),
+        layout=out_layout,
     )
 
     var plan = plan_fft[
@@ -1058,7 +1060,10 @@ def main() raises:
     test_2d_cpu()
     test_3d_cpu()
 
-    test_fft_1d_gpu()
-    # test_ifft_1d_gpu()
-    test_2d_gpu()
-    test_3d_gpu()
+    # GPU tests require a known accelerator target; skip when none is present.
+    comptime _run_gpu = has_accelerator()
+    comptime if _run_gpu:
+        test_fft_1d_gpu()
+        # test_ifft_1d_gpu()
+        test_2d_gpu()
+        test_3d_gpu()

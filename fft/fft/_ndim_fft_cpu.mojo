@@ -1,36 +1,26 @@
-from std.algorithm import parallelize, vectorize
+from std.algorithm import parallelize
 from std.complex import ComplexScalar
-from layout import (
-    TileTensor,
-    IntTuple,
-    TensorLayout,
-    row_major,
-    stack_allocation,
-)
+from layout import TileTensor, TensorLayout, row_major, stack_allocation
 from std.runtime.asyncrt import parallelism_level
-from std.sys.info import size_of, simd_width_of
-from std.memory import memcpy, ArcPointer
-from std.math import ceildiv, sqrt
-from std.utils.index import IndexList
-from std.bit import prev_power_of_two
+from std.memory import ArcPointer
+
+from ._fft_pipeline import (
+    _Fft1dStageExec,
+    _Fft1dStagePlan,
+    _FftCpuStagePath,
+    _FftNdimGeometry,
+    _FftStockhamPipeline,
+    _FftStockhamSchedule,
+    _fft_no_shared_memory,
+    _fft_noop_sync,
+)
+from ._fft_stage_route import _FftStageRouteParams
+from ._fft_tile_io import _transpose_cpu
 
 from ._utils import (
     _get_twiddle_factors,
-    _get_ordered_bases_processed_list,
-    _product_of_dims,
-    _max,
     _min,
-    _num_stages_end_of,
-    _calc_batches_M_N,
-    _dims,
-    _dims_from_tail,
     _tail_tile_layout,
-)
-from ._fft import (
-    _radix_n_fft_kernel_elem_per_thread,
-    _radix_n_fft_kernel_elem_per_thread_comptime,
-    _radix_n_fft_kernel_butterfly,
-    _radix_n_fft_kernel_butterfly_comptime,
 )
 
 
@@ -40,9 +30,7 @@ struct _CPUPlan[
     inverse: Bool,
     bases: List[List[UInt]],
 ](Copyable):
-    comptime rank = Self.out_layout_type.rank
-    comptime dims = _dims[Self.out_layout_type]
-    comptime amnt_dims = Self.dims.rank
+    comptime geo = _FftNdimGeometry[Self.out_layout_type]
     # TODO: this should somehow be dependent on the CPU register size
     comptime max_stack_seq_len = 128
     """Maximum sequence length to fully unroll on the stack."""
@@ -62,10 +50,10 @@ struct _CPUPlan[
 
     @staticmethod
     def _get_dims_twfs(out twfs: List[Optional[Self.L]]):
-        twfs = {capacity = Self.amnt_dims}
+        twfs = {capacity = Self.geo.amnt_dims}
 
-        comptime for dim_idx in range(Self.amnt_dims):
-            comptime length = UInt(Self.dims.static_shape[dim_idx])
+        comptime for dim_idx in range(Self.geo.amnt_dims):
+            comptime length = UInt(Self.geo.dims.static_shape[dim_idx])
             comptime if length <= Self.max_stack_seq_len:
                 twfs.append(None)
                 continue
@@ -74,85 +62,12 @@ struct _CPUPlan[
             )
 
 
-def _complex_transpose_mask[TILE: Int]() -> IndexList[TILE * TILE * 2]:
-    var mask = IndexList[TILE * TILE * 2](fill=0)
-    for i in range(TILE):
-        for j in range(TILE):
-            var src_re = i * (2 * TILE) + j * 2
-            var src_im = src_re + 1
-
-            var dst_re = j * (2 * TILE) + i * 2
-            var dst_im = dst_re + 1
-
-            mask[dst_re] = src_re
-            mask[dst_im] = src_im
-    return mask
-
-
-@always_inline
-def _transpose[
-    *, into_: Int, from_: Int
-](
-    dst: TileTensor[mut=True, ...],
-    src: TileTensor[mut=False, dst.dtype, dst.LayoutType, ...],
-    num_workers: Int,
-):
-    comptime sizes = _calc_batches_M_N[
-        _dims_from_tail[src.LayoutType], into_=into_, from_=from_
-    ]()
-    comptime intra_fft_batches = Int(sizes[0])
-    comptime M = Int(sizes[1])
-    comptime N = Int(sizes[2])
-    # We assume the L1 -> registers bus size is ~ 2 * simd_width
-    comptime TILE = min(
-        prev_power_of_two(min(M, N)), simd_width_of[src.dtype]()
-    )
-    comptime mask = _complex_transpose_mask[TILE]()
-
-    @parameter
-    def _transpose_batch(b: Int):
-        var src_base = src.ptr + b * M * N * 2
-        var dst_base = dst.ptr + b * M * N * 2
-
-        for i in range(0, M, TILE):
-            for j in range(0, N, TILE):
-                if i + TILE <= M and j + TILE <= N:
-                    var tile_in = SIMD[src.dtype, TILE * TILE * 2]()
-
-                    comptime for row in range(TILE):
-                        var val = src_base.load[TILE * 2](
-                            ((i + row) * N + j) * 2
-                        )
-                        UnsafePointer(to=tile_in).bitcast[
-                            Scalar[src.dtype]
-                        ]().store(row * TILE * 2, val)
-
-                    var tile_out = tile_in.shuffle[mask]()
-
-                    comptime for col in range(TILE):
-                        var val = (
-                            UnsafePointer(to=tile_out)
-                            .bitcast[Scalar[src.dtype]]()
-                            .load[TILE * 2](col * TILE * 2)
-                        )
-                        dst_base.store(((j + col) * M + i) * 2, val)
-                else:
-                    for ii in range(i, min(i + TILE, M)):
-                        for jj in range(j, min(j + TILE, N)):
-                            var val = src_base.load[2]((ii * N + jj) * 2)
-                            dst_base.store((jj * M + ii) * 2, val)
-
-    parallelize[_transpose_batch](
-        intra_fft_batches, min(num_workers, intra_fft_batches, TILE)
-    )
-
-
 def _run_cpu_nd_fft[
     in_dtype: DType,
     out_dtype: DType,
     in_layout_type: TensorLayout,
     out_layout_type: TensorLayout,
-    in_origin: ImmutOrigin,
+    in_origin: ImmOrigin,
     out_origin: MutOrigin,
     *,
     inverse: Bool,
@@ -164,16 +79,8 @@ def _run_cpu_nd_fft[
     plan: _CPUPlan[out_dtype, out_layout_type, inverse, bases],
     cpu_workers: Optional[UInt] = None,
 ):
-    comptime rank = out_layout_type.rank
-    comptime dims = _dims[out_layout_type]
-    comptime amnt_dims = dims.rank
-    comptime prod = _product_of_dims[dims]()
-    comptime start_dim_idx = amnt_dims - 1
-    """We are running the ffts from right to left in the layout."""
-
-    comptime batches = UInt(out_layout_type.static_shape[0])
-    comptime x_complex_in = in_layout_type.static_shape[rank - 1]
-    comptime batch_stride = out_layout_type.static_stride[0]
+    comptime geo = plan.geo
+    comptime x_complex_in = in_layout_type.static_shape[geo.rank - 1]
     comptime in_batch_stride = in_layout_type.static_stride[0]
     # NOTE: extract the unsafe pointer to avoid the arcpointer refcount
     var twfs_runtime_ptr = plan.twiddle_factors[].unsafe_ptr()
@@ -184,19 +91,29 @@ def _run_cpu_nd_fft[
 
         comptime for i, base_set in enumerate(bases):
             comptime val = _min(base_set)
-            comptime dim = UInt(dims.static_shape[i])
+            comptime dim = UInt(geo.dims.static_shape[i])
             max_batch_prod = max(dim // val, max_batch_prod)
 
     comptime max_batch_prod = _find_max_batch_prod()
 
+    # Thread schedule (2-level parallelize):
+    # - max_batch_prod ≈ largest intra-dim fan-out (dim // min_radix). That is
+    #   the useful parallelism inside one batch when amnt_dims > 1.
+    # - per_batch_workers: dedicate up to that many workers to the inner
+    #   dim-batch loop; for 1-D there is nothing to fan out, so keep 1.
+    # - parallel_batches: remaining workers run independent outer batches.
+    #   Reserve (per_batch_workers - 1) so nested parallelize does not
+    #   oversubscribe when both levels are active; clamp to [1, batches].
     var threads = cpu_workers.or_else(UInt(parallelism_level()))
-    var per_batch_workers = min(threads, max_batch_prod) if amnt_dims > 1 else 1
+    var per_batch_workers = (
+        min(threads, max_batch_prod) if geo.amnt_dims > 1 else 1
+    )
     var parallel_batches = min(
-        max(threads - (per_batch_workers - 1), 1), batches
+        max(threads - (per_batch_workers - 1), 1), geo.outer_batches
     )
-    comptime total_stages = _num_stages_end_of[bases, dims, 0]() + (
-        2 * start_dim_idx
-    )
+    comptime schedule = _FftStockhamSchedule[
+        bases, geo.dims, geo.start_dim_idx, _fft_no_shared_memory
+    ]()
 
     @always_inline
     @parameter
@@ -207,184 +124,60 @@ def _run_cpu_nd_fft[
         shared_f_rhs: TileTensor[mut=True, out_dtype, ...],
         x_in: TileTensor[mut=False, dtype_in, ...],
     ):
-        comptime length = UInt(dims.static_shape[dim_idx])
-        comptime bases_idx = bases[dim_idx]
-        comptime bases_processed = materialize[
-            _get_ordered_bases_processed_list[length, bases_idx]()
-        ]()
-        comptime ordered_bases = bases_processed[0]
-        comptime processed_list = bases_processed[1]
+        comptime length = UInt(geo.dims.static_shape[dim_idx])
         comptime twfs_layout = row_major[Int(length), 2]()
 
         var twfs: TileTensor[
-            mut=False, out_dtype, type_of(twfs_layout), ImmutExternalOrigin
+            mut=False, out_dtype, type_of(twfs_layout), ImmUntrackedOrigin
         ]
         comptime if length <= plan.max_stack_seq_len:
             twfs = stack_allocation[out_dtype](twfs_layout).as_immut()
         else:
             twfs = TileTensor(
-                twfs_runtime_ptr[dim_idx]
+                twfs_runtime_ptr[unsafe_offset=dim_idx]
                 .value()
                 .unsafe_ptr()
-                .bitcast[Scalar[out_dtype]]()
+                .unsafe_bitcast[Scalar[out_dtype]]()
                 .mut_cast[False]()
-                .unsafe_origin_cast[ImmutExternalOrigin](),
+                .unsafe_origin_cast[ImmUntrackedOrigin](),
                 twfs_layout,
             )
 
-        comptime fft_stages = _num_stages_end_of[bases, dims, dim_idx + 1]()
-        comptime prev_stages = fft_stages + (start_dim_idx - dim_idx)
-        comptime run_butterfly = ordered_bases[0] < plan.max_butterfly_base
+        comptime stage_plan = _Fft1dStagePlan[
+            schedule, dim_idx, inverse, x_complex_in, _FftCpuStagePath
+        ]()
+        comptime run_butterfly = (
+            Int(stage_plan.ordered_bases[0]) < plan.max_butterfly_base
+        )
+        var pipeline = _FftStockhamPipeline[
+            out_dtype,
+            type_of(shared_f_lhs),
+            type_of(shared_f_rhs),
+            _fft_noop_sync,
+        ](shared_f_lhs, shared_f_rhs)
+        var payload = pipeline.stage_payload(x_in)
 
-        comptime for b in range(len(ordered_bases)):
-            comptime base = ordered_bases[b]
-            comptime processed = processed_list[b]
-            comptime do_rfft = x_complex_in == 1 and (
-                dim_idx == start_dim_idx
-            ) and b == 0
-            comptime s = prev_stages + b
-            comptime write_lhs = (total_stages - (s + 1)) % 2 == 0
-            comptime x_out_layout = row_major[Int(base), 2]()
-
+        @parameter
+        def _run_stage[stage_b: Int]():
+            comptime stage_exec = _Fft1dStageExec[stage_plan, stage_b]()
+            comptime stage = _FftStageRouteParams[stage_exec]()
             comptime if run_butterfly and length <= plan.max_stack_seq_len:
-                comptime func = _radix_n_fft_kernel_butterfly_comptime[
-                    ...,
-                    do_rfft=do_rfft,
-                    base=base,
-                    length=length,
-                    processed=processed,
-                    inverse=inverse,
-                    ordered_bases=ordered_bases,
-                    run_inplace=False,
-                ]
-
-                comptime for local_i in range(length // base):
-                    var x_out = stack_allocation[out_dtype](x_out_layout)
-                    comptime if b == 0 and dim_idx == start_dim_idx:
-                        comptime if write_lhs:
-                            func[local_i=local_i](shared_f_lhs, x_in, x_out)
-                        else:
-                            func[local_i=local_i](shared_f_rhs, x_in, x_out)
-                    else:
-                        comptime if write_lhs:
-                            func[local_i=local_i](
-                                shared_f_lhs, shared_f_rhs, x_out
-                            )
-                        else:
-                            func[local_i=local_i](
-                                shared_f_rhs, shared_f_lhs, x_out
-                            )
+                stage.run_butterfly_comptime(payload)
             elif run_butterfly:
-                comptime iters = length // base
-                comptime num_blocks = iters // processed
-
-                @always_inline
-                @parameter
-                def run_phase[phase: Optional[UInt]](runtime_phase: UInt):
-                    comptime func = _radix_n_fft_kernel_butterfly[
-                        ...,
-                        do_rfft=do_rfft,
-                        base=base,
-                        length=length,
-                        processed=processed,
-                        inverse=inverse,
-                        ordered_bases=ordered_bases,
-                        inline_twfs=length <= plan.max_stack_seq_len,
-                        runtime_twfs=False,
-                        run_inplace=False,
-                        phase=phase,
-                    ]
-
-                    @always_inline
-                    def _run_butterfly[width: Int](local_i: Int) {read}:
-                        var x_out = stack_allocation[out_dtype](x_out_layout)
-                        var idx = UInt(local_i) * processed + runtime_phase
-                        comptime if b == 0 and dim_idx == start_dim_idx:
-                            comptime if write_lhs:
-                                func(shared_f_lhs, x_in, idx, twfs, x_out)
-                            else:
-                                func(shared_f_rhs, x_in, idx, twfs, x_out)
-                        else:
-                            comptime if write_lhs:
-                                func(
-                                    shared_f_lhs, shared_f_rhs, idx, twfs, x_out
-                                )
-                            else:
-                                func(
-                                    shared_f_rhs, shared_f_lhs, idx, twfs, x_out
-                                )
-
-                    # TODO: replace with unroll once we have it again
-                    comptime width = simd_width_of[out_dtype]() // 2
-                    vectorize[1, unroll_factor=width](
-                        Int(num_blocks), _run_butterfly
-                    )
-
-                comptime full_unroll = min(processed, plan.max_stack_seq_len)
-                comptime for phase in range(full_unroll):
-                    run_phase[phase](phase)
-                for phase in range(full_unroll, processed):
-                    run_phase[None](phase)
+                stage.run_butterfly_stage[plan.max_stack_seq_len](payload, twfs)
             elif length <= plan.max_stack_seq_len:
-                comptime func = _radix_n_fft_kernel_elem_per_thread_comptime[
-                    ...,
-                    do_rfft=do_rfft,
-                    base=base,
-                    length=length,
-                    processed=processed,
-                    inverse=inverse,
-                    ordered_bases=ordered_bases,
-                ]
-
-                comptime for local_i in range(length):
-                    comptime if b == 0 and dim_idx == start_dim_idx:
-                        comptime if write_lhs:
-                            func[local_i=local_i](shared_f_lhs, x_in)
-                        else:
-                            func[local_i=local_i](shared_f_rhs, x_in)
-                    else:
-                        comptime if write_lhs:
-                            func[local_i=local_i](shared_f_lhs, shared_f_rhs)
-                        else:
-                            func[local_i=local_i](shared_f_rhs, shared_f_lhs)
+                stage.run_elem_comptime(payload)
             else:
+                stage.run_elem_per_thread(payload, twfs)
 
-                @always_inline
-                def _run_elem[width: Int](local_i: Int) {read}:
-                    comptime func = _radix_n_fft_kernel_elem_per_thread[
-                        ...,
-                        do_rfft=do_rfft,
-                        base=base,
-                        length=length,
-                        processed=processed,
-                        inverse=inverse,
-                        ordered_bases=ordered_bases,
-                        inline_twfs=length <= plan.max_stack_seq_len,
-                        runtime_twfs=False,
-                    ]
+        stage_plan.run[_run_stage]()
 
-                    var idx = UInt(local_i)
-                    comptime if b == 0 and dim_idx == start_dim_idx:
-                        comptime if write_lhs:
-                            func(shared_f_lhs, x_in, idx, twfs)
-                        else:
-                            func(shared_f_rhs, x_in, idx, twfs)
-                    else:
-                        comptime if write_lhs:
-                            func(shared_f_lhs, shared_f_rhs, idx, twfs)
-                        else:
-                            func(shared_f_rhs, shared_f_lhs, idx, twfs)
-
-                # TODO: replace with unroll once we have it again
-                comptime width = max(simd_width_of[out_dtype](), Int(base))
-                vectorize[1, unroll_factor=width](Int(length), _run_elem)
-
-    # NOTE: extract the unsafe pointer to avoid the arcpointer refcount
+    # NOTE: extract the pointer to avoid the arcpointer refcount.
     var calc_buf_ptr = (
         plan.calc_buf[]
         .unsafe_ptr()
         .unsafe_mut_cast[True]()
-        .bitcast[Scalar[out_dtype]]()
+        .unsafe_bitcast[Scalar[out_dtype]]()
     )
     comptime o_layout = _tail_tile_layout[out_layout_type]()
     comptime x_tail_layout = _tail_tile_layout[in_layout_type]()
@@ -392,34 +185,41 @@ def _run_cpu_nd_fft[
     @always_inline
     @parameter
     def _run_batch(block_num: Int):
-        var block_offset = batch_stride * block_num
+        var block_offset = geo.batch_stride * block_num
         var base_out = TileTensor(output.ptr + block_offset, o_layout)
-        var base_calc = TileTensor(calc_buf_ptr + block_offset, o_layout)
+        var base_calc = TileTensor(
+            UnsafePointer(
+                calc_buf_ptr.unsafe_offset(block_offset)
+            ).unsafe_mut_cast[True](),
+            o_layout,
+        )
         var base_x = TileTensor(
             x.ptr + in_batch_stride * block_num, x_tail_layout
         )
 
-        comptime if amnt_dims == 1:
-            _run_1d_fft[start_dim_idx](base_out, base_calc, base_x)
-        else:
-            comptime for idx in reversed(range(amnt_dims)):
-                comptime dim = Int(dims.static_shape[idx])
-                comptime batch_prod = UInt(prod // dim)
+        @always_inline
+        @parameter
+        def _run_transpose[dim_idx: Int, *, forward: Bool]():
+            comptime from_ = dim_idx + Int(not forward)
+            comptime into_ = dim_idx + Int(forward)
+            comptime write_lhs = schedule.write_lhs_for_transpose[
+                dim_idx, forward=forward
+            ]
+            comptime tp = _transpose_cpu[from_=from_, into_=into_]
+            comptime if write_lhs:
+                tp(base_out, base_calc, Int(per_batch_workers))
+            else:
+                tp(base_calc, base_out, Int(per_batch_workers))
 
-                comptime if idx != start_dim_idx:
-                    comptime fft_stages = _num_stages_end_of[
-                        bases, dims, idx + 1
-                    ]()
-                    comptime s = fft_stages + (start_dim_idx - (idx + 1))
-                    comptime write_lhs = (total_stages - (s + 1)) % 2 == 0
-                    comptime if write_lhs:
-                        _transpose[from_=idx + 1, into_=idx](
-                            base_out, base_calc, Int(per_batch_workers)
-                        )
-                    else:
-                        _transpose[from_=idx + 1, into_=idx](
-                            base_calc, base_out, Int(per_batch_workers)
-                        )
+        comptime if geo.amnt_dims == 1:
+            _run_1d_fft[geo.start_dim_idx](base_out, base_calc, base_x)
+        else:
+            comptime for idx in reversed(range(geo.amnt_dims)):
+                comptime dim = Int(geo.dims.static_shape[idx])
+                comptime batch_prod = UInt(geo.prod // dim)
+
+                comptime if idx != geo.start_dim_idx:
+                    _run_transpose[idx, forward=False]()
 
                 comptime dim_x_layout = row_major[dim, x_complex_in]()
                 comptime x_offset = dim * x_complex_in
@@ -444,17 +244,7 @@ def _run_cpu_nd_fft[
                     Int(batch_prod), Int(per_batch_workers)
                 )
 
-            comptime fft_stages = _num_stages_end_of[bases, dims, 0]()
-            comptime for idx in range(amnt_dims - 1):
-                comptime s = fft_stages + start_dim_idx + idx
-                comptime write_lhs = (total_stages - (s + 1)) % 2 == 0
-                comptime if write_lhs:
-                    _transpose[from_=idx, into_=idx + 1](
-                        base_out, base_calc, Int(per_batch_workers)
-                    )
-                else:
-                    _transpose[from_=idx, into_=idx + 1](
-                        base_calc, base_out, Int(per_batch_workers)
-                    )
+            comptime for idx in range(geo.amnt_dims - 1):
+                _run_transpose[idx, forward=True]()
 
-    parallelize[func=_run_batch](Int(batches), Int(parallel_batches))
+    parallelize[func=_run_batch](Int(geo.outer_batches), Int(parallel_batches))

@@ -133,23 +133,11 @@ def _div_by(x: UInt, base: UInt) -> UInt:
 
 def _times_divisible_by(length: UInt, base: UInt, out amnt_divisible: UInt):
     debug_assert(base != 1, "The number 1 can infinitely divide any number")
-    if UInt64(base).is_power_of_two():
-        # FIXME(#5003): this should work
-        # amnt_divisible = UInt(
-        #     count_trailing_zeros(Scalar[DType.uint](length))
-        #     // log2(Float64(base)).cast[DType.uint]()
-        # )
-
-        comptime if is_64bit():
-            amnt_divisible = UInt(
-                count_trailing_zeros(UInt64(length))
-                // log2(Float64(base)).cast[DType.uint64]()
-            )
-        else:
-            amnt_divisible = UInt(
-                count_trailing_zeros(UInt32(length))
-                // log2(Float64(base)).cast[DType.uint32]()
-            )
+    if base.is_power_of_two():
+        amnt_divisible = UInt(
+            count_trailing_zeros(Scalar[DType.uint](length))
+            // log2(Float64(base)).cast[DType.uint]()
+        )
     else:
         amnt_divisible = _div_by(length, base)
 
@@ -390,6 +378,7 @@ def _unit_phasor_fma[
         }
 
 
+@always_inline
 def _false[a: Int]() -> Bool:
     return False
 
@@ -422,7 +411,9 @@ comptime _tail_tile_layout[L: TensorLayout] = RowMajorLayout[
 ]
 
 
-def _calc_batches_M_N[dims: TensorLayout, into_: Int, from_: Int]() -> Tuple[UInt, UInt, UInt]:
+def _calc_batches_M_N[
+    dims: TensorLayout, into_: Int, from_: Int
+]() -> Tuple[UInt, UInt, UInt]:
     """Transpose batch geometry from spatial ``dims`` layout."""
     comptime target_idx = min(into_, from_)
     comptime is_forward = into_ < from_

@@ -1,10 +1,8 @@
-from std.complex import ComplexSIMD
 from std.benchmark import (
     Bench,
     BenchConfig,
     Bencher,
     BenchId,
-    keep,
     ThroughputMeasure,
     BenchMetric,
 )
@@ -12,7 +10,8 @@ from layout import RowMajorLayout, TileTensor, IntTuple
 from layout.int_tuple import _IntTupleToCoordLike
 
 from std.gpu.host import DeviceContext
-from std.random import seed, randn, random_ui64
+from std.os import abort
+from std.random import seed, randn
 from std.sys.info import size_of
 
 from fft.fft.fft import fft, plan_fft
@@ -51,15 +50,13 @@ def bench_gpu_radix_n_rfft[
         ctx.synchronize()
 
         @always_inline
-        @parameter
-        def call_fn(ctx: DeviceContext) raises:
+        def call_fn(
+            ctx: DeviceContext,
+        ) raises {mut out_tensor, imm x_tensor, imm plan,}:
             fft(out_tensor, x_tensor, ctx, plan=plan)
             ctx.synchronize()
 
-        b.iter_custom[call_fn](ctx)
-        _ = plan
-        _ = out_tensor
-        _ = x_tensor
+        b.iter_custom(call_fn, ctx)
 
 
 @parameter
@@ -79,27 +76,35 @@ def bench_cpu_radix_n_rfft[
     comptime in_size = in_layout.static_cosize
     comptime out_size = out_layout.static_cosize
 
-    var out = List[Scalar[out_dtype]](capacity=out_size)
-    var x = List[Scalar[in_dtype]](capacity=in_size)
+    var out = List[Scalar[out_dtype]](unsafe_uninit_length=out_size)
+    var x = List[Scalar[in_dtype]](unsafe_uninit_length=in_size)
     randn(x.unsafe_ptr(), in_size)
 
-    var out_tensor = TileTensor(ptr=out.unsafe_ptr(), layout=out_layout)
-    var x_tensor = TileTensor(ptr=x.unsafe_ptr(), layout=in_layout)
+    var out_tensor = TileTensor(Span(out), layout=out_layout)
+    var x_tensor = TileTensor(Span(x), layout=in_layout)
 
     var plan = plan_fft[
         in_dtype, out_dtype, type_of(in_layout), type_of(out_layout)
     ](cpu_workers=cpu_workers)
 
+    # Value-taking `Bencher.iter` is non-raising; abort on FFT errors.
     @always_inline
-    @parameter
-    def call_fn() raises:
-        fft(out_tensor, x_tensor, plan=plan, cpu_workers=cpu_workers)
+    def call_fn() {
+        mut out_tensor,
+        imm x_tensor,
+        imm plan,
+    }:
+        try:
+            fft(
+                out_tensor,
+                x_tensor.as_immut(),
+                plan=plan,
+                cpu_workers=cpu_workers,
+            )
+        except e:
+            abort(String(e))
 
-    b.iter[call_fn]()
-
-    _ = plan
-    _ = out_tensor
-    _ = x_tensor
+    b.iter(call_fn)
 
 
 def main() raises:
@@ -127,10 +132,10 @@ def main() raises:
         # {1, 25, 160, 160, 48},
     ]
 
-    comptime for shape in shapes:
-        m.bench_function[bench_gpu_radix_n_rfft[DType.float32, shape]](
-            BenchId(String("bench_gpu_radix_n_rfft[", shape, "]"))
-        )
+    # comptime for shape in shapes:
+    #     m.bench_function[bench_gpu_radix_n_rfft[DType.float32, shape]](
+    #         BenchId(String("bench_gpu_radix_n_rfft[", shape, "]"))
+    #     )
 
     comptime for shape in shapes:
         m.bench_function[
