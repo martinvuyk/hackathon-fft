@@ -117,7 +117,7 @@ def _get_twiddle_factors[
 
 def _get_twiddle_factors_inline[
     length: UInt, dtype: DType, inverse: Bool = False
-](out res: InlineArray[ComplexScalar[dtype], Int(length)]):
+](out res: Array[ComplexScalar[dtype], Int(length)]):
     """Get all the twiddle factors for the length."""
     res = {uninitialized = True}
     for n in range(length):
@@ -142,14 +142,12 @@ def _times_divisible_by(length: UInt, base: UInt, out amnt_divisible: UInt):
         amnt_divisible = _div_by(length, base)
 
 
-@parameter
 def _reduce_mul(b: List[UInt], out res: UInt):
     res = UInt(1)
     for base in b:
         res *= base
 
 
-@parameter
 def _build_ordered_bases[length: UInt, bases: List[UInt]]() -> List[UInt]:
     var existing_bases = materialize[bases]()
     sort(existing_bases)  # FIXME: this should just be ascending=False
@@ -181,7 +179,6 @@ def _get_ordered_bases_processed_list[
     )
     comptime ordered_bases = _build_ordered_bases[length, bases]()
 
-    @parameter
     def _build_processed_list() -> List[UInt]:
         var ordered_bases_var = materialize[ordered_bases]()
         var processed_list = List[UInt](capacity=len(ordered_bases_var))
@@ -266,13 +263,20 @@ def _product_of_dims[dims: TensorLayout]() -> Int:
     return prod
 
 
+@always_inline
+def _axis_is_excluded[excluded: IntTuple, i: Int]() -> Bool:
+    comptime for j in range(len(excluded)):
+        comptime if i == excluded[j].value():
+            return True
+    return False
+
+
 # NOTE: currently unused, but needed for future inplace variant
 def _get_cascade_idxes[
     shape: IntTuple, excluded: IntTuple
 ](var flat_idx: Int, out idxes: IndexList[len(shape) - len(excluded)]):
     idxes = {fill = 0}
 
-    @parameter
     def _idxes_i(i: Int, out amnt: Int):
         amnt = i
 
@@ -280,15 +284,8 @@ def _get_cascade_idxes[
             comptime val = excluded[j].value()
             amnt -= Int(i > val)
 
-    @parameter
-    def _is_excluded[i: Int]() -> Bool:
-        comptime for j in range(len(excluded)):
-            comptime if i == excluded[j].value():
-                return True
-        return False
-
     comptime for i in range(len(shape)):
-        comptime if _is_excluded[i]():
+        comptime if _axis_is_excluded[excluded, i]():
             continue
         comptime curr_num = UInt(shape[i].value())
         comptime idxes_i = _idxes_i(i)
@@ -355,7 +352,7 @@ def _unit_phasor_fma[
 @always_inline
 def _unit_phasor_fma[
     twf: ComplexSIMD, accum_is_real: Bool
-](x_j: SIMD[twf.dtype, twf.size], acc: type_of(twf)) -> type_of(twf):
+](x_j: SIMD[twf.dtype, twf.length], acc: type_of(twf)) -> type_of(twf):
     comptime if abs(twf.re - 1) < EPSILON:  # Co(1, 0)
         return {acc.re + x_j, acc.im}
     elif abs(twf.im - (-1)) < EPSILON and accum_is_real:  # Co(0, -1)

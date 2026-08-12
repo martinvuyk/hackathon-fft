@@ -2,7 +2,8 @@
 
 from std.math import ceildiv
 from layout import TileTensor, TensorLayout
-from std.gpu import barrier, cluster_arrive_relaxed, cluster_wait
+from max.gpu.sync import barrier
+from max.gpu import cluster_arrive_relaxed, cluster_wait
 
 from ._utils import (
     _calc_batches_M_N,
@@ -165,11 +166,6 @@ struct _Fft1dStagePlan[
         Self.runtime_twfs,
         False,
     ]
-
-    @parameter
-    def run[stage_fn: def[stage_b: Int]() capturing[_] -> None](self: Self):
-        comptime for b in range(Self.stage_count):
-            stage_fn[b]()
 
 
 @fieldwise_init

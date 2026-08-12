@@ -460,14 +460,15 @@ def _run_butterfly_stage_for_route[
     comptime num_blocks = iters // Int(exec.config.processed)
     comptime full_unroll = min(Int(exec.config.processed), max_stack_seq_len)
 
-    @always_inline
-    @parameter
-    def run_phase[phase: Optional[UInt]](runtime_phase: UInt):
+    comptime width = simd_width_of[R.out_dtype]() // 2
+    comptime for phase in range(full_unroll):
         @always_inline
-        def _run_butterfly[width: Int](local_i: Int) {imm}:
+        def _run_butterfly_ct[w: Int](local_i: Int) {mut route, imm twfs}:
             var x_out = stack_allocation[R.out_dtype](x_out_layout)
-            var idx = UInt(local_i) * exec.config.processed + runtime_phase
-            _radix_n_fft_kernel_butterfly[R.out_dtype, exec.config, phase](
+            var idx = UInt(local_i) * exec.config.processed + UInt(phase)
+            _radix_n_fft_kernel_butterfly[
+                R.out_dtype, exec.config, UInt(phase)
+            ](
                 route.write_buffer(),
                 route.read_buffer(),
                 idx,
@@ -475,13 +476,22 @@ def _run_butterfly_stage_for_route[
                 x_out,
             )
 
-        comptime width = simd_width_of[R.out_dtype]() // 2
-        vectorize[1, unroll_factor=width](Int(num_blocks), _run_butterfly)
+        vectorize[1, unroll_factor=width](Int(num_blocks), _run_butterfly_ct)
 
-    comptime for phase in range(full_unroll):
-        run_phase[UInt(phase)](UInt(phase))
     for phase in range(full_unroll, Int(exec.config.processed)):
-        run_phase[None](UInt(phase))
+        @always_inline
+        def _run_butterfly_rt[w: Int](local_i: Int) {mut route, imm twfs, imm phase}:
+            var x_out = stack_allocation[R.out_dtype](x_out_layout)
+            var idx = UInt(local_i) * exec.config.processed + UInt(phase)
+            _radix_n_fft_kernel_butterfly[R.out_dtype, exec.config, None](
+                route.write_buffer(),
+                route.read_buffer(),
+                idx,
+                twfs,
+                x_out,
+            )
+
+        vectorize[1, unroll_factor=width](Int(num_blocks), _run_butterfly_rt)
 
 
 @always_inline

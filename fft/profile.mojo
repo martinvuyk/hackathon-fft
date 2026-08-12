@@ -1,7 +1,7 @@
 from std.complex import ComplexSIMD
 from std.benchmark import Bench, BenchConfig, Bencher, BenchId, keep
 from layout import TileTensor, row_major
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from std.random import seed
 
 from fft._test_values import _get_test_values_128
@@ -9,7 +9,6 @@ from fft.tests import _TestValues
 from fft.fft.fft import fft, plan_fft
 
 
-@parameter
 def profile_intra_block_radix_n[
     dtype: DType, test_values: _TestValues[dtype]
 ](mut b: Bencher) raises:
@@ -52,12 +51,13 @@ def profile_intra_block_radix_n[
         ctx.synchronize()
 
         @always_inline
-        @parameter
-        def call_fn(ctx: DeviceContext) raises:
+        def call_fn(
+            ctx: DeviceContext,
+        ) raises {mut out_tensor, imm x_tensor, imm plan,}:
             fft(out_tensor, x_tensor, ctx, plan=plan)
             ctx.synchronize()
 
-        b.iter_custom[call_fn](ctx)
+        b.iter_custom(call_fn, ctx)
 
         _ = out_tensor
         _ = x_tensor

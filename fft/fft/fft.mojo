@@ -1,4 +1,4 @@
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from std.gpu.host.info import is_cpu
 from layout import TileTensor, TensorLayout, row_major
 from std.math import ceil, log2
@@ -83,7 +83,7 @@ def _estimate_best_bases[
                 return potential_bases^
 
     # fmt: off
-    var lower_primes: InlineArray[Byte, 25] = [
+    var lower_primes: Array[Byte, 25] = [
         97, 89, 83, 79, 73, 71, 67, 61, 59, 53, 47, 43, 41, 37, 31, 29, 23, 19,
         17, 13, 11, 7, 5, 3, 2
     ]

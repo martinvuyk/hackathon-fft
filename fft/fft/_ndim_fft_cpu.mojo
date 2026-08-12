@@ -1,4 +1,4 @@
-from std.algorithm import parallelize
+from max.algorithm import parallelize
 from std.complex import ComplexScalar
 from layout import TileTensor, TensorLayout, row_major, stack_allocation
 from std.runtime.asyncrt import parallelism_level
@@ -85,7 +85,6 @@ def _run_cpu_nd_fft[
     # NOTE: extract the unsafe pointer to avoid the arcpointer refcount
     var twfs_runtime_ptr = plan.twiddle_factors[].unsafe_ptr()
 
-    @parameter
     def _find_max_batch_prod(out max_batch_prod: UInt):
         max_batch_prod = 0
 
@@ -116,7 +115,7 @@ def _run_cpu_nd_fft[
     ]()
 
     @always_inline
-    @parameter
+    @__parameter
     def _run_1d_fft[
         dtype_in: DType, //, dim_idx: Int
     ](
@@ -157,8 +156,7 @@ def _run_cpu_nd_fft[
         ](shared_f_lhs, shared_f_rhs)
         var payload = pipeline.stage_payload(x_in)
 
-        @parameter
-        def _run_stage[stage_b: Int]():
+        comptime for stage_b in range(stage_plan.stage_count):
             comptime stage_exec = _Fft1dStageExec[stage_plan, stage_b]()
             comptime stage = _FftStageRouteParams[stage_exec]()
             comptime if run_butterfly and length <= plan.max_stack_seq_len:
@@ -169,8 +167,6 @@ def _run_cpu_nd_fft[
                 stage.run_elem_comptime(payload)
             else:
                 stage.run_elem_per_thread(payload, twfs)
-
-        stage_plan.run[_run_stage]()
 
     # NOTE: extract the pointer to avoid the arcpointer refcount.
     var calc_buf_ptr = (
@@ -183,7 +179,7 @@ def _run_cpu_nd_fft[
     comptime x_tail_layout = _tail_tile_layout[in_layout_type]()
 
     @always_inline
-    @parameter
+    @__parameter
     def _run_batch(block_num: Int):
         var block_offset = geo.batch_stride * block_num
         var base_out = TileTensor(output.ptr + block_offset, o_layout)
@@ -198,7 +194,7 @@ def _run_cpu_nd_fft[
         )
 
         @always_inline
-        @parameter
+        @__parameter
         def _run_transpose[dim_idx: Int, *, forward: Bool]():
             comptime from_ = dim_idx + Int(not forward)
             comptime into_ = dim_idx + Int(forward)
@@ -227,7 +223,7 @@ def _run_cpu_nd_fft[
                 comptime out_offset = dim * 2
 
                 @always_inline
-                @parameter
+                @__parameter
                 def _run_dim_batch(flat_idx: Int):
                     var dim_batch_x = TileTensor(
                         base_x.ptr + flat_idx * x_offset, dim_x_layout

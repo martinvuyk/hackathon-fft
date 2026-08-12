@@ -9,7 +9,7 @@ from std.benchmark import (
 from layout import RowMajorLayout, TileTensor, IntTuple
 from layout.int_tuple import _IntTupleToCoordLike
 
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from std.os import abort
 from std.random import seed, randn
 from std.sys.info import size_of
@@ -17,7 +17,6 @@ from std.sys.info import size_of
 from fft.fft.fft import fft, plan_fft
 
 
-@parameter
 def bench_gpu_radix_n_rfft[
     dtype: DType, shape: IntTuple
 ](mut b: Bencher) raises:
@@ -59,7 +58,6 @@ def bench_gpu_radix_n_rfft[
         b.iter_custom(call_fn, ctx)
 
 
-@parameter
 def bench_cpu_radix_n_rfft[
     dtype: DType,
     shape: IntTuple,

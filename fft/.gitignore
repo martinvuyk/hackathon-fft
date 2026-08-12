@@ -5,3 +5,6 @@
 build/*
 *.ll
 scratch/*
+
+# Machine-local NVIDIA unlock from: pixi run enable-nvidia-gpu
+.nvidia-gpu-env

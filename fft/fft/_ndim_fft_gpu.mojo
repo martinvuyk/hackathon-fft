@@ -1,4 +1,4 @@
-from std.algorithm import parallelize, vectorize
+from max.algorithm import parallelize, vectorize
 from std.builtin.globals import global_constant
 from std.complex import ComplexScalar
 from std.collections import Optional, OptionalReg
@@ -7,8 +7,9 @@ from std.gpu import (
     block_idx,
     block_dim,
 )
-from std.gpu.host import DeviceContext, DeviceBuffer, Dim, DeviceFunction
-from std.gpu.host.info import Vendor, is_cpu, GPUInfo
+from max.gpu.host import DeviceContext, DeviceBuffer, Dim, DeviceFunction
+from max.gpu.memory import AddressSpace
+from std.gpu.host.info import is_cpu, GPUInfo
 from layout import (
     TileTensor,
     IntTuple,
@@ -19,7 +20,7 @@ from layout import (
 from std.utils.index import IndexList
 from layout.int_tuple import IntArray
 from std.runtime.asyncrt import parallelism_level
-from std.sys.info import has_accelerator, size_of, simd_width_of
+from std.sys.info import has_accelerator, size_of, simd_width_of, Vendor, _vendor_from_arch
 from std.math import ceildiv
 from std.utils import Variant
 
@@ -113,7 +114,7 @@ struct _GPUExecConfig[
     )
 
     comptime is_sm_90_or_newer = (
-        Self.gpu_info.vendor == Vendor.NVIDIA_GPU
+        _vendor_from_arch[Self.gpu_info.arch_name]() == Vendor.NVIDIA_GPU
         and Self.gpu_info.compute >= 9.0
     )
     comptime can_run_in_block_cluster = Self.num_blocks <= (
@@ -294,50 +295,21 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
         schedule, dim_idx, inverse, x_complex_in, path
     ]()
 
-    @always_inline
-    @parameter
-    def _run_1d_fft(x: TileTensor[mut=False, ...]):
-        var payload = pipeline.stage_payload(x)
-
-        @parameter
-        def _run_stage[stage_b: Int]():
-            comptime stage_exec = _Fft1dStageExec[stage_plan, stage_b]()
-            comptime stage = _FftStageRouteParams[stage_exec]()
-            stage.run_elem_per_thread_once(payload, global_i, twiddle_factors)
-            pipeline.sync_stage()
-
-        stage_plan.run[_run_stage]()
-
-    @always_inline
-    @parameter
-    def _run_ndim_fft(
-        base_out: TileTensor[mut=True, out_dtype, ...],
-        base_calc: TileTensor[mut=True, out_dtype, ...],
-        base_x: TileTensor,
-    ):
-        comptime if not config.use_shared_memory:
-            _run_1d_fft(base_x)
-        else:
-            comptime if stage_plan.input_from_x:
-                _run_1d_fft(base_x)
-            elif stage_plan.write_global_lhs:
-                _run_1d_fft(base_calc)
-            else:
-                _run_1d_fft(base_out)
-
-            var stage = pipeline.stage_payload(base_x.as_immut())
-            var boundary = _FftDimBoundaryPayload[
-                type_of(stage), type_of(base_out), type_of(base_calc)
-            ](stage, base_out, base_calc)
-            boundary.scatter_dim_result[stage_plan](global_i)
-
     comptime batched_iters = max(config.batches // config.batch_size, 1)
     comptime x_stride = Int(config.dim) * x_complex_in
     comptime out_stride = Int(config.dim) * 2
 
     @always_inline
-    @parameter
-    def _run_batch_at(offset: Int):
+    def _run_batch_at(
+        offset: Int,
+    ) {
+        imm x,
+        imm output,
+        imm calc_buf,
+        mut pipeline,
+        imm global_i,
+        imm twiddle_factors,
+    }:
         var base_x = TileTensor(x.ptr + x_stride * offset, base_x_layout)
         var base_out = TileTensor(
             output.ptr + out_stride * offset, base_out_layout
@@ -345,7 +317,35 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
         var base_calc = TileTensor(
             calc_buf.ptr + out_stride * offset, base_out_layout
         )
-        _run_ndim_fft(base_out, base_calc, base_x)
+
+        @always_inline
+        def _run_stages(
+            x_in: TileTensor[mut=False, ...],
+        ) {mut pipeline, imm global_i, imm twiddle_factors,}:
+            var payload = pipeline.stage_payload(x_in)
+            comptime for stage_b in range(stage_plan.stage_count):
+                comptime stage_exec = _Fft1dStageExec[stage_plan, stage_b]()
+                comptime stage = _FftStageRouteParams[stage_exec]()
+                stage.run_elem_per_thread_once(
+                    payload, global_i, twiddle_factors
+                )
+                pipeline.sync_stage()
+
+        comptime if not config.use_shared_memory:
+            _run_stages(base_x)
+        else:
+            comptime if stage_plan.input_from_x:
+                _run_stages(base_x)
+            elif stage_plan.write_global_lhs:
+                _run_stages(base_calc)
+            else:
+                _run_stages(base_out)
+
+            var stage = pipeline.stage_payload(base_x.as_immut())
+            var boundary = _FftDimBoundaryPayload[
+                type_of(stage), type_of(base_out), type_of(base_calc)
+            ](stage, base_out, base_calc)
+            boundary.scatter_dim_result[stage_plan](global_i)
 
     for i in range(batched_iters):
         _run_batch_at(Int(block_num + i * config.batch_size))
@@ -358,6 +358,8 @@ def _intra_something_gpu_fft_kernel_radix_n_multi_dim[
         if block_num < remainder:
             _run_batch_at(Int(full_iters + block_num))
         pipeline.batch_sync()
+
+
 
 
 def _run_gpu_nd_fft[
@@ -398,11 +400,9 @@ def _run_gpu_nd_fft[
         ptr=plan.calc_buf.unsafe_ptr().unsafe_mut_cast[True](),
         layout=output.layout,
     )
-    var output_immut = output.as_immut()
-    var calc_buf_immut = calc_buf.as_immut()
 
     @always_inline
-    @parameter
+    @__parameter
     def _schedule_run[dim_idx: Int]() raises:
         comptime config = plan.config[dim_idx]
 
@@ -461,7 +461,7 @@ def _run_gpu_nd_fft[
         )
 
     @always_inline
-    @parameter
+    @__parameter
     def _schedule_transpose[dim_idx: Int, *, forward: Bool]() raises:
         comptime config = plan.config[dim_idx]
         comptime schedule = _FftStockhamSchedule[
@@ -490,22 +490,22 @@ def _run_gpu_nd_fft[
         comptime if tp.write_lhs:
             comptime func = transpose_gpu[
                 dst_origin=output.origin,
-                src_origin=type_of(calc_buf_immut).origin,
+                src_origin=calc_buf.origin,
             ]
             ctx.enqueue_function[func](
                 output,
-                calc_buf_immut,
+                calc_buf,
                 grid_dim=tp.grid_dim,
                 block_dim=tp.block_dim,
             )
         else:
             comptime func = transpose_gpu[
                 dst_origin=calc_buf.origin,
-                src_origin=type_of(output_immut).origin,
+                src_origin=output.origin,
             ]
             ctx.enqueue_function[func](
                 calc_buf,
-                output_immut,
+                output,
                 grid_dim=tp.grid_dim,
                 block_dim=tp.block_dim,
             )

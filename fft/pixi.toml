@@ -4,7 +4,11 @@ name = "hackathon-fft"
 platforms = ["linux-64"]
 version = "0.1.0"
 
+[activation]
+scripts = ["scripts/nvidia-gpu-activation.sh"]
+
 [tasks]
+enable-nvidia-gpu = "bash scripts/enable-nvidia-gpu.sh"
 tests = "mojo run -D ASSERT=warn tests.mojo"
 package = "mkdir -p build && mojo precompile fft -o build/fft.mojoc"
 # mkdir -p build && mojo build -O3 bench.mojo -o build/bench -I build/ && ./build/bench
@@ -48,5 +52,5 @@ profile-ncu = """mojo build --debug-level=full -o build/profile profile.mojo && 
 """
 
 [dependencies]
-mojo = ">=1.0.0b3.dev2026072606,<2"
-modular = ">=26.5.0.dev2026072606,<27"
+mojo = ">=1.1.0.dev2026081105,<2"
+modular = ">=26.6.0.dev2026081105,<27"

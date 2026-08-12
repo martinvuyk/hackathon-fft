@@ -1,10 +1,11 @@
 """FFT TileIO — transpose between layout dimensions."""
 
-from std.algorithm import parallelize
+from max.algorithm import parallelize
 from std.math import ceildiv
 from std.bit import prev_power_of_two
-from std.gpu import thread_idx, block_idx, block_dim, barrier
-from std.gpu.memory import AddressSpace
+from std.gpu import thread_idx, block_idx, block_dim
+from max.gpu.sync import barrier
+from max.gpu.memory import AddressSpace
 from std.sys.info import simd_width_of
 from std.utils.index import IndexList
 from layout import TileTensor, TensorLayout, row_major, stack_allocation
@@ -46,10 +47,12 @@ def _transpose_cpu[
     )
     comptime mask = _complex_transpose_mask[TILE]()
 
-    @parameter
-    def _transpose_batch(b: Int):
-        var src_base = src.ptr + b * M * N * 2
-        var dst_base = dst.ptr + b * M * N * 2
+    var src_ptr = src.ptr
+    var dst_ptr = dst.ptr
+
+    def _transpose_batch(b: Int) {imm src_ptr, imm dst_ptr}:
+        var src_base = src_ptr + b * M * N * 2
+        var dst_base = dst_ptr + b * M * N * 2
 
         for i in range(0, M, TILE):
             for j in range(0, N, TILE):
@@ -79,8 +82,10 @@ def _transpose_cpu[
                             var val = src_base.load[2]((ii * N + jj) * 2)
                             dst_base.store((jj * M + ii) * 2, val)
 
-    parallelize[_transpose_batch](
-        intra_fft_batches, min(num_workers, intra_fft_batches, TILE)
+    parallelize(
+        _transpose_batch,
+        intra_fft_batches,
+        min(num_workers, intra_fft_batches, TILE),
     )
 
 

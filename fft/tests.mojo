@@ -1,6 +1,6 @@
 from std.builtin.globals import global_constant
 from std.complex import ComplexScalar
-from std.gpu.host import DeviceContext
+from max.gpu.host import DeviceContext
 from std.gpu.host.info import is_cpu
 from layout import TileTensor, row_major
 from std.math import ceil
@@ -70,12 +70,11 @@ def _test_fft_radix_n[
         print(String(b).replace("SIMD[DType.uint, 1](", "").replace(")", ""))
         print("----------------------------")
 
-    @parameter
     def _eval(
         result: TileTensor[out_dtype, ...],
         scalar_in: List[Int],
         complex_out: List[ComplexScalar[out_dtype]],
-    ) raises:
+    ) raises {imm debug}:
         comptime assert result.flat_rank == 2
         if debug:
             print("out: ", end="")
@@ -406,7 +405,7 @@ def test_ifft_1d_gpu(debug: Bool = False) raises:
 
 comptime Co = ComplexScalar[DType.float64]
 
-comptime input_2d: InlineArray[InlineArray[UInt8, 4], 6] = [
+comptime input_2d: Array[Array[UInt8, 4], 6] = [
     [1, 0, 7, 4],
     [1, 7, 2, 1],
     [8, 1, 0, 9],
@@ -415,7 +414,7 @@ comptime input_2d: InlineArray[InlineArray[UInt8, 4], 6] = [
     [7, 5, 3, 7],
 ]
 
-comptime expected_2d: InlineArray[InlineArray[Co, 4], 6] = [
+comptime expected_2d: Array[Array[Co, 4], 6] = [
     [Co(89.0, 0.0), Co(4.0, 7.0), Co(3.0, 0.0), Co(4.0, -7.0)],
     [
         Co(-2.5, 0.866025404),
@@ -455,7 +454,7 @@ def test_2d_cpu[debug: Bool = False]() raises:
 
     comptime out_layout = row_major[1, ROWS, COLS, 2]()
     comptime out_dtype = DType.float64
-    var out_buf = InlineArray[Co, ROWS * COLS](
+    var out_buf = Array[Co, ROWS * COLS](
         fill=Co(nan[out_dtype](), nan[out_dtype]())
     )
     var out = TileTensor(
@@ -595,7 +594,7 @@ def test_2d_gpu(debug: Bool = False) raises:
     # _test_2d_gpu[False, _GPUTest.CLUSTER](debug)
 
 
-comptime input_3d: InlineArray[InlineArray[InlineArray[UInt8, 8], 4], 6] = [
+comptime input_3d: Array[Array[Array[UInt8, 8], 4], 6] = [
     [
         [187, 94, 48, 255, 45, 95, 163, 8],
         [199, 162, 40, 224, 156, 114, 206, 188],
@@ -634,7 +633,7 @@ comptime input_3d: InlineArray[InlineArray[InlineArray[UInt8, 8], 4], 6] = [
     ],
 ]
 
-comptime expected_3d: InlineArray[InlineArray[InlineArray[Co, 8], 4], 6] = [
+comptime expected_3d: Array[Array[Array[Co, 8], 4], 6] = [
     [
         [
             Co(24626.0, 0.0),
@@ -902,7 +901,7 @@ def test_3d_cpu[debug: Bool = False]() raises:
     comptime out_layout = row_major[1, D1, D2, D3, 2]()
     comptime out_dtype = DType.float64
     comptime n = nan[out_dtype]()
-    var out_buf = InlineArray[Co, D1 * D2 * D3](fill=Co(n, n))
+    var out_buf = Array[Co, D1 * D2 * D3](fill=Co(n, n))
     var out = TileTensor(
         ptr=UnsafePointer(to=out_buf[0]).unsafe_bitcast[Float64](),
         layout=out_layout,
