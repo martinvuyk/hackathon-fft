@@ -1,0 +1,5 @@
+# Built comparator binary (rebuild with `make`)
+cufft_benchmark
+*.o
+*.out
+a.out

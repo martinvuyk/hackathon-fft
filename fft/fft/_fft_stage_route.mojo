@@ -15,6 +15,8 @@ from ._fft import (
     _radix_n_fft_kernel_butterfly_comptime,
     _radix_n_fft_kernel_elem_per_thread,
     _radix_n_fft_kernel_elem_per_thread_comptime,
+    _radix_n_fft_kernel_elem_to_reg,
+    _radix_n_stockham_butterfly_reg,
 )
 from ._fft_payload import _FftStockhamPayload
 from ._fft_pipeline import _Fft1dStageExec
@@ -532,6 +534,38 @@ def _run_elem_per_thread_once_for_route[
     )
 
 
+@always_inline
+def _run_stockham_butterfly_once_for_route[
+    R: _FftStageRoute, exec: _Fft1dStageExec
+](payload: R.ConcretePayload, b: UInt, twfs: TileTensor[mut=False, ...],):
+    var route = R(payload)
+    _radix_n_stockham_butterfly_reg[R.out_dtype, exec.config](
+        route.write_buffer(), route.read_buffer(), b, twfs
+    )
+
+
+@always_inline
+def _run_elem_to_reg_for_route[
+    R: _FftStageRoute, exec: _Fft1dStageExec
+](payload: R.ConcretePayload, local_i: UInt, twfs: TileTensor[mut=False, ...],) -> SIMD[
+    R.out_dtype, 2
+]:
+    var route = R(payload)
+    return _radix_n_fft_kernel_elem_to_reg[R.out_dtype, exec.config](
+        route.write_buffer(), route.read_buffer(), local_i, twfs
+    )
+
+
+@always_inline
+def _store_elem_for_route[
+    R: _FftStageRoute, exec: _Fft1dStageExec
+](payload: R.ConcretePayload, local_i: UInt, v: SIMD[R.out_dtype, 2]):
+    var route = R(payload)
+    route.write_buffer().raw_store(
+        Int(local_i) * exec.config.out_complex_stride, v
+    )
+
+
 @fieldwise_init
 struct _FftStageRouteParams[exec: _Fft1dStageExec](TrivialRegisterPassable):
     """Stage runner bound to an exec plan; payload tile types come from the arg.
@@ -596,4 +630,18 @@ struct _FftStageRouteParams[exec: _Fft1dStageExec](TrivialRegisterPassable):
         ]
         _run_elem_per_thread_once_for_route[Route, Self.exec](
             rebind[Route.ConcretePayload](payload), local_i, twfs
+        )
+
+    @always_inline
+    def run_stockham_butterfly_once(
+        self,
+        ref payload: _FftStockhamPayload,
+        b: UInt,
+        twfs: TileTensor[mut=False, ...],
+    ):
+        comptime Route = _FftStageRouteType[
+            Self.is_first, Self.write_lhs, type_of(payload)
+        ]
+        _run_stockham_butterfly_once_for_route[Route, Self.exec](
+            rebind[Route.ConcretePayload](payload), b, twfs
         )

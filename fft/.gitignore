@@ -4,7 +4,15 @@
 *.egg-info
 build/*
 *.ll
+*.mojoc
 scratch/*
 
 # Machine-local NVIDIA unlock from: pixi run enable-nvidia-gpu
 .nvidia-gpu-env
+
+# Profiler / bench dumps (regenerate locally)
+profile_results.*
+*.nsys-rep
+*.ncu-rep
+*.qdstrm
+*.sqlite

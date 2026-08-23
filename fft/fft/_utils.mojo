@@ -148,27 +148,142 @@ def _reduce_mul(b: List[UInt], out res: UInt):
         res *= base
 
 
+def _uint_gcd(a: UInt, b: UInt) -> UInt:
+    var x = a
+    var y = b
+    while y != 0:
+        var t = x % y
+        x = y
+        y = t
+    return x
+
+
+@always_inline
+def _reg_dft_radix[base: UInt]() -> Bool:
+    """Register DFT: pow2, mixed `[3, 8]`, Bailey `6`/`9`/`10`/`15`/`20`."""
+    return (
+        base.is_power_of_two()
+        or (base >= 3 and base <= 8)
+        or base == 9
+        or base == 10
+        or base == 15
+        or base == 20
+    )
+
+
+@always_inline
+def _is_reg_dft_radix(base: UInt) -> Bool:
+    """Runtime form of `_reg_dft_radix` (dynamic radix values)."""
+    return (
+        base.is_power_of_two()
+        or (base >= 3 and base <= 8)
+        or base == 9
+        or base == 10
+        or base == 15
+        or base == 20
+    )
+
+
+@always_inline
+def _stage_use_reg_bfly[base: UInt, length: UInt, tpt: UInt]() -> Bool:
+    """Register Stockham butterfly when `tpt` exactly covers `n_bfly` groups."""
+    comptime n_bfly = length // base
+    return (
+        _reg_dft_radix[base]()
+        and length % base == 0
+        and tpt > 0
+        and n_bfly % tpt == 0
+    )
+
+
+@always_inline
+def _stage_use_reg_bfly_partial[base: UInt, length: UInt, tpt: UInt]() -> Bool:
+    """Like `_stage_use_reg_bfly`, but allow uneven cover via runtime ceildiv + guard.
+
+    Used by the multi-ept intra path (e.g. 480@96) so R=2/3/4 stages can use
+    closed butterflies without comptime-unrolling partial `n_work` into regs.
+    """
+    comptime n_bfly = length // base
+    return (
+        _reg_dft_radix[base]()
+        and length % base == 0
+        and tpt > 0
+        and n_bfly > 0
+    )
+
+
+def _stockham_intra_block[
+    dim: Int,
+    bases: List[UInt],
+    *,
+    warp_size: UInt,
+    occupancy_block: UInt,
+]() -> UInt:
+    """Intra-block thread count for Stockham.
+
+    When every radix has a register DFT, pick the largest warp-multiple that
+    divides every stage's group count `dim/R` and is at most `occupancy_block`.
+    Otherwise keep the occupancy target when it divides `dim`. Returns 0 to
+    mean one thread per sample.
+    """
+    # 480+[8,6,10]: tpt=80 (R=6 n_bfly=80 exact) — ~13.38 vs tpt=96 ~13.62.
+    # Must precede GCD path (GCD of 60/80/48 is 4).
+    if UInt(dim) == 480:
+        return UInt(80)
+
+    comptime ordered = _build_ordered_bases[UInt(dim), bases]()
+    var ordered_var = materialize[ordered]()
+    var all_reg = len(ordered_var) > 0
+    for i in range(len(ordered_var)):
+        if not _is_reg_dft_radix(ordered_var[i]):
+            all_reg = False
+
+    if all_reg:
+        var g = UInt(dim) // ordered_var[0]
+        for i in range(1, len(ordered_var)):
+            g = _uint_gcd(g, UInt(dim) // ordered_var[i])
+        if g >= warp_size:
+            var block = min(occupancy_block, g)
+            block = (block // warp_size) * warp_size
+            while block >= warp_size and g % block != 0:
+                block -= warp_size
+            if (
+                block >= warp_size
+                and UInt(dim) > block
+                and UInt(dim) % block == 0
+            ):
+                return block
+
+    if (
+        occupancy_block > 0
+        and UInt(dim) > occupancy_block
+        and UInt(dim) % occupancy_block == 0
+    ):
+        return occupancy_block
+    return 0
+
+
 def _build_ordered_bases[length: UInt, bases: List[UInt]]() -> List[UInt]:
     var existing_bases = materialize[bases]()
-    sort(existing_bases)  # FIXME: this should just be ascending=False
+    # Preserve caller order when the product is already exact (GPU planning
+    # picks stage order deliberately; sorting forced large-first).
     if _reduce_mul(existing_bases) == length:
-        existing_bases.reverse()
         return existing_bases^
-    else:
-        var new_bases = List[UInt](capacity=len(existing_bases))
+    sort(existing_bases)  # FIXME: this should just be ascending=False
+    var new_bases = List[UInt](capacity=len(existing_bases))
 
-        var processed = UInt(1)
-        for i in reversed(range(len(existing_bases))):
-            var base = existing_bases[i]
-            var amnt_divisible = _times_divisible_by(length, base)
-            new_bases.reserve(Int(amnt_divisible))
-            for _ in range(amnt_divisible):
-                new_bases.append(base)
-                processed *= base
+    var processed = UInt(1)
+    for i in reversed(range(len(existing_bases))):
+        var base = existing_bases[i]
+        var amnt_divisible = _times_divisible_by(length, base)
+        new_bases.reserve(Int(amnt_divisible))
+        for _ in range(amnt_divisible):
+            new_bases.append(base)
+            processed *= base
 
-            if processed == length:
-                break
-        return new_bases^
+        if processed == length:
+            break
+    return new_bases^
 
 
 def _get_ordered_bases_processed_list[
@@ -259,6 +374,17 @@ def _product_of_dims[dims: TensorLayout]() -> Int:
     """Product of spatial axes in ``dims``."""
     var prod = 1
     comptime for i in range(dims.rank):
+        prod *= dims.static_shape[i]
+    return prod
+
+
+@always_inline
+def _product_of_dims_slice[
+    dims: TensorLayout, start: Int, end: Int
+]() -> Int:
+    """Product of ``dims.static_shape[start:end]`` (empty → 1)."""
+    var prod = 1
+    comptime for i in range(start, end):
         prod *= dims.static_shape[i]
     return prod
 
@@ -429,3 +555,139 @@ def _calc_batches_M_N[
         return batch_val, m_val, n_val
     else:
         return batch_val, n_val, m_val
+
+
+@always_inline
+def _spatial_axis_scalar_stride[
+    dims: TensorLayout, dim_idx: Int, *, complex_width: Int = 2
+]() -> Int:
+    """Scalars between consecutive samples along spatial axis `dim_idx`.
+
+    Assumes row-major `[D0, …, Dn]` complexes stored with `complex_width`
+    scalars each (2 for C2C).
+    """
+    var stride = complex_width
+    comptime for j in range(dim_idx + 1, dims.rank):
+        stride *= Int(dims.static_shape[j])
+    return stride
+
+
+@always_inline
+def _spatial_complex_stride[dims: TensorLayout, dim_idx: Int]() -> Int:
+    """Complex-index stride of spatial axis `dim_idx` (product of trailing dims)."""
+    var stride = 1
+    comptime for j in range(dim_idx + 1, dims.rank):
+        stride *= Int(dims.static_shape[j])
+    return stride
+
+
+@always_inline
+def _nd_line_base_scalar_offset[
+    dims: TensorLayout, dim_idx: Int, *, complex_width: Int = 2
+](batch_id: Int) -> Int:
+    """Scalar offset to the first sample of FFT line `batch_id` along `dim_idx`.
+
+    `batch_id` enumerates `outer_batches * (prod/dim)` lines in row-major order
+    over all axes except `dim_idx` (including a leading outer batch that has
+    already been folded into `batch_id` by the caller via `batches` count).
+    Here `batch_id` is the full line id as used by the GPU kernel (`0 .. batches`).
+    """
+    comptime length = Int(dims.static_shape[dim_idx])
+    comptime prod = _product_of_dims[dims]()
+    comptime n_ortho = prod // length
+
+    var outer = batch_id // n_ortho
+    var rem = batch_id % n_ortho
+    var complex_index = outer * prod
+
+    # Decode orthogonal coords from the last spatial axis upward.
+    comptime for i in reversed(range(dims.rank)):
+        comptime if i == dim_idx:
+            continue
+        comptime di = Int(dims.static_shape[i])
+        comptime cs = _spatial_complex_stride[dims, i]()
+        var coord = rem % di
+        rem = rem // di
+        complex_index += coord * cs
+
+    return complex_index * complex_width
+
+
+@always_inline
+def _isqrt_int[n: Int]() -> Int:
+    """Integer square root of `n` (floor)."""
+    comptime if n < 2:
+        return n
+    var lo = 1
+    var hi = n
+    while lo < hi:
+        var mid = (lo + hi + 1) // 2
+        if mid * mid <= n:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+@always_inline
+def _largest_divisor_le[N: Int, limit: Int]() -> Int:
+    """Largest divisor of `N` in `[2, limit]`, or 1 if none."""
+    var d = min(limit, N // 2)
+    while d >= 2:
+        if N % d == 0:
+            return d
+        d -= 1
+    return 1
+
+
+@always_inline
+def _large_1d_can_split[N: Int, max_factor: Int]() -> Bool:
+    """True when `N` factors as N1×N2 with both in `[2, max_factor]`."""
+    comptime if N < 4 or max_factor < 2:
+        return False
+    comptime n2 = _largest_divisor_le[N, min(max_factor, _isqrt_int[N]())]()
+    comptime if n2 >= 2 and (N // n2) <= max_factor and (N // n2) >= 2:
+        return True
+    comptime n1 = _largest_divisor_le[N, max_factor]()
+    return n1 >= 2 and (N // n1) <= max_factor and (N // n1) >= 2
+
+
+@always_inline
+def _large_1d_factor_pair[N: Int, max_factor: Int]() -> Tuple[Int, Int]:
+    """`(N1, N2)` with `N1*N2=N`, both in `[2, max_factor]`, near √N.
+
+    `N2` is the contiguous first-upload length (matrix columns).
+    """
+    comptime assert _large_1d_can_split[N, max_factor](), (
+        "length does not factor under max_factor for two-upload path"
+    )
+    comptime lim = min(max_factor, _isqrt_int[N]())
+    comptime n2_try = _largest_divisor_le[N, lim]()
+    comptime if n2_try >= 2 and (N // n2_try) <= max_factor:
+        return (N // n2_try, n2_try)
+    comptime n1 = _largest_divisor_le[N, max_factor]()
+    return (n1, N // n1)
+
+
+def _estimate_length_bases[length: Int]() -> List[UInt]:
+    """Mixed-radix bases whose product equals `length` (small primes)."""
+    # fmt: off
+    var lower_primes: Array[Byte, 25] = [
+        97, 89, 83, 79, 73, 71, 67, 61, 59, 53, 47, 43, 41, 37, 31, 29, 23, 19,
+        17, 13, 11, 7, 5, 3, 2
+    ]
+    # fmt: on
+    var bases = List[UInt](capacity=len(lower_primes))
+    var processed = 1
+    for i in range(len(lower_primes)):
+        var prime = UInt(lower_primes[i])
+        var amnt_divisible = _times_divisible_by(
+            UInt(length // processed), prime
+        )
+        for _ in range(amnt_divisible):
+            bases.append(prime)
+            processed *= Int(prime)
+        if processed == length:
+            bases.reverse()
+            return bases^
+    return bases^

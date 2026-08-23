@@ -2,3 +2,9 @@ kgen.trace.*
 
 .cursor/*
 scratchpad/*
+
+# Local dumps / IR
+*.ll
+*.nsys-rep
+*.ncu-rep
+*.qdstrm

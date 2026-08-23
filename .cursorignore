@@ -1,0 +1,5 @@
+!.cursor/
+*.png
+.pixi/*
+pixi.lock
+LICENSE

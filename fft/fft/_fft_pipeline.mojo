@@ -11,6 +11,7 @@ from ._utils import (
     _get_ordered_bases_processed_list,
     _num_stages_end_of,
     _product_of_dims,
+    _product_of_dims_slice,
 )
 from ._fft import _FFTKernelExecConfig
 from ._fft_payload import _FftStockhamPayload
@@ -69,20 +70,34 @@ struct _FftStockhamSchedule[
     dims: TensorLayout,
     start_dim_idx: Int,
     use_shared_memory: def[Int]() thin -> Bool,
+    *,
+    skip_transpose_stages: Bool = False,
+    skip_forward_transpose_stages: Bool = False,
 ](TrivialRegisterPassable):
     """Global ping-pong stage indexing for FFT, transpose, and scatter routing.
+
+    `skip_transpose_stages`: omit all transpose slots (column ND schedules).
+    `skip_forward_transpose_stages`: keep back-Ts; forward chain replaced by restore.
     """
+
+    comptime transpose_stage_count = (
+        0 if Self.skip_transpose_stages else (
+            Self.start_dim_idx if Self.skip_forward_transpose_stages else (
+                2 * Self.start_dim_idx
+            )
+        )
+    )
 
     comptime total_stages = _num_stages_end_of[
         Self.bases, Self.dims, 0, Self.use_shared_memory
-    ]() + 2 * Self.start_dim_idx
+    ]() + Self.transpose_stage_count
 
     comptime stages_end_of[dim_idx: Int] = _num_stages_end_of[
         Self.bases, Self.dims, dim_idx, Self.use_shared_memory
     ]()
 
     comptime prev_stages[dim_idx: Int] = Self.stages_end_of[dim_idx + 1] + (
-        Self.start_dim_idx - dim_idx
+        0 if Self.skip_transpose_stages else (Self.start_dim_idx - dim_idx)
     )
 
     comptime write_lhs_at[stage_idx: Int] = _compute_write_lhs[
@@ -105,8 +120,11 @@ struct _FftStagePathConfig[
     inline_twfs: Bool,
     runtime_twfs: Bool,
     gate_first_on_start_dim: Bool,
+    sm_complex_stride: Int = 2,
+    global_complex_stride: Int = 2,
 ](TrivialRegisterPassable):
-    """Per-path flags: twiddle policy and first-stage `x_in` gating."""
+    """Per-path flags: twiddle policy, first-stage gating, shared/global strides.
+    """
 
     pass
 
@@ -115,6 +133,8 @@ comptime _FftCpuStagePath = _FftStagePathConfig[
     inline_twfs=False,
     runtime_twfs=False,
     gate_first_on_start_dim=True,
+    sm_complex_stride=2,
+    global_complex_stride=2,
 ]()
 
 
@@ -152,7 +172,13 @@ struct _Fft1dStagePlan[
         Self.total_stages, Self.prev_stages + Self.stage_count - 1
     ]()
     comptime input_from_x = Self.dim_idx == Self.start_dim_idx
+    comptime sm_complex_stride = Self.path.sm_complex_stride
+    comptime global_complex_stride = Self.path.global_complex_stride
 
+    # Stage 0 reads global/input with `global_complex_stride` (2 after a layout
+    # transpose; axis stride for in-place column FFT). Later shared stages use
+    # `sm_complex_stride`. Last GPU stage may override `out_complex_stride` to
+    # write global directly.
     comptime kernel_exec_config[stage_b: Int] = _FFTKernelExecConfig[
         Self.length,
         Self.x_complex_in == 1
@@ -165,6 +191,10 @@ struct _Fft1dStagePlan[
         Self.inline_twfs,
         Self.runtime_twfs,
         False,
+        in_complex_stride = (
+            Self.global_complex_stride if stage_b == 0 else Self.sm_complex_stride
+        ),
+        out_complex_stride = Self.sm_complex_stride,
     ]
 
 
@@ -212,6 +242,8 @@ struct _FftDimBoundaryPayload[
             Self.stage_payload.out_dtype,
             stage_plan.write_global_lhs,
             stage_plan.last_write_lhs,
+            sm_complex_stride = stage_plan.sm_complex_stride,
+            global_complex_stride = stage_plan.global_complex_stride,
         ](
             global_i,
             self.stage.lhs,
@@ -243,18 +275,68 @@ struct _FftGpuTransposePlan[
     comptime intra_fft_batches = Self.sizes[0]
     comptime M = Self.sizes[1]
     comptime N = Self.sizes[2]
-    comptime TILE = 32
-    comptime M_ = ceildiv(Self.M, Self.TILE)
-    comptime N_ = ceildiv(Self.N, Self.TILE)
-    comptime num_threads = Self.N_ * Self.M_ * Self.TILE * Self.TILE
+    comptime TILE_X = UInt(32)
+    # Non-square transposes benefit from fewer threads per block while
+    # preserving 32-wide coalesced x-lanes (32x8 => 256 threads, ELEMS=4).
+    comptime TILE_Y = UInt(8) if Self.M != Self.N else UInt(32)
+    # Non-square full-tile: each block owns Y_REP tiles along M (amortize launch).
+    comptime Y_REP = UInt(2) if Self.M != Self.N else UInt(1)
+    comptime M_ = ceildiv(Self.M, Self.TILE_X * Self.Y_REP)
+    comptime N_ = ceildiv(Self.N, Self.TILE_X)
+    comptime num_threads = Self.N_ * Self.M_ * Self.TILE_X * Self.TILE_Y
     comptime extra_fft_batches = UInt(Self.out_layout_type.static_shape[0])
     comptime total_batches = Self.intra_fft_batches * Self.extra_fft_batches
-    comptime thread_batch_size = Self.max_threads_available // Self.num_threads
+    # Launch one batch plane per grid.z entry (up to hardware grid.z limit).
+    # The old fair-share `max_threads_available // num_threads` left only a
+    # handful of planes and forced each block to serialize hundreds of batches
+    # — catastrophic for ND (e.g. 20 blocks × 1280 serial runs on 100×64³).
+    comptime max_grid_z = UInt(65535)
+    # Old fair-share left ~5 planes on 64³ (20 blocks × 1280 serial). Aim for
+    # enough concurrent planes to fill the GPU without maxing grid.z always.
+    comptime fair_batch_wave = max(
+        UInt(1),
+        Self.max_threads_available // max(Self.num_threads, UInt(1)),
+    )
     comptime scheduled_batches = min(
-        Self.total_batches, max(Self.thread_batch_size, UInt(1))
+        Self.total_batches,
+        min(Self.max_grid_z, max(Self.fair_batch_wave * 128, UInt(512))),
     )
     comptime grid_dim = (Self.N_, Self.M_, Self.scheduled_batches)
-    comptime block_dim = (Self.TILE, Self.TILE, 1)
+    comptime block_dim = (Self.TILE_X, Self.TILE_Y, 1)
+
+
+@fieldwise_init
+struct _FftGpuRestorePlan[
+    dims: TensorLayout,
+    out_layout_type: TensorLayout,
+    max_threads_available: UInt,
+](TrivialRegisterPassable):
+    """Launch geometry for reversed→native restore (batches × `(Dlast, D0)` tiles)."""
+
+    comptime D0 = UInt(Self.dims.static_shape[0])
+    comptime Dlast = UInt(Self.dims.static_shape[Self.dims.rank - 1])
+    comptime middle_prod = UInt(
+        _product_of_dims_slice[Self.dims, 1, Self.dims.rank - 1]()
+    )
+    comptime TILE_X = UInt(32)
+    comptime TILE_Y = UInt(8) if Self.D0 != Self.Dlast else UInt(32)
+    comptime Y_REP = UInt(2) if Self.D0 != Self.Dlast else UInt(1)
+    comptime M_ = ceildiv(Self.Dlast, Self.TILE_X * Self.Y_REP)
+    comptime N_ = ceildiv(Self.D0, Self.TILE_X)
+    comptime num_threads = Self.M_ * Self.N_ * Self.TILE_X * Self.TILE_Y
+    comptime extra_fft_batches = UInt(Self.out_layout_type.static_shape[0])
+    comptime total_batches = Self.extra_fft_batches * Self.middle_prod
+    comptime max_grid_z = UInt(65535)
+    comptime fair_batch_wave = max(
+        UInt(1),
+        Self.max_threads_available // max(Self.num_threads, UInt(1)),
+    )
+    comptime scheduled_batches = min(
+        Self.total_batches,
+        min(Self.max_grid_z, max(Self.fair_batch_wave * 128, UInt(512))),
+    )
+    comptime grid_dim = (Self.N_, Self.M_, Self.scheduled_batches)
+    comptime block_dim = (Self.TILE_X, Self.TILE_Y, 1)
 
 
 @fieldwise_init

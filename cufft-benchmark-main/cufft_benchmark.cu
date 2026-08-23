@@ -82,28 +82,30 @@ void run_benchmark(const FFTShape& shape, FFTType type) {
     std::chrono::duration<double, std::milli> plan_duration = plan_end - plan_start;
 
     // --- 2. Warm-up ---
-    for(int i = 0; i < 3; ++i) {
+    // Match scratchpad/02-benchmarking-protocol.md (GPU comparator).
+    const int warmup_iters = 10;
+    for(int i = 0; i < warmup_iters; ++i) {
         if (type == R2C) cufftExecR2C(plan, (float*)d_input, (cufftComplex*)d_output);
         else cufftExecC2C(plan, (cufftComplex*)d_input, (cufftComplex*)d_output, CUFFT_FORWARD);
     }
     cudaDeviceSynchronize();
 
     // --- 3. Execution Timing ---
+    // Timed iters: enough for stable ms/iter on GTX 1060-class GPUs.
+    const int iterations = 50;
     auto start = std::chrono::steady_clock::now();
-    const int iterations = 1;
-    std::vector<double> samples;
     for (int i = 0; i < iterations; i++) {
-
         if (type == R2C) cufftExecR2C(plan, (float*)d_input, (cufftComplex*)d_output);
         else cufftExecC2C(plan, (cufftComplex*)d_input, (cufftComplex*)d_output, CUFFT_FORWARD);    
     }
     CHECK_CUDA(cudaDeviceSynchronize());
     auto end = std::chrono::steady_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(end - start).count();
-    double throughput = (data_movement_bytes / 1e9) / (ms / 1000.0) * iterations;
+    double ms_total = std::chrono::duration<double, std::milli>(end - start).count();
+    double ms = ms_total / iterations;
+    double throughput = (data_movement_bytes / 1e9) / (ms / 1000.0);
 
-    printf("%-5s %-20s | %10.2f ms | %10.3f ms | %10.2f GB/s\n", 
-           type_label.c_str(), shape.name.c_str(), plan_duration.count(), ms, throughput);
+    printf("%-5s %-20s | %10.2f ms | %10.3f ms/iter (%d iters) | %10.2f GB/s\n", 
+           type_label.c_str(), shape.name.c_str(), plan_duration.count(), ms, iterations, throughput);
 
     CHECK_CUFFT(cufftDestroy(plan));
     CHECK_CUDA(cudaFree(d_input));
@@ -128,7 +130,7 @@ int main() {
         // {"1 x 25x160x160x48",     1,      {25, 160, 160, 48}},
     };
 
-    printf("%-26s | %-13s | %-13s | %-13s\n", "Type & Shape", "Plan Time", "Exec Time", "Throughput");
+    printf("%-26s | %-13s | %-28s | %-13s\n", "Type & Shape", "Plan Time", "Exec Time", "Throughput");
     printf("--------------------------------------------------------------------------------------------\n");
 
     for (const auto& s : shapes) {

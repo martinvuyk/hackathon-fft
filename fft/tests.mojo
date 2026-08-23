@@ -1053,16 +1053,222 @@ def test_3d_gpu(debug: Bool = False) raises:
     # _test_3d_gpu[False, _GPUTest.CLUSTER](debug)
 
 
+def test_gpu_1d_1024() raises:
+    """1D N=1024: two samples/thread, one line per block."""
+    comptime N = 1024
+    comptime dtype = DType.float32
+    comptime in_layout = row_major[1, N, 2]()
+    comptime out_layout = in_layout
+    comptime in_size = in_layout.static_cosize
+    comptime out_size = out_layout.static_cosize
+
+    var cpu_x = List[Scalar[dtype]](length=in_size, fill=0)
+    var cpu_out = List[Scalar[dtype]](length=out_size, fill=nan[dtype]())
+    var cpu_x_t = TileTensor(Span(cpu_x), layout=in_layout)
+    var cpu_out_t = TileTensor(Span(cpu_out), layout=out_layout)
+    for i in range(N):
+        cpu_x_t[0, i, 0] = Scalar[dtype](i % 7)
+        cpu_x_t[0, i, 1] = 0
+    var cpu_plan = plan_fft[
+        dtype, dtype, type_of(in_layout), type_of(out_layout)
+    ]()
+    fft(cpu_out_t, cpu_x_t.as_immut(), plan=cpu_plan)
+
+    with DeviceContext() as ctx:
+        var x_data = ctx.enqueue_create_buffer[dtype](in_size)
+        var out_data = ctx.enqueue_create_buffer[dtype](out_size)
+        out_data.enqueue_fill(nan[dtype]())
+        with x_data.map_to_host() as x_host:
+            var x_view = TileTensor(x_host, layout=in_layout)
+            for i in range(N):
+                x_view[0, i, 0] = Scalar[dtype](i % 7)
+                x_view[0, i, 1] = 0
+        ctx.synchronize()
+        var gpu_plan = plan_fft[
+            dtype,
+            dtype,
+            type_of(in_layout),
+            type_of(out_layout),
+            runtime_twfs=True,
+            _test=_GPUTest.BLOCK,
+        ](ctx=ctx)
+        var out = TileTensor(out_data, layout=out_layout)
+        var x = TileTensor(x_data, layout=in_layout)
+        _run_gpu_nd_fft(out, x.as_immut(), ctx, plan=gpu_plan)
+        ctx.synchronize()
+        with out_data.map_to_host() as out_host:
+            var gpu_view = TileTensor(out_host, layout=out_layout)
+            for i in range(N):
+                assert_almost_equal(
+                    gpu_view[0, i, 0],
+                    cpu_out_t[0, i, 0],
+                    atol=ATOL[dtype],
+                    rtol=RTOL,
+                )
+                assert_almost_equal(
+                    gpu_view[0, i, 1],
+                    cpu_out_t[0, i, 1],
+                    atol=ATOL[dtype],
+                    rtol=RTOL,
+                )
+
+
+def test_gpu_1d_2048() raises:
+    """Two-upload path: N=2048 does not fit one thread block."""
+    comptime N = 2048
+    comptime dtype = DType.float32
+    comptime in_layout = row_major[1, N, 2]()
+    comptime out_layout = in_layout
+    comptime in_size = in_layout.static_cosize
+    comptime out_size = out_layout.static_cosize
+
+    var cpu_x = List[Scalar[dtype]](length=in_size, fill=0)
+    var cpu_out = List[Scalar[dtype]](length=out_size, fill=nan[dtype]())
+    var cpu_x_t = TileTensor(Span(cpu_x), layout=in_layout)
+    var cpu_out_t = TileTensor(Span(cpu_out), layout=out_layout)
+    for i in range(N):
+        cpu_x_t[0, i, 0] = Scalar[dtype](i % 7)
+        cpu_x_t[0, i, 1] = 0
+    var cpu_plan = plan_fft[
+        dtype, dtype, type_of(in_layout), type_of(out_layout)
+    ]()
+    fft(cpu_out_t, cpu_x_t.as_immut(), plan=cpu_plan)
+
+    with DeviceContext() as ctx:
+        var x_data = ctx.enqueue_create_buffer[dtype](in_size)
+        var out_data = ctx.enqueue_create_buffer[dtype](out_size)
+        out_data.enqueue_fill(nan[dtype]())
+        with x_data.map_to_host() as x_host:
+            var x_view = TileTensor(x_host, layout=in_layout)
+            for i in range(N):
+                x_view[0, i, 0] = Scalar[dtype](i % 7)
+                x_view[0, i, 1] = 0
+        ctx.synchronize()
+        var gpu_plan = plan_fft[
+            dtype,
+            dtype,
+            type_of(in_layout),
+            type_of(out_layout),
+            runtime_twfs=True,
+            _test=_GPUTest.BLOCK,
+        ](ctx=ctx)
+        var out = TileTensor(out_data, layout=out_layout)
+        var x = TileTensor(x_data, layout=in_layout)
+        _run_gpu_nd_fft(out, x.as_immut(), ctx, plan=gpu_plan)
+        ctx.synchronize()
+        with out_data.map_to_host() as out_host:
+            var gpu_view = TileTensor(out_host, layout=out_layout)
+            for i in range(N):
+                assert_almost_equal(
+                    gpu_view[0, i, 0],
+                    cpu_out_t[0, i, 0],
+                    atol=ATOL[dtype],
+                    rtol=RTOL,
+                )
+                assert_almost_equal(
+                    gpu_view[0, i, 1],
+                    cpu_out_t[0, i, 1],
+                    atol=ATOL[dtype],
+                    rtol=RTOL,
+                )
+
+
+def _test_gpu_2d_vs_cpu[D0: Int, D1: Int]() raises:
+    """GPU ND vs CPU for a 1×D0×D1 C2C (covers mixed-radix 2D SBRC when D0≠D1)."""
+    comptime B = 1
+    comptime dtype = DType.float32
+    comptime in_layout = row_major[B, D0, D1, 2]()
+    comptime out_layout = in_layout
+    comptime in_size = in_layout.static_cosize
+    comptime out_size = out_layout.static_cosize
+    comptime N = D0 * D1
+
+    var cpu_x = List[Scalar[dtype]](length=in_size, fill=0)
+    var cpu_out = List[Scalar[dtype]](length=out_size, fill=nan[dtype]())
+    var cpu_x_t = TileTensor(Span(cpu_x), layout=in_layout)
+    var cpu_out_t = TileTensor(Span(cpu_out), layout=out_layout)
+    for i in range(N):
+        var d0 = i // D1
+        var d1 = i % D1
+        cpu_x_t[0, d0, d1, 0] = Scalar[dtype](i % 7)
+        cpu_x_t[0, d0, d1, 1] = 0
+    var cpu_plan = plan_fft[
+        dtype, dtype, type_of(in_layout), type_of(out_layout)
+    ]()
+    fft(cpu_out_t, cpu_x_t.as_immut(), plan=cpu_plan)
+
+    with DeviceContext() as ctx:
+        var x_data = ctx.enqueue_create_buffer[dtype](in_size)
+        var out_data = ctx.enqueue_create_buffer[dtype](out_size)
+        out_data.enqueue_fill(nan[dtype]())
+        with x_data.map_to_host() as x_host:
+            var x_view = TileTensor(x_host, layout=in_layout)
+            for i in range(N):
+                var d0 = i // D1
+                var d1 = i % D1
+                x_view[0, d0, d1, 0] = Scalar[dtype](i % 7)
+                x_view[0, d0, d1, 1] = 0
+        ctx.synchronize()
+        var gpu_plan = plan_fft[
+            dtype,
+            dtype,
+            type_of(in_layout),
+            type_of(out_layout),
+            runtime_twfs=True,
+            _test=_GPUTest.BLOCK,
+        ](ctx=ctx)
+        var out = TileTensor(out_data, layout=out_layout)
+        var x = TileTensor(x_data, layout=in_layout)
+        _run_gpu_nd_fft(out, x.as_immut(), ctx, plan=gpu_plan)
+        ctx.synchronize()
+        with out_data.map_to_host() as out_host:
+            var gpu_view = TileTensor(out_host, layout=out_layout)
+            for i in range(N):
+                var d0 = i // D1
+                var d1 = i % D1
+                assert_almost_equal(
+                    gpu_view[0, d0, d1, 0],
+                    cpu_out_t[0, d0, d1, 0],
+                    atol=ATOL[dtype],
+                    rtol=RTOL,
+                )
+                assert_almost_equal(
+                    gpu_view[0, d0, d1, 1],
+                    cpu_out_t[0, d0, d1, 1],
+                    atol=ATOL[dtype],
+                    rtol=RTOL,
+                )
+
+
+def test_gpu_2d_64() raises:
+    """64×64 hits the column-tile path (every spatial axis is length 64)."""
+    _test_gpu_2d_vs_cpu[64, 64]()
+
+
+def test_gpu_2d_64x48() raises:
+    """64×48 mixed-radix 2D (RTRT + fused restore)."""
+    _test_gpu_2d_vs_cpu[64, 48]()
+
+
+def test_gpu_2d_32x96() raises:
+    """32×96 hits contig Bailey four-step on the length-96 axis (32×3)."""
+    _test_gpu_2d_vs_cpu[32, 96]()
+
+
 def main() raises:
     test_fft_1d_cpu()
     # test_ifft_1d_cpu()
     test_2d_cpu()
     test_3d_cpu()
 
-    # GPU tests require a known accelerator target; skip when none is present.
     comptime _run_gpu = has_accelerator()
     comptime if _run_gpu:
         test_fft_1d_gpu()
         # test_ifft_1d_gpu()
         test_2d_gpu()
         test_3d_gpu()
+        test_gpu_1d_1024()
+        test_gpu_1d_2048()
+        test_gpu_2d_64()
+        test_gpu_2d_64x48()
+        test_gpu_2d_32x96()
